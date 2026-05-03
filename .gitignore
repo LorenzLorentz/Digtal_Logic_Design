@@ -3,3 +3,4 @@ build/
 example/
 sim/waves
 __pycache__/
+error.log
