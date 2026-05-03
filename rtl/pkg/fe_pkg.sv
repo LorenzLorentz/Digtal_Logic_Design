@@ -129,9 +129,13 @@ package fe_pkg;
     localparam logic [7:0] COL_SPLASH_FG_B  = 8'hF0;
 
     // -----------------------------------------------------------------
-    // Font ROM file path (loaded by fe_glyph_rom via $readmemh)
+    // Font ROM file path
+    // ---
+    // Hard-coded inside fe_glyph_rom.sv via `ifdef SYNTHESIS` because
+    // (a) Vivado's synth subset rejects the SV `string` type, and
+    // (b) Verilator and Vivado have different working directories at
+    //     $readmemh time, so a single literal could never satisfy both.
     // -----------------------------------------------------------------
-    localparam string FONT_HEX = "rtl/frontend/fe_font.hex";
 
 endpackage : fe_pkg
 

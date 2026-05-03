@@ -19,9 +19,7 @@
 `ifndef FE_GLYPH_ROM_SV
 `define FE_GLYPH_ROM_SV
 
-module fe_glyph_rom
-    import fe_pkg::*;
-(
+module fe_glyph_rom (
     input  logic [7:0] code,
     input  logic [3:0] gy,
     output logic [7:0] glyph_row
@@ -29,8 +27,19 @@ module fe_glyph_rom
 
     logic [7:0] mem [4096];
 
+    // The font path differs between toolchains:
+    //   - Vivado synth runs from chat.runs/synth_1/ but searches the
+    //     source file's directory first; fe_font.hex sits beside this
+    //     .sv (in rtl/frontend/, exposed via the chat.srcs/sources_1/
+    //     new symlink) so the bare filename is enough.
+    //   - Verilator tests run with cwd=repo-root, so the path is
+    //     rtl/frontend/fe_font.hex.
     initial begin
-        $readmemh(FONT_HEX, mem);
+`ifdef SYNTHESIS
+        $readmemh("fe_font.hex", mem);
+`else
+        $readmemh("rtl/frontend/fe_font.hex", mem);
+`endif
     end
 
     assign glyph_row = mem[{code, gy}];
