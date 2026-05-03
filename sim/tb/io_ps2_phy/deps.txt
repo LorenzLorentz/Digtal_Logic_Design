@@ -1,0 +1,3 @@
+rtl/pkg/chat_pkg.sv
+rtl/common/sync_2ff.sv
+rtl/io/io_ps2_phy.sv

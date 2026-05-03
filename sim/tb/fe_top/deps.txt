@@ -1,0 +1,10 @@
+# RTL files needed by this testbench, in dependency order.
+rtl/pkg/chat_pkg.sv
+rtl/pkg/fe_pkg.sv
+rtl/common/sync_2ff.sv
+rtl/frontend/fe_text_ram.sv
+rtl/frontend/fe_render_decoder.sv
+rtl/frontend/fe_video_timing.sv
+rtl/frontend/fe_glyph_rom.sv
+rtl/frontend/fe_scan.sv
+rtl/frontend/fe_top.sv

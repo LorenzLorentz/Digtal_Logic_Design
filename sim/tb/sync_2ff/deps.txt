@@ -1,0 +1,1 @@
+rtl/common/sync_2ff.sv

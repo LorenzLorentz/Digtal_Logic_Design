@@ -1,0 +1,5 @@
+rtl/pkg/chat_pkg.sv
+rtl/common/sync_2ff.sv
+rtl/comm/uart_tx.sv
+rtl/comm/uart_rx.sv
+sim/tb/uart_loopback/uart_loopback.sv

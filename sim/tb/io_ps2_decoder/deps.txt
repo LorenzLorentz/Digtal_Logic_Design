@@ -1,0 +1,2 @@
+rtl/pkg/chat_pkg.sv
+rtl/io/io_ps2_decoder.sv

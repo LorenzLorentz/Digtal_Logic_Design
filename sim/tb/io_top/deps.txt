@@ -1,0 +1,6 @@
+rtl/pkg/chat_pkg.sv
+rtl/common/sync_2ff.sv
+rtl/common/handshake_fifo.sv
+rtl/io/io_ps2_phy.sv
+rtl/io/io_ps2_decoder.sv
+rtl/io/io_top.sv

@@ -1,0 +1,2 @@
+rtl/pkg/chat_pkg.sv
+rtl/common/crc16.sv

@@ -1,0 +1,2 @@
+rtl/pkg/chat_pkg.sv
+rtl/comm/comm_tx_fsm.sv

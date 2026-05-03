@@ -1,0 +1,9 @@
+rtl/pkg/chat_pkg.sv
+rtl/common/sync_2ff.sv
+rtl/common/handshake_fifo.sv
+rtl/io/io_ps2_phy.sv
+rtl/io/io_ps2_decoder.sv
+rtl/io/io_top.sv
+rtl/backend/be_message_store.sv
+rtl/backend/be_top.sv
+sim/tb/io_be_integration/io_be_integration.sv

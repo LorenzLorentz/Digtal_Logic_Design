@@ -1,0 +1,14 @@
+rtl/pkg/chat_pkg.sv
+rtl/common/sync_2ff.sv
+rtl/common/handshake_fifo.sv
+rtl/common/crc16.sv
+rtl/comm/uart_tx.sv
+rtl/comm/uart_rx.sv
+rtl/comm/comm_frame_encoder.sv
+rtl/comm/comm_frame_decoder.sv
+rtl/comm/comm_tx_fsm.sv
+rtl/comm/comm_rx_fsm.sv
+rtl/comm/comm_ack_queue.sv
+rtl/comm/comm_tx_arbiter.sv
+rtl/comm/comm_top.sv
+sim/tb/comm_top_lb/comm_top_lb.sv

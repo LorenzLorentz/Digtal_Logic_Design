@@ -1,0 +1,3 @@
+--indentation_spaces=4
+--named_port_indentation=indent
+--named_parameter_indentation=indent
