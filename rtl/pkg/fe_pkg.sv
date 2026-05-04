@@ -63,26 +63,29 @@ package fe_pkg;
     localparam byte_t SPRITE_FAIL    = 8'hF2;
 
     // -----------------------------------------------------------------
-    // Pixel timing  (800x600 @ 72Hz, pixel clock = 50 MHz)
-    //   - matches example/project-template-xilinx/.../video.sv
+    // Pixel timing  (800x600 @ 60Hz, pixel clock = 40 MHz)
+    //   Switched off the 72Hz example mode: many modern monitors don't
+    //   accept 72Hz over HDMI and pop "out of range" even while the
+    //   image briefly shows. 60Hz is in every monitor's EDID.
+    //   ip_pll must be regenerated to output 40 MHz to match.
     // -----------------------------------------------------------------
     localparam int    HWIDTH = 12;
     localparam int    HSIZE  = 800;
-    localparam int    HFP    = 856;
-    localparam int    HSP    = 976;
-    localparam int    HMAX   = 1040;
+    localparam int    HFP    = 840;
+    localparam int    HSP    = 968;
+    localparam int    HMAX   = 1056;
     localparam int    VSIZE  = 600;
-    localparam int    VFP    = 637;
-    localparam int    VSP    = 643;
-    localparam int    VMAX   = 666;
+    localparam int    VFP    = 601;
+    localparam int    VSP    = 605;
+    localparam int    VMAX   = 628;
     localparam logic  HSPP   = 1'b1;       // hsync polarity (active high)
     localparam logic  VSPP   = 1'b1;       // vsync polarity (active high)
 
     // -----------------------------------------------------------------
     // Visual constants
     // -----------------------------------------------------------------
-    // ~2 Hz cursor blink at 72 Hz frame rate -> toggle every 36 frames.
-    localparam int    BLINK_FRAMES = 36;
+    // ~2 Hz cursor blink at 60 Hz frame rate -> toggle every 30 frames.
+    localparam int    BLINK_FRAMES = 30;
 
     // Splash text: SPLASH_COLS chars wide, 2 rows tall, centered.
     localparam int    SPLASH_COLS    = 32;

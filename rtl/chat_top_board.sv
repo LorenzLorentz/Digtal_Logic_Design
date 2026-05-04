@@ -61,7 +61,7 @@ module chat_top_board
 );
 
     // -----------------------------------------------------------------
-    // PLL: 100 MHz (chat / system) -> 50 MHz (pixel for 800x600@72Hz)
+    // PLL: 100 MHz (chat / system) -> 40 MHz (pixel for 800x600@60Hz)
     // -----------------------------------------------------------------
     logic clk_pix;
     logic clk_locked;

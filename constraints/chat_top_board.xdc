@@ -60,10 +60,15 @@ set_property -dict {PACKAGE_PIN H14 IOSTANDARD LVCMOS33} [get_ports ps2_keyboard
 # set_property -dict {PACKAGE_PIN G13 IOSTANDARD LVCMOS33} [get_ports ps2_mouse_data]
 
 # ---------------------------------------------------------------------
-# LAB UART (USB)  --  enabled.
+# UART over PMOD1  --  for board-to-board chat link.
+# Wiring between two boards (jumper wires, NOT a ribbon cable):
+#   board_A pin1 (H2, txd) <-> board_B pin2 (G1, rxd)
+#   board_A pin2 (G1, rxd) <-> board_B pin1 (H2, txd)
+#   board_A pin5 (GND)     <-> board_B pin5 (GND)
+# Do NOT bridge VCC (pin6/pin12). LAB UART (D17/E17) is no longer used.
 # ---------------------------------------------------------------------
-set_property -dict {PACKAGE_PIN D17 IOSTANDARD LVCMOS33} [get_ports uart_txd]
-set_property -dict {PACKAGE_PIN E17 IOSTANDARD LVCMOS33} [get_ports uart_rxd]
+set_property -dict {PACKAGE_PIN H2 IOSTANDARD LVCMOS33} [get_ports uart_txd]
+set_property -dict {PACKAGE_PIN G1 IOSTANDARD LVCMOS33} [get_ports uart_rxd]
 
 # RS232  --  alternative UART, not used.
 # set_property -dict {PACKAGE_PIN E16 IOSTANDARD LVCMOS33} [get_ports rs232_rts]
