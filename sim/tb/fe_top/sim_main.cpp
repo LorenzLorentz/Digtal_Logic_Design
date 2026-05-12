@@ -2,8 +2,8 @@
 // sim_main.cpp  --  Tests for rtl/frontend/fe_top.sv
 // ---------------------------------------------------------------------
 // Drives the be_render_* command stream into fe_top and inspects the
-// resulting text_ram cells via the scan-side read port. Also checks
-// the observability outputs (conn_state, input_len/cursor, peer_name).
+// resulting text_ram cells via the scan-side read port. Also checks the
+// observability outputs (conn_state, input_len/cursor, peer_name).
 //
 // Tests:
 //   1. test_reset                    text_ram initialised to spaces;
@@ -12,14 +12,21 @@
 //                                    latched
 //   3. test_conn_state_connected     CONNECTED transition draws title
 //                                    + clears input row
-//   4. test_append_remote            "peer: hello" lands in HIST_ROW_START
-//   5. test_append_local_pending     "me:   hi" lands with PENDING sprite
-//   6. test_update_status            sprite flips PENDING -> SUCCESS -> FAIL
-//   7. test_insert_at_cursor         input row mirrors typed chars
-//   8. test_delete_at_cursor         backspace shifts and clears tail
-//   9. test_update_input_line_clear  Enter-commit clears input row
-//  10. test_move_cursor              cursor obs updates without text write
-//  11. test_peer_change_clears_hist  switching peer wipes history rows
+//   4. test_append_remote            remote bubble left-aligned at col 2
+//   5. test_append_local_pending     local bubble right-aligned at col 97
+//   6. test_update_status_success    pending->success keeps rounded borders
+//   7. test_update_status_fail       pending->fail changes to square borders
+//   8. test_insert_at_cursor         input row mirrors typed chars
+//   9. test_delete_at_cursor         backspace shifts and clears tail
+//  10. test_update_input_line_clear  Enter-commit clears input row
+//  11. test_move_cursor              cursor obs updates without text write
+//  12. test_peer_change_clears_hist  switching peer wipes history rows
+//  13. test_scroll_up_down           scroll offset advances / clamps
+//  14. test_peer_change_resets_scroll peer switch resets scroll
+//  15. test_hist_ring_wrap           ring head wraps at N_HIST_STORED
+//  16. test_pixel_boot_splash        BOOT splash colour emitted
+//  17. test_remote_long_message      max-length remote bubble fits
+//  18. test_local_long_message       max-length local bubble fits
 // =====================================================================
 
 #include "Vfe_top.h"
@@ -58,11 +65,15 @@ enum : uint8_t { MSG_PENDING = 0, MSG_SUCCESS = 1, MSG_FAIL = 2 };
 static constexpr int TITLE_ROW        = 0;
 static constexpr int HIST_ROW_START   = 2;
 static constexpr int INPUT_ROW        = 67;
-static constexpr int STATUS_COL       = 71;
 
-static constexpr uint8_t SPRITE_PENDING = 0xF0;
-static constexpr uint8_t SPRITE_SUCCESS = 0xF1;
-static constexpr uint8_t SPRITE_FAIL    = 0xF2;
+// Bubble layout constants (must match fe_pkg.sv).
+static constexpr int BUBBLE_MARGIN_L   = 2;
+static constexpr int BUBBLE_RIGHT_EDGE = 97;
+
+static constexpr uint8_t SPRITE_BL  = 0xF3;  // normal left border (rounded)
+static constexpr uint8_t SPRITE_BR  = 0xF4;  // normal right border (rounded)
+static constexpr uint8_t SPRITE_FBL = 0xF6;  // fail left border (square)
+static constexpr uint8_t SPRITE_FBR = 0xF7;  // fail right border (square)
 
 // ---------------------------------------------------------------------
 // clocking / reset
@@ -203,6 +214,15 @@ static void send_cmd(const RenderCmd& c) {
     memset(&dut->be_render_peer_name, 0, sizeof(dut->be_render_peer_name));
 }
 
+// Helper: bring up connection with peer "Bob".
+static void bring_up() {
+    const uint8_t bob[] = {'B','o','b'};
+    RenderCmd cn;
+    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
+    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
+    send_cmd(cn);
+}
+
 // =====================================================================
 // Tests
 // =====================================================================
@@ -215,7 +235,6 @@ static void test_reset() {
     CHECK_EQ(dut->conn_state_obs,  CONN_BOOT, "conn_state == BOOT");
     CHECK_EQ(dut->input_len_obs,   0, "input_len == 0");
     CHECK_EQ(dut->input_cursor_obs, 0, "input_cursor == 0");
-    // Spot-check: every text_ram cell should be 0x20.
     CHECK_EQ(read_cell(0, 0),     ' ', "cell (0,0) is space");
     CHECK_EQ(read_cell(36, 50),   ' ', "cell (36,50) is space");
     CHECK_EQ(read_cell(15, 100),  ' ', "cell (15,100) is space");
@@ -257,14 +276,12 @@ static void test_conn_state_connected() {
     CHECK_EQ(read_cell(TITLE_ROW, 99), ' ',  "title tail is space");
 }
 
+// Remote message: left-aligned bubble starting at col BUBBLE_MARGIN_L.
+//   col 2 = SPRITE_BL, col 3..3+len-1 = payload, col 3+len = SPRITE_BR
 static void test_append_remote() {
     printf("== test_append_remote\n");
     reset();
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn;
-    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
-    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
-    send_cmd(cn);
+    bring_up();
 
     const uint8_t hello[] = "hello";
     RenderCmd c;
@@ -277,25 +294,25 @@ static void test_append_remote() {
     c.len        = 5;
     send_cmd(c);
 
-    uint8_t row[16];
-    read_row(HIST_ROW_START, 0, 11, row);
-    const char expect[] = "peer: hello";
-    for (int i = 0; i < 11; i++) {
-        char lbl[40]; snprintf(lbl, sizeof(lbl), "remote col %d", i);
-        CHECK_EQ(row[i], (uint8_t)expect[i], lbl);
-    }
-    CHECK_EQ(read_cell(HIST_ROW_START, STATUS_COL), ' ',
-             "remote status col is space");
+    // col 0,1 = space (margin); col 2 = left border; col 3..7 = "hello"; col 8 = right border
+    CHECK_EQ(read_cell(HIST_ROW_START, 0), ' ',  "remote col 0 margin");
+    CHECK_EQ(read_cell(HIST_ROW_START, 1), ' ',  "remote col 1 margin");
+    CHECK_EQ(read_cell(HIST_ROW_START, 2), SPRITE_BL, "remote left border");
+    CHECK_EQ(read_cell(HIST_ROW_START, 3), 'h',  "remote payload[0]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 4), 'e',  "remote payload[1]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 5), 'l',  "remote payload[2]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 6), 'l',  "remote payload[3]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 7), 'o',  "remote payload[4]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 8), SPRITE_BR, "remote right border");
+    CHECK_EQ(read_cell(HIST_ROW_START, 9), ' ',  "remote col after bubble");
 }
 
+// Local message: right-aligned bubble ending at col BUBBLE_RIGHT_EDGE (97).
+// For "hi" (len=2): left border at 97-2-1=94, payload at 95..96, right border at 97
 static void test_append_local_pending() {
     printf("== test_append_local_pending\n");
     reset();
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn;
-    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
-    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
-    send_cmd(cn);
+    bring_up();
 
     const uint8_t hi[] = "hi";
     RenderCmd c;
@@ -308,25 +325,20 @@ static void test_append_local_pending() {
     c.len        = 2;
     send_cmd(c);
 
-    uint8_t row[10];
-    read_row(HIST_ROW_START, 0, 8, row);
-    const char expect[] = "me:   hi";
-    for (int i = 0; i < 8; i++) {
-        char lbl[40]; snprintf(lbl, sizeof(lbl), "local col %d", i);
-        CHECK_EQ(row[i], (uint8_t)expect[i], lbl);
-    }
-    CHECK_EQ(read_cell(HIST_ROW_START, STATUS_COL), SPRITE_PENDING,
-             "local pending sprite at status col");
+    // bubble_left = 97 - 2 - 1 = 94; payload at 95,96; right at 97
+    CHECK_EQ(read_cell(HIST_ROW_START, 93), ' ',       "local col before bubble");
+    CHECK_EQ(read_cell(HIST_ROW_START, 94), SPRITE_BL, "local left border (rounded, pending)");
+    CHECK_EQ(read_cell(HIST_ROW_START, 95), 'h',       "local payload[0]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 96), 'i',       "local payload[1]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 97), SPRITE_BR, "local right border (rounded, pending)");
+    CHECK_EQ(read_cell(HIST_ROW_START, 98), ' ',       "local col after bubble");
 }
 
-static void test_update_status() {
-    printf("== test_update_status\n");
+// Status update PENDING -> SUCCESS: still rounded borders.
+static void test_update_status_success() {
+    printf("== test_update_status_success\n");
     reset();
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn;
-    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
-    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
-    send_cmd(cn);
+    bring_up();
 
     const uint8_t hi[] = "hi";
     RenderCmd c1;
@@ -334,31 +346,51 @@ static void test_update_status() {
     c1.msg_id = 7;  c1.side = MSG_LOCAL; c1.status = MSG_PENDING;
     c1.payload = hi; c1.payload_n = 2; c1.len = 2;
     send_cmd(c1);
-    CHECK_EQ(read_cell(HIST_ROW_START, STATUS_COL), SPRITE_PENDING,
-             "initial sprite is PENDING");
 
+    // Should have rounded borders initially.
+    CHECK_EQ(read_cell(HIST_ROW_START, 94), SPRITE_BL, "initial left border rounded");
+    CHECK_EQ(read_cell(HIST_ROW_START, 97), SPRITE_BR, "initial right border rounded");
+
+    // Update to SUCCESS -- still rounded.
     RenderCmd c2;
     c2.cmd = RENDER_UPDATE_STATUS;
     c2.msg_id = 7;  c2.side = MSG_LOCAL; c2.status = MSG_SUCCESS;
     send_cmd(c2);
-    CHECK_EQ(read_cell(HIST_ROW_START, STATUS_COL), SPRITE_SUCCESS,
-             "sprite flipped to SUCCESS");
+    CHECK_EQ(read_cell(HIST_ROW_START, 94), SPRITE_BL, "success left border still rounded");
+    CHECK_EQ(read_cell(HIST_ROW_START, 95), 'h',       "success payload[0] preserved");
+    CHECK_EQ(read_cell(HIST_ROW_START, 96), 'i',       "success payload[1] preserved");
+    CHECK_EQ(read_cell(HIST_ROW_START, 97), SPRITE_BR, "success right border still rounded");
+}
 
-    RenderCmd c3;
-    c3.cmd = RENDER_UPDATE_STATUS;
-    c3.msg_id = 7;  c3.side = MSG_LOCAL; c3.status = MSG_FAIL;
-    send_cmd(c3);
-    CHECK_EQ(read_cell(HIST_ROW_START, STATUS_COL), SPRITE_FAIL,
-             "sprite flipped to FAIL");
+// Status update PENDING -> FAIL: changes to square borders.
+static void test_update_status_fail() {
+    printf("== test_update_status_fail\n");
+    reset();
+    bring_up();
+
+    const uint8_t hi[] = "hi";
+    RenderCmd c1;
+    c1.cmd = RENDER_APPEND_LOCAL_PENDING;
+    c1.msg_id = 7;  c1.side = MSG_LOCAL; c1.status = MSG_PENDING;
+    c1.payload = hi; c1.payload_n = 2; c1.len = 2;
+    send_cmd(c1);
+
+    // Update to FAIL -- should switch to square borders.
+    RenderCmd c2;
+    c2.cmd = RENDER_UPDATE_STATUS;
+    c2.msg_id = 7;  c2.side = MSG_LOCAL; c2.status = MSG_FAIL;
+    send_cmd(c2);
+
+    // Same layout: left at 94, payload at 95,96, right at 97
+    CHECK_EQ(read_cell(HIST_ROW_START, 94), SPRITE_FBL, "fail left border square");
+    CHECK_EQ(read_cell(HIST_ROW_START, 95), 'h',        "fail payload[0] preserved");
+    CHECK_EQ(read_cell(HIST_ROW_START, 96), 'i',        "fail payload[1] preserved");
+    CHECK_EQ(read_cell(HIST_ROW_START, 97), SPRITE_FBR, "fail right border square");
 }
 
 // Helper: bring the connection up, then type characters via INSERT.
 static void bring_up_and_type(const char* s) {
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn;
-    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
-    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
-    send_cmd(cn);
+    bring_up();
     for (int i = 0; s[i]; i++) {
         RenderCmd ic;
         ic.cmd        = RENDER_INSERT_AT_CURSOR;
@@ -450,11 +482,7 @@ static void test_peer_change_clears_hist() {
     printf("== test_peer_change_clears_hist\n");
     reset();
 
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn1;
-    cn1.cmd = RENDER_CONN_STATE; cn1.conn_state = CONN_CONNECTED;
-    cn1.peer_name = bob; cn1.peer_name_n = 3; cn1.peer_name_len = 3;
-    send_cmd(cn1);
+    bring_up();
 
     const uint8_t hi[] = "hi";
     RenderCmd c;
@@ -462,7 +490,8 @@ static void test_peer_change_clears_hist() {
     c.status = MSG_SUCCESS;
     c.payload = hi; c.payload_n = 2; c.len = 2;
     send_cmd(c);
-    CHECK_EQ(read_cell(HIST_ROW_START, 6), 'h', "row contains h");
+    // Should have bubble content at col 2+
+    CHECK_EQ(read_cell(HIST_ROW_START, 2), SPRITE_BL, "bubble left border present");
 
     const uint8_t eve[] = {'E','v','e'};
     RenderCmd cn2;
@@ -475,7 +504,7 @@ static void test_peer_change_clears_hist() {
     CHECK_EQ(read_cell(TITLE_ROW, 13), 'e', "title shows e");
 
     CHECK_EQ(read_cell(HIST_ROW_START, 0), ' ', "hist row 0 cleared");
-    CHECK_EQ(read_cell(HIST_ROW_START, 6), ' ', "hist row 6 cleared");
+    CHECK_EQ(read_cell(HIST_ROW_START, 2), ' ', "hist row 2 cleared");
 }
 
 // ---------------------------------------------------------------------
@@ -484,12 +513,7 @@ static void test_peer_change_clears_hist() {
 static void test_scroll_up_down() {
     printf("== test_scroll_up_down\n");
     reset();
-    // Bring up connection.
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn;
-    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
-    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
-    send_cmd(cn);
+    bring_up();
 
     CHECK_EQ(dut->scroll_offset_obs, 0, "scroll starts at 0");
 
@@ -513,11 +537,7 @@ static void test_scroll_up_down() {
 static void test_peer_change_resets_scroll() {
     printf("== test_peer_change_resets_scroll\n");
     reset();
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn;
-    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
-    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
-    send_cmd(cn);
+    bring_up();
 
     RenderCmd su; su.cmd = RENDER_SCROLL_UP;
     for (int i = 0; i < 5; i++) send_cmd(su);
@@ -535,11 +555,7 @@ static void test_peer_change_resets_scroll() {
 static void test_hist_ring_wrap() {
     printf("== test_hist_ring_wrap\n");
     reset();
-    const uint8_t bob[] = {'B','o','b'};
-    RenderCmd cn;
-    cn.cmd = RENDER_CONN_STATE; cn.conn_state = CONN_CONNECTED;
-    cn.peer_name = bob; cn.peer_name_n = 3; cn.peer_name_len = 3;
-    send_cmd(cn);
+    bring_up();
 
     CHECK_EQ(dut->hist_wr_row_obs, 0, "ring head at 0");
 
@@ -557,25 +573,69 @@ static void test_hist_ring_wrap() {
 
 // Pixel-side sanity check. After reset the timing counter starts at
 // hdata=0/vdata=0 (visible region) and conn_state == BOOT, so the scan
-// pipeline should emit the BOOT splash colour after a few cycles to
-// let the scan-side register and the conn_state CDC settle.
+// pipeline should emit the BOOT splash colour after a few cycles.
 static void test_pixel_boot_splash() {
     printf("== test_pixel_boot_splash\n");
     reset();
-    // Let video_timing + scan pipeline + sync_2ff settle.
     for (int i = 0; i < 8; i++) tick();
     CHECK_EQ((bool)dut->video_de, true, "video_de high in visible region");
     CHECK_EQ(dut->video_red,   0x08, "BOOT splash red");
     CHECK_EQ(dut->video_green, 0x10, "BOOT splash green");
     CHECK_EQ(dut->video_blue,  0x30, "BOOT splash blue");
 
-    // Tick further: hsync should pulse at some point during the line.
     bool saw_hsync_high = false;
     for (int i = 0; i < 1100; i++) {
         tick();
         if (dut->video_hsync) saw_hsync_high = true;
     }
     CHECK_EQ(saw_hsync_high, true, "saw hsync pulse within one line");
+}
+
+// Max-length remote message (64 chars): bubble at cols 2..67.
+static void test_remote_long_message() {
+    printf("== test_remote_long_message\n");
+    reset();
+    bring_up();
+
+    uint8_t longmsg[64];
+    for (int i = 0; i < 64; i++) longmsg[i] = 'A' + (i % 26);
+
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 10;
+    c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
+    c.payload = longmsg; c.payload_n = 64; c.len = 64;
+    send_cmd(c);
+
+    // bubble_left=2, payload_start=3, bubble_right=3+64=67
+    CHECK_EQ(read_cell(HIST_ROW_START, 2),  SPRITE_BL, "long remote left border");
+    CHECK_EQ(read_cell(HIST_ROW_START, 3),  'A',       "long remote payload[0]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 66), (uint8_t)('A' + (63 % 26)), "long remote payload[63]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 67), SPRITE_BR, "long remote right border");
+    CHECK_EQ(read_cell(HIST_ROW_START, 68), ' ',       "long remote after bubble");
+}
+
+// Max-length local message (64 chars): bubble left at 97-64-1=32, right at 97.
+static void test_local_long_message() {
+    printf("== test_local_long_message\n");
+    reset();
+    bring_up();
+
+    uint8_t longmsg[64];
+    for (int i = 0; i < 64; i++) longmsg[i] = 'a' + (i % 26);
+
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 20;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING;
+    c.payload = longmsg; c.payload_n = 64; c.len = 64;
+    send_cmd(c);
+
+    // bubble_left=97-64-1=32, payload at 33..96, right at 97
+    CHECK_EQ(read_cell(HIST_ROW_START, 31), ' ',       "long local before bubble");
+    CHECK_EQ(read_cell(HIST_ROW_START, 32), SPRITE_BL, "long local left border");
+    CHECK_EQ(read_cell(HIST_ROW_START, 33), 'a',       "long local payload[0]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 96), (uint8_t)('a' + (63 % 26)), "long local payload[63]");
+    CHECK_EQ(read_cell(HIST_ROW_START, 97), SPRITE_BR, "long local right border");
+    CHECK_EQ(read_cell(HIST_ROW_START, 98), ' ',       "long local after bubble");
 }
 
 int main(int argc, char** argv) {
@@ -591,7 +651,8 @@ int main(int argc, char** argv) {
     test_conn_state_connected();
     test_append_remote();
     test_append_local_pending();
-    test_update_status();
+    test_update_status_success();
+    test_update_status_fail();
     test_insert_at_cursor();
     test_delete_at_cursor();
     test_update_input_line_clear();
@@ -601,6 +662,8 @@ int main(int argc, char** argv) {
     test_peer_change_resets_scroll();
     test_hist_ring_wrap();
     test_pixel_boot_splash();
+    test_remote_long_message();
+    test_local_long_message();
 
     tfp->close();
     delete tfp;

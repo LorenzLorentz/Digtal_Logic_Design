@@ -12,7 +12,15 @@
 //   row INPUT_ROW                         "> <input line>"
 //
 // Sprite codes (in 0xF0..0xFF range, decoded by glyph ROM):
-//   0xF0 PENDING, 0xF1 SUCCESS, 0xF2 FAIL
+//   0xF3 SPRITE_BL  -- normal left border (rounded)
+//   0xF4 SPRITE_BR  -- normal right border (rounded)
+//   0xF6 SPRITE_FBL -- fail left border (square)
+//   0xF7 SPRITE_FBR -- fail right border (square)
+//
+// History-row bubble layout:
+//   Remote (MSG_REMOTE): left-aligned,  [payload]  starting at col 2
+//   Local  (MSG_LOCAL) : right-aligned, [payload]  ending at col 97
+//   Failed local messages use square-corner sprites instead of rounded.
 //
 // Persistent state we maintain ourselves:
 //   conn_state_curr_q   2-bit, latched from RENDER_CONN_STATE/REDRAW
@@ -121,8 +129,11 @@ module fe_render_decoder
     logic [SCROLL_W-1:0]              scroll_offset_q;
 
     // msg_id -> row offset (within history region) lookup
-    logic [HIST_W-1:0]                msg_id_row_q   [256];
-    logic                             msg_id_valid_q [256];
+    logic [HIST_W-1:0]                msg_id_row_q      [256];
+    logic                             msg_id_valid_q    [256];
+    logic [1:0]                       msg_id_side_q     [256];
+    logic [MAX_MSG_LEN*8-1:0]         msg_id_payload_q  [256];
+    msg_len_t                         msg_id_len_q      [256];
 
     // chained transitions (set on CONN_STATE accept that needs a
     // multi-step redraw)
@@ -169,37 +180,6 @@ module fe_render_decoder
     endfunction
     localparam int TITLE_PREFIX_LEN = 11;
 
-    function automatic byte_t hist_prefix_byte(input logic [1:0] side,
-                                                input int unsigned idx);
-        if (side == 2'(MSG_LOCAL)) begin
-            case (idx)
-                0:       hist_prefix_byte = "m";
-                1:       hist_prefix_byte = "e";
-                2:       hist_prefix_byte = ":";
-                default: hist_prefix_byte = " ";
-            endcase
-        end else begin
-            // peer or system -> "peer: "
-            case (idx)
-                0:       hist_prefix_byte = "p";
-                1:       hist_prefix_byte = "e";
-                2:       hist_prefix_byte = "e";
-                3:       hist_prefix_byte = "r";
-                4:       hist_prefix_byte = ":";
-                default: hist_prefix_byte = " ";
-            endcase
-        end
-    endfunction
-
-    function automatic byte_t status_sprite(input logic [1:0] s);
-        case (s)
-            2'(MSG_PENDING): status_sprite = SPRITE_PENDING;
-            2'(MSG_SUCCESS): status_sprite = SPRITE_SUCCESS;
-            2'(MSG_FAIL):    status_sprite = SPRITE_FAIL;
-            default:         status_sprite = " ";
-        endcase
-    endfunction
-
     function automatic byte_t input_prefix_byte(input int unsigned idx);
         case (idx)
             0:       input_prefix_byte = ">";
@@ -215,18 +195,43 @@ module fe_render_decoder
     localparam int LINE_IDX_W = $clog2(MAX_LINE_LEN);
 
     logic [FE_COL_W-1:0] title_name_idx;
-    logic [FE_COL_W-1:0] payload_idx;
     logic [FE_COL_W-1:0] input_idx;
 
     byte_t titlebar_cell, hist_cell, input_cell;
+
+    // Bubble geometry for history rows
+    logic              show_fail;
+    logic [FE_COL_W-1:0] bubble_left, bubble_right, payload_start;
+    logic [LINE_IDX_W-1:0] payload_idx;
+    logic              payload_in_range;
+
+    assign show_fail = (side_q == 2'(MSG_LOCAL)) && (status_q == 2'(MSG_FAIL));
+
+    always_comb begin
+        if (side_q == 2'(MSG_REMOTE)) begin
+            // Left-aligned: bubble starts at BUBBLE_MARGIN_L
+            bubble_left   = FE_COL_W'(BUBBLE_MARGIN_L);
+            payload_start = FE_COL_W'(BUBBLE_MARGIN_L + 1);
+            bubble_right  = FE_COL_W'(BUBBLE_MARGIN_L + 1)
+                            + FE_COL_W'(payload_len_q);
+        end else begin
+            // Right-aligned: bubble ends at BUBBLE_RIGHT_EDGE
+            bubble_right  = FE_COL_W'(BUBBLE_RIGHT_EDGE);
+            bubble_left   = FE_COL_W'(BUBBLE_RIGHT_EDGE)
+                            - FE_COL_W'(payload_len_q) - FE_COL_W'(1);
+            payload_start = bubble_left + FE_COL_W'(1);
+        end
+    end
 
     // Comparisons widen both sides to LEN_WIDTH (8b > FE_COL_W=7b for the
     // default 128-col layout), so peer_name_len_q / payload_len_q /
     // input_len_q can be compared directly.
     always_comb begin
         title_name_idx = col_cnt_q - FE_COL_W'(TITLE_PREFIX_LEN);
-        payload_idx    = col_cnt_q - FE_COL_W'(PREFIX_LEN);
         input_idx      = col_cnt_q - FE_COL_W'(INPUT_PREFIX_LEN);
+        payload_idx    = LINE_IDX_W'(col_cnt_q - payload_start);
+        payload_in_range = (col_cnt_q >= payload_start)
+                           && (LEN_WIDTH'(col_cnt_q - payload_start) < payload_len_q);
 
         // titlebar
         if (col_cnt_q < FE_COL_W'(TITLE_PREFIX_LEN))
@@ -236,14 +241,13 @@ module fe_render_decoder
         else
             titlebar_cell = " ";
 
-        // history row
-        if (col_cnt_q < FE_COL_W'(PREFIX_LEN))
-            hist_cell = hist_prefix_byte(side_q, int'(col_cnt_q));
-        else if (LEN_WIDTH'(payload_idx) < payload_len_q)
-            hist_cell = payload_q[payload_idx[LINE_IDX_W-1:0]*8 +: 8];
-        else if ((col_cnt_q == FE_COL_W'(STATUS_COL))
-                 && (side_q == 2'(MSG_LOCAL)))
-            hist_cell = status_sprite(status_q);
+        // history row -- bubble layout
+        if (col_cnt_q == bubble_left)
+            hist_cell = show_fail ? SPRITE_FBL : SPRITE_BL;
+        else if (col_cnt_q == bubble_right)
+            hist_cell = show_fail ? SPRITE_FBR : SPRITE_BR;
+        else if (payload_in_range)
+            hist_cell = payload_q[payload_idx*8 +: 8];
         else
             hist_cell = " ";
 
@@ -288,8 +292,7 @@ module fe_render_decoder
             S_UPDATE_STATUS: begin
                 wr_en   = 1'b1;
                 wr_row  = target_row_q;
-                wr_col  = FE_COL_W'(STATUS_COL);
-                wr_code = status_sprite(status_q);
+                wr_code = hist_cell;
             end
             S_INPUT_EDIT: begin
                 wr_en   = 1'b1;
@@ -364,7 +367,7 @@ module fe_render_decoder
 
             S_INPUT_REDRAW:  if (at_last_col)             state_d = S_IDLE;
             S_HIST_WRITE:    if (at_last_col)             state_d = S_IDLE;
-            S_UPDATE_STATUS:                              state_d = S_IDLE;
+            S_UPDATE_STATUS: if (at_last_col)             state_d = S_IDLE;
             S_INPUT_EDIT:    if (col_cnt_q == pos_end_q)  state_d = S_IDLE;
 
             default: state_d = S_IDLE;
@@ -402,8 +405,11 @@ module fe_render_decoder
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
             for (int i = 0; i < 256; i++) begin
-                msg_id_row_q[i]   <= '0;
-                msg_id_valid_q[i] <= 1'b0;
+                msg_id_row_q[i]     <= '0;
+                msg_id_valid_q[i]   <= 1'b0;
+                msg_id_side_q[i]    <= 2'(MSG_LOCAL);
+                msg_id_payload_q[i] <= '0;
+                msg_id_len_q[i]     <= '0;
             end
 
             chain_titlebar_q  <= 1'b0;
@@ -432,7 +438,8 @@ module fe_render_decoder
                     end
                     S_TITLEBAR,
                     S_INPUT_REDRAW,
-                    S_HIST_WRITE: begin
+                    S_HIST_WRITE,
+                    S_UPDATE_STATUS: begin
                         if (col_cnt_q != FE_COL_W'(FE_N_COLS-1))
                             col_cnt_q <= col_cnt_q + 1'b1;
                     end
@@ -470,8 +477,11 @@ module fe_render_decoder
                             if (peer_changed) begin
                                 hist_wr_row_q   <= '0;
                                 scroll_offset_q <= '0;
-                                for (int i = 0; i < 256; i++)
+                                for (int i = 0; i < 256; i++) begin
                                     msg_id_valid_q[i] <= 1'b0;
+                                    msg_id_side_q[i]  <= 2'(MSG_LOCAL);
+                                    msg_id_len_q[i]   <= '0;
+                                end
                             end
                         end else begin
                             // Leaving connected: drop in-flight input
@@ -493,8 +503,11 @@ module fe_render_decoder
                         payload_len_q <= be_render_len;
                         target_row_q  <= FE_ROW_W'(HIST_ROW_START)
                                          + FE_ROW_W'(hist_wr_row_q);
-                        msg_id_row_q[be_render_msg_id]   <= hist_wr_row_q;
-                        msg_id_valid_q[be_render_msg_id] <= 1'b1;
+                        msg_id_row_q[be_render_msg_id]     <= hist_wr_row_q;
+                        msg_id_valid_q[be_render_msg_id]   <= 1'b1;
+                        msg_id_side_q[be_render_msg_id]    <= be_render_side;
+                        msg_id_payload_q[be_render_msg_id] <= be_render_payload;
+                        msg_id_len_q[be_render_msg_id]     <= be_render_len;
                         if (hist_wr_row_q == HIST_W'(N_HIST_STORED - 1))
                             hist_wr_row_q <= '0;
                         else
@@ -506,6 +519,9 @@ module fe_render_decoder
                             status_q     <= be_render_status;
                             target_row_q <= FE_ROW_W'(HIST_ROW_START)
                                             + FE_ROW_W'(msg_id_row_q[be_render_msg_id]);
+                            side_q        <= msg_id_side_q[be_render_msg_id];
+                            payload_q     <= msg_id_payload_q[be_render_msg_id];
+                            payload_len_q <= msg_id_len_q[be_render_msg_id];
                         end
                     end
 

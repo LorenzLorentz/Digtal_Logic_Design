@@ -39,10 +39,13 @@ package fe_pkg;
     localparam int HIST_ROW_START    = 2;     // first ring slot
     localparam int HIST_ROW_END      = 65;    // last ring slot (64 total)
     localparam int INPUT_ROW         = 67;    // "> ..." input bar
-    // Column layout for history rows
-    localparam int PREFIX_LEN        = 6;     // "peer: " / "me:   "
+    // Column layout
     localparam int INPUT_PREFIX_LEN  = 2;     // "> "
-    localparam int STATUS_COL        = 71;    // single-cell status sprite
+
+    // Bubble layout for history rows
+    localparam int BUBBLE_MARGIN_L   = 2;     // left margin for remote bubbles
+    localparam int BUBBLE_MARGIN_R   = 2;     // right margin for local bubbles
+    localparam int BUBBLE_RIGHT_EDGE = 97;    // col where ] sits for local msgs
 
     // -----------------------------------------------------------------
     // History ring + visible window
@@ -58,9 +61,11 @@ package fe_pkg;
     // -----------------------------------------------------------------
     // Sprite codes (in 0xF0..0xFF -- the reserved sprite range)
     // -----------------------------------------------------------------
-    localparam byte_t SPRITE_PENDING = 8'hF0;
-    localparam byte_t SPRITE_SUCCESS = 8'hF1;
-    localparam byte_t SPRITE_FAIL    = 8'hF2;
+    // Bubble border sprites (0xF0..0xF2 legacy, kept for glyph ROM compat)
+    localparam byte_t SPRITE_BL      = 8'hF3;  // normal left border (rounded)
+    localparam byte_t SPRITE_BR      = 8'hF4;  // normal right border (rounded)
+    localparam byte_t SPRITE_FBL     = 8'hF6;  // fail left border (square)
+    localparam byte_t SPRITE_FBR     = 8'hF7;  // fail right border (square)
 
     // -----------------------------------------------------------------
     // Pixel timing  (800x600 @ 60Hz, pixel clock = 40 MHz)

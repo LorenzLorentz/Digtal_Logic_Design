@@ -4,3 +4,5 @@ example/
 sim/waves
 __pycache__/
 error.log
+.DS_Store
+doc/
