@@ -28,6 +28,8 @@
 //  17.  test_unknown_scancode_dropped   -- unmapped code -> no event
 //  18.  test_consecutive_chars          -- multiple letters in sequence
 //  19.  test_shift_make_release_cycle   -- shift state correctly toggled
+//  20.  test_shift_enter_is_newline     -- Shift+Enter -> KEY_CHAR 0x0A
+//  21.  test_newline_char_roundtrip     -- Shift+Enter then plain Enter
 // =====================================================================
 
 #include "Vio_ps2_decoder.h"
@@ -302,6 +304,53 @@ static void test_consecutive_chars() {
     e = feed_byte(0x16);  CHECK_EQ(e.ascii, (uint8_t)'1', "1");
 }
 
+// Shift+Enter should produce KEY_CHAR with ascii=0x0A (newline).
+// Plain Enter (no shift) should still produce KEY_ENTER with ascii=0.
+static void test_shift_enter_is_newline() {
+    printf("== test_shift_enter_is_newline\n");
+    reset();
+    // --- Shift held, then Enter -----------------------------------------
+    feed_byte(0x12);                 // Shift make (no event)
+    Event e1 = feed_byte(0x5A);      // Enter make with shift held
+    CHECK_EQ(e1.valid, 1,         "shift+enter event fires");
+    CHECK_EQ(e1.type,  KEY_CHAR,  "shift+enter -> KEY_CHAR");
+    CHECK_EQ(e1.ascii, 0x0A,      "shift+enter -> ascii 0x0A (newline)");
+    // Release shift
+    feed_byte(0xF0); feed_byte(0x12);
+    // --- Plain Enter (no shift) still works -----------------------------
+    Event e2 = feed_byte(0x5A);
+    CHECK_EQ(e2.valid, 1,          "plain enter event fires");
+    CHECK_EQ(e2.type,  KEY_ENTER,  "plain enter -> KEY_ENTER");
+    CHECK_EQ(e2.ascii, 0,          "plain enter -> ascii 0");
+}
+
+// Round-trip: Shift+Enter -> newline char, then release shift and
+// plain Enter -> KEY_ENTER.  Verifies modifier state is cleaned up
+// correctly so the two behaviours coexist in sequence.
+static void test_newline_char_roundtrip() {
+    printf("== test_newline_char_roundtrip\n");
+    reset();
+    // 1) Shift make
+    feed_byte(0x12);
+    // 2) Enter make -> newline
+    Event e1 = feed_byte(0x5A);
+    CHECK_EQ(e1.valid, 1,         "roundtrip: shift+enter fires");
+    CHECK_EQ(e1.type,  KEY_CHAR,  "roundtrip: KEY_CHAR");
+    CHECK_EQ(e1.ascii, 0x0A,      "roundtrip: newline ascii");
+    // 3) Shift release
+    feed_byte(0xF0); feed_byte(0x12);
+    // 4) Plain Enter -> KEY_ENTER
+    Event e2 = feed_byte(0x5A);
+    CHECK_EQ(e2.valid, 1,          "roundtrip: plain enter fires");
+    CHECK_EQ(e2.type,  KEY_ENTER,  "roundtrip: KEY_ENTER");
+    CHECK_EQ(e2.ascii, 0,          "roundtrip: enter ascii 0");
+    // 5) Type a letter to make sure decoder is still sane
+    Event e3 = feed_byte(0x1C);
+    CHECK_EQ(e3.valid, 1,              "roundtrip: letter after enter fires");
+    CHECK_EQ(e3.type,  KEY_CHAR,       "roundtrip: letter KEY_CHAR");
+    CHECK_EQ(e3.ascii, (uint8_t)'a',   "roundtrip: letter 'a'");
+}
+
 // After release, holding shift again works.
 static void test_shift_make_release_cycle() {
     printf("== test_shift_make_release_cycle\n");
@@ -341,6 +390,8 @@ int main(int argc, char** argv) {
     test_unknown_scancode_dropped();
     test_consecutive_chars();
     test_shift_make_release_cycle();
+    test_shift_enter_is_newline();
+    test_newline_char_roundtrip();
 
     tfp->close();
     delete tfp;

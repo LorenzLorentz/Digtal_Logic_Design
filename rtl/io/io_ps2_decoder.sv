@@ -235,8 +235,13 @@ module io_ps2_decoder
                                 8'h58:        caps_locked_q <= ~caps_locked_q;
                                 8'h5A: begin
                                     ev_valid <= 1'b1;
-                                    ev_type  <= 3'(KEY_ENTER);
-                                    ev_ascii <= 8'h00;
+                                    if (shift_held_q) begin
+                                        ev_type  <= 3'(KEY_CHAR);
+                                        ev_ascii <= 8'h0A;
+                                    end else begin
+                                        ev_type  <= 3'(KEY_ENTER);
+                                        ev_ascii <= 8'h00;
+                                    end
                                 end
                                 8'h66: begin
                                     ev_valid <= 1'b1;

@@ -638,6 +638,105 @@ static void test_local_long_message() {
     CHECK_EQ(read_cell(HIST_ROW_START, 98), ' ',       "long local after bubble");
 }
 
+// =====================================================================
+// Multi-line tests
+// =====================================================================
+
+// Local multi-line: "hi\nbye" -> two rows in history ring.
+// Line 0: "hi" right-aligned, line 1: "bye" right-aligned.
+static void test_multiline_local() {
+    printf("== test_multiline_local\n");
+    reset();
+    bring_up();
+    uint8_t msg[] = {'h','i',0x0A,'b','y','e'};
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 0;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING; c.len = 6;
+    c.payload = msg; c.payload_n = 6;
+    send_cmd(c);
+
+    // Row 0 (HIST_ROW_START): "hi" right-aligned bubble
+    int row0 = HIST_ROW_START;
+    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_BL, "row0 left border");
+    CHECK_EQ(read_cell(row0, 95), 'h', "row0 'h'");
+    CHECK_EQ(read_cell(row0, 96), 'i', "row0 'i'");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "row0 right border");
+
+    // Row 1 (HIST_ROW_START+1): "bye" right-aligned bubble
+    int row1 = HIST_ROW_START + 1;
+    CHECK_EQ(read_cell(row1, 93), (uint8_t)SPRITE_BL, "row1 left border");
+    CHECK_EQ(read_cell(row1, 94), 'b', "row1 'b'");
+    CHECK_EQ(read_cell(row1, 95), 'y', "row1 'y'");
+    CHECK_EQ(read_cell(row1, 96), 'e', "row1 'e'");
+    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR, "row1 right border");
+
+    // Row 2 should be space (unused)
+    CHECK_EQ(read_cell(HIST_ROW_START + 2, 50), ' ', "row2 empty");
+}
+
+// Remote multi-line: "ab\ncd" -> two rows, left-aligned.
+static void test_multiline_remote() {
+    printf("== test_multiline_remote\n");
+    reset();
+    bring_up();
+    uint8_t msg[] = {'a','b',0x0A,'c','d'};
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 1;
+    c.side = MSG_REMOTE; c.status = MSG_SUCCESS; c.len = 5;
+    c.payload = msg; c.payload_n = 5;
+    send_cmd(c);
+
+    // Fresh state, starts at ring slot 0
+    int row0 = HIST_ROW_START;
+    CHECK_EQ(read_cell(row0, 2), (uint8_t)SPRITE_BL, "row0 left border");
+    CHECK_EQ(read_cell(row0, 3), 'a', "row0 'a'");
+    CHECK_EQ(read_cell(row0, 4), 'b', "row0 'b'");
+    CHECK_EQ(read_cell(row0, 5), (uint8_t)SPRITE_BR, "row0 right border");
+
+    int row1 = HIST_ROW_START + 1;
+    CHECK_EQ(read_cell(row1, 2), (uint8_t)SPRITE_BL, "row1 left border");
+    CHECK_EQ(read_cell(row1, 3), 'c', "row1 'c'");
+    CHECK_EQ(read_cell(row1, 4), 'd', "row1 'd'");
+    CHECK_EQ(read_cell(row1, 5), (uint8_t)SPRITE_BR, "row1 right border");
+}
+
+// Status update on multi-line message rewrites all rows.
+static void test_multiline_status_update() {
+    printf("== test_multiline_status_update\n");
+    reset();
+    bring_up();
+    // Send local "xy\nz" -> line0="xy", line1="z"
+    uint8_t msg[] = {'x','y',0x0A,'z'};
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 0;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING; c.len = 4;
+    c.payload = msg; c.payload_n = 4;
+    send_cmd(c);
+
+    // Line 0 "xy" right-aligned: BL@94, x@95, y@96, BR@97
+    int row0 = HIST_ROW_START;
+    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_BL, "pre-update row0 BL rounded");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "pre-update row0 BR rounded");
+
+    // Update status to FAIL -> square borders
+    RenderCmd u;
+    u.cmd = RENDER_UPDATE_STATUS; u.msg_id = 0;
+    u.status = MSG_FAIL;
+    send_cmd(u);
+
+    // Row 0 "xy": FBL@94, x@95, y@96, FBR@97
+    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_FBL, "row0 fail left border");
+    CHECK_EQ(read_cell(row0, 95), 'x', "row0 x after fail");
+    CHECK_EQ(read_cell(row0, 96), 'y', "row0 y after fail");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_FBR, "row0 fail right border");
+    // Row 1 "z": FBL@95, z@96, FBR@97
+    int row1 = HIST_ROW_START + 1;
+    CHECK_EQ(read_cell(row1, 95), (uint8_t)SPRITE_FBL, "row1 fail left border");
+    CHECK_EQ(read_cell(row1, 96), 'z', "row1 z after fail");
+    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_FBR, "row1 fail right border");
+}
+
+// =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Verilated::traceEverOn(true);
@@ -664,6 +763,9 @@ int main(int argc, char** argv) {
     test_pixel_boot_splash();
     test_remote_long_message();
     test_local_long_message();
+    test_multiline_local();
+    test_multiline_remote();
+    test_multiline_status_update();
 
     tfp->close();
     delete tfp;

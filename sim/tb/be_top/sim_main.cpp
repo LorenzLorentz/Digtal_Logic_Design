@@ -1577,6 +1577,84 @@ static void test_long_text_with_spaces() {
 }
 
 // =====================================================================
+// (J) Multi-line input (newline via KEY_CHAR ascii=0x0A)
+// =====================================================================
+
+// Type "hello\nworld", verify the buffer holds the full 11-byte content
+// including the embedded newline, then commit and verify the store slot.
+static void test_multiline_input_commit() {
+    printf("== test_multiline_input_commit\n");
+    reset();
+    // Type "hello"
+    for (char c : std::string("hello")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    // Shift+Enter: newline character
+    send_key(KEY_CHAR, 0x0A); drain_render();
+    // Type "world"
+    for (char c : std::string("world")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+
+    // "hello\nworld" = 11 bytes
+    CHECK_EQ(dut->line_len,   11, "line_len = 11");
+    CHECK_EQ(dut->cursor_pos, 11, "cursor_pos = 11");
+
+    // Verify buffer content: h,e,l,l,o,0x0A,w,o,r,l,d
+    uint8_t expected[] = {'h','e','l','l','o',0x0A,'w','o','r','l','d'};
+    for (int i = 0; i < 11; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "buf[%d] multiline", i);
+        CHECK_EQ(read_buf(i), expected[i], lbl);
+    }
+
+    // Commit
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+    CHECK_EQ(dut->line_len,   0, "line cleared after commit");
+    CHECK_EQ(dut->cursor_pos, 0, "cursor cleared after commit");
+
+    // Verify store slot 0 contains "hello\nworld" with len=11
+    auto s = read_store(0);
+    CHECK_EQ(s.valid,  1,           "slot 0 valid");
+    CHECK_EQ(s.msg_id, 0,           "msg_id 0");
+    CHECK_EQ(s.side,   MSG_LOCAL,   "side LOCAL");
+    CHECK_EQ(s.len,    11,          "len 11");
+    for (int i = 0; i < 11; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "store_payload[%d]", i);
+        CHECK_EQ(store_payload_byte(i), expected[i], lbl);
+    }
+}
+
+// Type "ab\ncd", move cursor left to position 2 (at '\n'), press backspace
+// to delete 'b'. Buffer becomes "a\ncd", len=4, cursor=1.
+static void test_multiline_backspace() {
+    printf("== test_multiline_backspace\n");
+    reset();
+    // Type "ab\ncd"
+    for (char c : std::string("ab")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    send_key(KEY_CHAR, 0x0A); drain_render();
+    for (char c : std::string("cd")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+
+    CHECK_EQ(dut->line_len,   5, "line_len before moves");
+    CHECK_EQ(dut->cursor_pos, 5, "cursor at end");
+
+    // Move cursor left 2 times to position 3 (at 'c')
+    send_key(KEY_LEFT, 0); drain_render();  // cursor 5 -> 4 (at 'd')
+    send_key(KEY_LEFT, 0); drain_render();  // cursor 4 -> 3 (at 'c')
+    // Move left 1 more to position 2 (at '\n')
+    send_key(KEY_LEFT, 0); drain_render();  // cursor 3 -> 2 (at '\n')
+
+    CHECK_EQ(dut->cursor_pos, 2, "cursor at newline position");
+
+    // Backspace: deletes char at cursor-1 = position 1, which is 'b'
+    // Buffer shifts left: "a\ncd", len=4, cursor=1
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   4, "len after BS");
+    CHECK_EQ(dut->cursor_pos, 1, "cursor after BS");
+
+    CHECK_EQ(read_buf(0), (uint8_t)'a',    "buf[0] = 'a'");
+    CHECK_EQ(read_buf(1), (uint8_t)0x0A,   "buf[1] = newline");
+    CHECK_EQ(read_buf(2), (uint8_t)'c',    "buf[2] = 'c'");
+    CHECK_EQ(read_buf(3), (uint8_t)'d',    "buf[3] = 'd'");
+}
+
+// =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Verilated::traceEverOn(true);
@@ -1658,6 +1736,9 @@ int main(int argc, char** argv) {
     test_insert_delete_mixed_with_spaces();
     test_spaces_only_edit();
     test_long_text_with_spaces();
+    // (J) Multi-line input
+    test_multiline_input_commit();
+    test_multiline_backspace();
 
     tfp->close();
     delete tfp;

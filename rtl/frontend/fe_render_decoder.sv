@@ -112,7 +112,15 @@ module fe_render_decoder
     logic [1:0]                       side_q;
     logic [1:0]                       status_q;
     logic [MAX_MSG_LEN*8-1:0]         payload_q;
-    msg_len_t                         payload_len_q;
+
+    // Multi-line parsing state
+    localparam int MAX_LINES  = 8;
+    localparam int LINE_CNT_W = $clog2(MAX_LINES);
+
+    logic [LINE_CNT_W-1:0]            cur_line_q;
+    logic [LINE_CNT_W-1:0]            n_lines_q;
+    logic [LINE_IDX_W-1:0]            ml_offset_q [MAX_LINES];
+    msg_len_t                          ml_len_q    [MAX_LINES];
 
     // -----------------------------------------------------------------
     // Persistent UI state
@@ -204,8 +212,10 @@ module fe_render_decoder
     logic [FE_COL_W-1:0] bubble_left, bubble_right, payload_start;
     logic [LINE_IDX_W-1:0] payload_idx;
     logic              payload_in_range;
+    msg_len_t          cur_sub_len;
 
     assign show_fail = (side_q == 2'(MSG_LOCAL)) && (status_q == 2'(MSG_FAIL));
+    assign cur_sub_len = ml_len_q[cur_line_q];
 
     always_comb begin
         if (side_q == 2'(MSG_REMOTE)) begin
@@ -213,12 +223,12 @@ module fe_render_decoder
             bubble_left   = FE_COL_W'(BUBBLE_MARGIN_L);
             payload_start = FE_COL_W'(BUBBLE_MARGIN_L + 1);
             bubble_right  = FE_COL_W'(BUBBLE_MARGIN_L + 1)
-                            + FE_COL_W'(payload_len_q);
+                            + FE_COL_W'(cur_sub_len);
         end else begin
             // Right-aligned: bubble ends at BUBBLE_RIGHT_EDGE
             bubble_right  = FE_COL_W'(BUBBLE_RIGHT_EDGE);
             bubble_left   = FE_COL_W'(BUBBLE_RIGHT_EDGE)
-                            - FE_COL_W'(payload_len_q) - FE_COL_W'(1);
+                            - FE_COL_W'(cur_sub_len) - FE_COL_W'(1);
             payload_start = bubble_left + FE_COL_W'(1);
         end
     end
@@ -226,12 +236,14 @@ module fe_render_decoder
     // Comparisons widen both sides to LEN_WIDTH (8b > FE_COL_W=7b for the
     // default 128-col layout), so peer_name_len_q / payload_len_q /
     // input_len_q can be compared directly.
+    logic [LINE_IDX_W-1:0] abs_idx;
     always_comb begin
         title_name_idx = col_cnt_q - FE_COL_W'(TITLE_PREFIX_LEN);
         input_idx      = col_cnt_q - FE_COL_W'(INPUT_PREFIX_LEN);
         payload_idx    = LINE_IDX_W'(col_cnt_q - payload_start);
         payload_in_range = (col_cnt_q >= payload_start)
-                           && (LEN_WIDTH'(col_cnt_q - payload_start) < payload_len_q);
+                           && (LEN_WIDTH'(col_cnt_q - payload_start) < cur_sub_len);
+        abs_idx = ml_offset_q[cur_line_q] + payload_idx;
 
         // titlebar
         if (col_cnt_q < FE_COL_W'(TITLE_PREFIX_LEN))
@@ -241,13 +253,13 @@ module fe_render_decoder
         else
             titlebar_cell = " ";
 
-        // history row -- bubble layout
+        // history row -- bubble layout (multi-line aware)
         if (col_cnt_q == bubble_left)
             hist_cell = show_fail ? SPRITE_FBL : SPRITE_BL;
         else if (col_cnt_q == bubble_right)
             hist_cell = show_fail ? SPRITE_FBR : SPRITE_BR;
         else if (payload_in_range)
-            hist_cell = payload_q[payload_idx*8 +: 8];
+            hist_cell = payload_q[abs_idx[LINE_IDX_W-1:0]*8 +: 8];
         else
             hist_cell = " ";
 
@@ -366,8 +378,22 @@ module fe_render_decoder
             end
 
             S_INPUT_REDRAW:  if (at_last_col)             state_d = S_IDLE;
-            S_HIST_WRITE:    if (at_last_col)             state_d = S_IDLE;
-            S_UPDATE_STATUS: if (at_last_col)             state_d = S_IDLE;
+            S_HIST_WRITE: begin
+                if (at_last_col) begin
+                    if (cur_line_q + 1 < n_lines_q)
+                        state_d = S_HIST_WRITE;
+                    else
+                        state_d = S_IDLE;
+                end
+            end
+            S_UPDATE_STATUS: begin
+                if (at_last_col) begin
+                    if (cur_line_q + 1 < n_lines_q)
+                        state_d = S_UPDATE_STATUS;
+                    else
+                        state_d = S_IDLE;
+                end
+            end
             S_INPUT_EDIT:    if (col_cnt_q == pos_end_q)  state_d = S_IDLE;
 
             default: state_d = S_IDLE;
@@ -391,7 +417,12 @@ module fe_render_decoder
             side_q            <= 2'(MSG_LOCAL);
             status_q          <= 2'(MSG_PENDING);
             payload_q         <= '0;
-            payload_len_q     <= '0;
+            cur_line_q        <= '0;
+            n_lines_q         <= LINE_CNT_W'(1);
+            for (int i = 0; i < MAX_LINES; i++) begin
+                ml_offset_q[i] <= '0;
+                ml_len_q[i]    <= '0;
+            end
 
             conn_state_curr_q <= 2'(CONN_BOOT);
             peer_name_q       <= '0;
@@ -437,11 +468,21 @@ module fe_render_decoder
                         end
                     end
                     S_TITLEBAR,
-                    S_INPUT_REDRAW,
-                    S_HIST_WRITE,
-                    S_UPDATE_STATUS: begin
+                    S_INPUT_REDRAW: begin
                         if (col_cnt_q != FE_COL_W'(FE_N_COLS-1))
                             col_cnt_q <= col_cnt_q + 1'b1;
+                    end
+                    S_HIST_WRITE,
+                    S_UPDATE_STATUS: begin
+                        if (col_cnt_q == FE_COL_W'(FE_N_COLS-1)) begin
+                            if (cur_line_q + 1 < n_lines_q) begin
+                                col_cnt_q   <= '0;
+                                cur_line_q  <= cur_line_q + 1'b1;
+                                target_row_q <= target_row_q + 1'b1;
+                            end
+                        end else begin
+                            col_cnt_q <= col_cnt_q + 1'b1;
+                        end
                     end
                     S_INPUT_EDIT: begin
                         if (col_cnt_q != pos_end_q)
@@ -500,7 +541,6 @@ module fe_render_decoder
                         side_q        <= be_render_side;
                         status_q      <= be_render_status;
                         payload_q     <= be_render_payload;
-                        payload_len_q <= be_render_len;
                         target_row_q  <= FE_ROW_W'(HIST_ROW_START)
                                          + FE_ROW_W'(hist_wr_row_q);
                         msg_id_row_q[be_render_msg_id]     <= hist_wr_row_q;
@@ -508,20 +548,65 @@ module fe_render_decoder
                         msg_id_side_q[be_render_msg_id]    <= be_render_side;
                         msg_id_payload_q[be_render_msg_id] <= be_render_payload;
                         msg_id_len_q[be_render_msg_id]     <= be_render_len;
-                        if (hist_wr_row_q == HIST_W'(N_HIST_STORED - 1))
-                            hist_wr_row_q <= '0;
-                        else
-                            hist_wr_row_q <= hist_wr_row_q + 1'b1;
+                        // Multi-line parsing
+                        begin
+                            int n_lines, line_start;
+                            n_lines = 1;
+                            ml_offset_q[0] <= '0;
+                            line_start = 0;
+                            for (int i = 0; i < MAX_MSG_LEN; i++) begin
+                                if (i < int'(be_render_len)
+                                    && be_render_payload[i*8 +: 8] == 8'h0A) begin
+                                    ml_len_q[n_lines - 1]
+                                        <= msg_len_t'(i - line_start);
+                                    ml_offset_q[n_lines]
+                                        <= LINE_IDX_W'(i + 1);
+                                    n_lines = n_lines + 1;
+                                    line_start = i + 1;
+                                end
+                            end
+                            ml_len_q[n_lines - 1]
+                                <= msg_len_t'(int'(be_render_len) - line_start);
+                            n_lines_q  <= LINE_CNT_W'(n_lines);
+                            cur_line_q <= '0;
+                            hist_wr_row_q <= (hist_wr_row_q
+                                + HIST_W'(n_lines)) & HIST_W'(N_HIST_STORED - 1);
+                        end
                     end
 
                     RENDER_UPDATE_STATUS: begin
                         if (msg_id_valid_q[be_render_msg_id]) begin
                             status_q     <= be_render_status;
                             target_row_q <= FE_ROW_W'(HIST_ROW_START)
-                                            + FE_ROW_W'(msg_id_row_q[be_render_msg_id]);
+                                            + FE_ROW_W'(
+                                                msg_id_row_q[be_render_msg_id]);
                             side_q        <= msg_id_side_q[be_render_msg_id];
                             payload_q     <= msg_id_payload_q[be_render_msg_id];
-                            payload_len_q <= msg_id_len_q[be_render_msg_id];
+                            // Re-parse multi-line boundaries
+                            begin
+                                int n_lines, line_start;
+                                n_lines = 1;
+                                ml_offset_q[0] <= '0;
+                                line_start = 0;
+                                for (int i = 0; i < MAX_MSG_LEN; i++) begin
+                                    if (i < int'(msg_id_len_q[be_render_msg_id])
+                                        && msg_id_payload_q[be_render_msg_id][i*8 +: 8]
+                                           == 8'h0A) begin
+                                        ml_len_q[n_lines - 1]
+                                            <= msg_len_t'(i - line_start);
+                                        ml_offset_q[n_lines]
+                                            <= LINE_IDX_W'(i + 1);
+                                        n_lines = n_lines + 1;
+                                        line_start = i + 1;
+                                    end
+                                end
+                                ml_len_q[n_lines - 1]
+                                    <= msg_len_t'(int'(
+                                        msg_id_len_q[be_render_msg_id])
+                                        - line_start);
+                                n_lines_q  <= LINE_CNT_W'(n_lines);
+                                cur_line_q <= '0;
+                            end
                         end
                     end
 
