@@ -1347,6 +1347,236 @@ static void test_peer_goodbye_disconnects() {
 }
 
 // =====================================================================
+// (I) Cursor editing with spaces
+// =====================================================================
+
+// Type "abc   xyz" (abc, 3 spaces, xyz), move cursor to position 3 (first
+// space), insert 'X'. Expected: "abcX   xyz", len=10, cursor=4.
+static void test_insert_at_space_position() {
+    printf("== test_insert_at_space_position\n");
+    reset();
+    // Type "abc"
+    for (char c : std::string("abc")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    // Type 3 spaces
+    for (int i = 0; i < 3; i++) { send_key(KEY_CHAR, ' '); drain_render(); }
+    // Type "xyz"
+    for (char c : std::string("xyz")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+
+    CHECK_EQ(dut->line_len,   9, "initial len");
+    // Move left 6 times: cursor 9 -> 3 (first space)
+    for (int i = 0; i < 6; i++) { send_key(KEY_LEFT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 3, "cursor at first space");
+
+    send_key(KEY_CHAR, 'X'); drain_render();
+    CHECK_EQ(dut->line_len,   10, "len after insert");
+    CHECK_EQ(dut->cursor_pos, 4,  "cursor after insert");
+    // Verify buffer: "abcX   xyz"
+    const char* expected = "abcX   xyz";
+    for (int i = 0; i < 10; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "buf[%d] after insert", i);
+        CHECK_EQ(read_buf(i), (uint8_t)expected[i], lbl);
+    }
+}
+
+// Type "abc   xyz", move cursor to position 4 (second space), press BS.
+// Expected: "abc  xyz" (delete the first space), len=8, cursor=3.
+static void test_delete_at_space_position() {
+    printf("== test_delete_at_space_position\n");
+    reset();
+    for (char c : std::string("abc   xyz")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    CHECK_EQ(dut->line_len,   9, "initial len");
+    // Move cursor to position 4 (second space)
+    for (int i = 0; i < 5; i++) { send_key(KEY_LEFT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 4, "cursor at second space");
+
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   8, "len after BS");
+    CHECK_EQ(dut->cursor_pos, 3, "cursor after BS");
+    // Verify: "abc  xyz" (first space deleted, remaining shifted left)
+    const char* expected = "abc  xyz";
+    for (int i = 0; i < 8; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "buf[%d] after BS", i);
+        CHECK_EQ(read_buf(i), (uint8_t)expected[i], lbl);
+    }
+}
+
+// Type "ab  cd", move to position 2 (first space), insert 'X' then 'Y'.
+// Expected: "abXY  cd", len=8, cursor=4.
+static void test_insert_multiple_at_space() {
+    printf("== test_insert_multiple_at_space\n");
+    reset();
+    for (char c : std::string("ab  cd")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    // Move to position 2
+    for (int i = 0; i < 4; i++) { send_key(KEY_LEFT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 2, "cursor at first space");
+
+    send_key(KEY_CHAR, 'X'); drain_render();
+    send_key(KEY_CHAR, 'Y'); drain_render();
+    CHECK_EQ(dut->line_len,   8, "len after 2 inserts");
+    CHECK_EQ(dut->cursor_pos, 4, "cursor after 2 inserts");
+    const char* expected = "abXY  cd";
+    for (int i = 0; i < 8; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "buf[%d]", i);
+        CHECK_EQ(read_buf(i), (uint8_t)expected[i], lbl);
+    }
+}
+
+// Type "ab  cd", move to position 3 (second space), press BS twice.
+// Expected: "a  cd" after first BS (cursor=2, delete 'b'), then "a cd" after
+// second BS (cursor=1, delete 'a'... no wait, delete at position 2).
+// Actually: cursor=3, BS -> delete at pos 2 (char 'b'), result "a  cd", cursor=2.
+// Then BS again -> delete at pos 1 (char 'a'), result " cd", cursor=1.
+// Hmm that doesn't make sense for what user wants. Let me re-think.
+//
+// Actually: "ab  cd" buffer = ['a','b',' ',' ','c','d'], len=6, cursor=3.
+// BS: delete at cursor-1=2, which is ' ' (first space). Shift left:
+//   buf[2] <= buf[3] = ' '
+//   buf[3] <= buf[4] = 'c'
+//   buf[4] <= buf[5] = 'd'
+// Result: ['a','b',' ','c','d',?], len=5, cursor=2.
+// That's "ab cd".
+// BS again: delete at cursor-1=1, which is 'b'. Shift left:
+//   buf[1] <= buf[2] = ' '
+//   buf[2] <= buf[3] = 'c'
+//   buf[3] <= buf[4] = 'd'
+// Result: ['a',' ','c','d',?,?], len=4, cursor=1.
+// That's "a cd".
+static void test_delete_multiple_at_space() {
+    printf("== test_delete_multiple_at_space\n");
+    reset();
+    for (char c : std::string("ab  cd")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    // Move to position 3
+    for (int i = 0; i < 3; i++) { send_key(KEY_LEFT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 3, "cursor at pos 3");
+
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   5, "len after 1st BS");
+    CHECK_EQ(dut->cursor_pos, 2, "cursor after 1st BS");
+    const char* exp1 = "ab cd";
+    for (int i = 0; i < 5; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "buf[%d] after 1st BS", i);
+        CHECK_EQ(read_buf(i), (uint8_t)exp1[i], lbl);
+    }
+
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   4, "len after 2nd BS");
+    CHECK_EQ(dut->cursor_pos, 1, "cursor after 2nd BS");
+    const char* exp2 = "a cd";
+    for (int i = 0; i < 4; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "buf[%d] after 2nd BS", i);
+        CHECK_EQ(read_buf(i), (uint8_t)exp2[i], lbl);
+    }
+}
+
+// Simulate user's reported scenario: type text with spaces, move cursor to
+// space region, insert and delete multiple times.
+// Type "hello   world", move to first space, insert 'X', delete twice.
+static void test_insert_delete_mixed_with_spaces() {
+    printf("== test_insert_delete_mixed_with_spaces\n");
+    reset();
+    for (char c : std::string("hello   world")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    CHECK_EQ(dut->line_len,   13, "initial len");
+    // Move left 8 times: cursor 13 -> 5 (first space)
+    for (int i = 0; i < 8; i++) { send_key(KEY_LEFT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 5, "cursor at first space");
+
+    // Insert 'X' at position 5
+    send_key(KEY_CHAR, 'X'); drain_render();
+    CHECK_EQ(dut->line_len,   14, "len after insert");
+    CHECK_EQ(dut->cursor_pos, 6,  "cursor after insert");
+    // Expected: "helloX   world"
+    CHECK_EQ(read_buf(5), 'X', "inserted X");
+    CHECK_EQ(read_buf(6), ' ', "shifted space at 6");
+    CHECK_EQ(read_buf(7), ' ', "shifted space at 7");
+    CHECK_EQ(read_buf(8), ' ', "shifted space at 8");
+    CHECK_EQ(read_buf(9), 'w', "shifted w at 9");
+
+    // Now delete (BS) twice: removes the 'X' we just inserted, then 'o'
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   13, "len after 1st BS");
+    CHECK_EQ(dut->cursor_pos, 5,  "cursor after 1st BS");
+    // Back to "hello   world"
+    CHECK_EQ(read_buf(4), 'o', "buf[4] = o");
+    CHECK_EQ(read_buf(5), ' ', "buf[5] = space");
+    CHECK_EQ(read_buf(6), ' ', "buf[6] = space");
+
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   12, "len after 2nd BS");
+    CHECK_EQ(dut->cursor_pos, 4,  "cursor after 2nd BS");
+    // Deleted 'o' at position 4: "hell   world"
+    CHECK_EQ(read_buf(3), 'l', "buf[3] = l");
+    CHECK_EQ(read_buf(4), ' ', "buf[4] = space (shifted)");
+    CHECK_EQ(read_buf(5), ' ', "buf[5] = space (shifted)");
+    CHECK_EQ(read_buf(6), ' ', "buf[6] = space (shifted)");
+    CHECK_EQ(read_buf(7), 'w', "buf[7] = w");
+}
+
+// Type all spaces, then insert/delete in the middle.
+static void test_spaces_only_edit() {
+    printf("== test_spaces_only_edit\n");
+    reset();
+    // Type 5 spaces
+    for (int i = 0; i < 5; i++) { send_key(KEY_CHAR, ' '); drain_render(); }
+    CHECK_EQ(dut->line_len,   5, "5 spaces");
+    // Move left 2 times: cursor 5 -> 3
+    for (int i = 0; i < 2; i++) { send_key(KEY_LEFT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 3, "cursor at pos 3");
+
+    // Insert 'X' at position 3
+    send_key(KEY_CHAR, 'X'); drain_render();
+    CHECK_EQ(dut->line_len,   6, "len after insert");
+    CHECK_EQ(dut->cursor_pos, 4, "cursor after insert");
+    // Expected: "   X " (3 spaces, X, 2 spaces)
+    CHECK_EQ(read_buf(0), ' ', "buf[0] = space");
+    CHECK_EQ(read_buf(1), ' ', "buf[1] = space");
+    CHECK_EQ(read_buf(2), ' ', "buf[2] = space");
+    CHECK_EQ(read_buf(3), 'X', "buf[3] = X");
+    CHECK_EQ(read_buf(4), ' ', "buf[4] = space");
+    CHECK_EQ(read_buf(5), ' ', "buf[5] = space");
+
+    // Delete (BS): remove the X
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   5, "len after BS");
+    CHECK_EQ(dut->cursor_pos, 3, "cursor after BS");
+    CHECK_EQ(read_buf(3), ' ', "buf[3] = space (X removed)");
+}
+
+// Stress test: longer text with multiple space groups, cursor movement and
+// editing at various positions.
+static void test_long_text_with_spaces() {
+    printf("== test_long_text_with_spaces\n");
+    reset();
+    // "abc   def   ghi"
+    for (char c : std::string("abc   def   ghi")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    CHECK_EQ(dut->line_len,   15, "initial len");
+
+    // Move to position 6 (between the two space groups, at 'd')
+    for (int i = 0; i < 9; i++) { send_key(KEY_LEFT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 6, "cursor at 'd'");
+
+    // Insert 'X' before 'd'
+    send_key(KEY_CHAR, 'X'); drain_render();
+    CHECK_EQ(dut->line_len,   16, "len after insert");
+    CHECK_EQ(dut->cursor_pos, 7, "cursor after insert");
+    CHECK_EQ(read_buf(6), 'X', "buf[6] = X");
+    CHECK_EQ(read_buf(7), 'd', "buf[7] = d");
+
+    // Move right to position 12 (at third space of second group)
+    for (int i = 0; i < 5; i++) { send_key(KEY_RIGHT, 0); drain_render(); }
+    CHECK_EQ(dut->cursor_pos, 12, "cursor at pos 12");
+
+    // Delete (BS): remove the space at position 11
+    send_key(KEY_BACKSPACE, 0); drain_render();
+    CHECK_EQ(dut->line_len,   15, "len after BS");
+    CHECK_EQ(dut->cursor_pos, 11, "cursor after BS");
+    CHECK_EQ(read_buf(10), ' ', "buf[10] = space");
+    CHECK_EQ(read_buf(11), ' ', "buf[11] = space (shifted)");
+    CHECK_EQ(read_buf(12), 'g', "buf[12] = g (shifted)");
+    CHECK_EQ(read_buf(13), 'h', "buf[13] = h");
+    CHECK_EQ(read_buf(14), 'i', "buf[14] = i");
+}
+
+// =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Verilated::traceEverOn(true);
@@ -1420,6 +1650,14 @@ int main(int argc, char** argv) {
     test_peer_name_change_clears_store();
     test_peer_name_same_preserves_store();
     test_peer_goodbye_disconnects();
+    // (I) Cursor editing with spaces
+    test_insert_at_space_position();
+    test_delete_at_space_position();
+    test_insert_multiple_at_space();
+    test_delete_multiple_at_space();
+    test_insert_delete_mixed_with_spaces();
+    test_spaces_only_edit();
+    test_long_text_with_spaces();
 
     tfp->close();
     delete tfp;

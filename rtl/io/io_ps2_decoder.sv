@@ -187,7 +187,10 @@ module io_ps2_decoder
 
                 case (byte_data)
                     8'hE0: seen_e0_q <= 1'b1;
-                    8'hF0: seen_f0_q <= 1'b1;
+                    8'hF0: begin
+                        seen_f0_q <= 1'b1;
+                        seen_e0_q <= seen_e0_q;  // preserve E0 through F0
+                    end
                     8'hAA: ;  // BAT result, ignore
                     default: begin
                         // Decode based on PRE-edge prefix state.
@@ -195,12 +198,14 @@ module io_ps2_decoder
                             // Release. Only Shift release is meaningful;
                             // every other release (extended or not) is
                             // dropped.
-                            if (!seen_e0_q && (byte_data == 8'h12
+                            if ((!seen_e0_q && (byte_data == 8'h12
                                             || byte_data == 8'h59))
+                             || (seen_e0_q && byte_data == 8'h59))
                                 shift_held_q <= 1'b0;
                         end else if (seen_e0_q) begin
                             // Extended make.
                             unique case (byte_data)
+                                8'h59: shift_held_q <= 1'b1;  // Right Shift
                                 8'h6B: begin
                                     ev_valid <= 1'b1;
                                     ev_type  <= 3'(KEY_LEFT);
