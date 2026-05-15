@@ -19,13 +19,17 @@
 //     byte_valid for one local cycle with byte_data; otherwise pulse
 //     frame_error.
 //
+// Inter-bit watchdog:
+//   If the device stalls mid-frame longer than TIMEOUT_CYCLES local
+//   cycles, we abandon the partial frame (bit_count_q / shift_q both
+//   clear to 0). Without this the FSM stays stuck partway and the next
+//   real start bit gets interpreted as a stale data bit, sometimes
+//   producing a parity-passing garbage byte. Default ~100 us @ 100 MHz;
+//   must exceed the slowest expected PS/2 bit time (~83 us @ 12 kHz).
+//
 // Notably out of scope:
 //   - Host-to-device direction (LED command, set rate). The user has
 //     confirmed receive-only is fine.
-//   - Watchdog / mid-frame timeout. If the device stalls mid-frame
-//     the FSM stays partway through; the next start bit arriving will
-//     simply look like a stale data bit and likely fail parity. Real
-//     keyboards do not stall, so we keep the design minimal.
 // =====================================================================
 
 `ifndef IO_PS2_PHY_SV
@@ -33,7 +37,9 @@
 
 module io_ps2_phy
     import chat_pkg::*;
-(
+#(
+    parameter int TIMEOUT_CYCLES = 10000
+) (
     input  logic    clk,
     input  logic    rst_n,
 
@@ -100,19 +106,26 @@ module io_ps2_phy
     logic [10:0] shift_next;
     assign shift_next = {ps2_data_s, shift_q[10:1]};
 
+    // Inter-bit watchdog. Counts local-clock cycles since the last
+    // ps2_clk falling edge; if it expires mid-frame, abandon the frame.
+    localparam int TIMEOUT_W = $clog2(TIMEOUT_CYCLES + 1);
+    logic [TIMEOUT_W-1:0] timeout_cnt_q;
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            shift_q     <= '0;
-            bit_count_q <= '0;
-            byte_valid  <= 1'b0;
-            byte_data   <= '0;
-            frame_error <= 1'b0;
+            shift_q       <= '0;
+            bit_count_q   <= '0;
+            timeout_cnt_q <= '0;
+            byte_valid    <= 1'b0;
+            byte_data     <= '0;
+            frame_error   <= 1'b0;
         end else begin
             byte_valid  <= 1'b0;
             frame_error <= 1'b0;
 
             if (ps2_clk_fall) begin
-                shift_q <= shift_next[10:1];
+                timeout_cnt_q <= '0;
+                shift_q       <= shift_next[10:1];
 
                 if (bit_count_q == 4'd10) begin
                     // 11th bit just arrived; check the assembled frame.
@@ -127,6 +140,16 @@ module io_ps2_phy
                     bit_count_q <= '0;
                 end else begin
                     bit_count_q <= bit_count_q + 4'd1;
+                end
+            end else if (bit_count_q != '0) begin
+                // Mid-frame stall. Count up; on expiry abandon the
+                // partial frame so the next start bit lands cleanly.
+                if (timeout_cnt_q == TIMEOUT_W'(TIMEOUT_CYCLES - 1)) begin
+                    shift_q       <= '0;
+                    bit_count_q   <= '0;
+                    timeout_cnt_q <= '0;
+                end else begin
+                    timeout_cnt_q <= timeout_cnt_q + 1'b1;
                 end
             end
         end

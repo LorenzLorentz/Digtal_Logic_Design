@@ -6,18 +6,35 @@
 // (key_type_e) and ev_ascii (only meaningful for KEY_CHAR).
 //
 // State maintained:
-//   shift_held_q   :  set by Shift make (0x12 / 0x59) without E0 prefix,
-//                     cleared by the matching release. Tracks current
-//                     left- or right-shift state (we don't distinguish).
+//   lshift_held_q  :  set by Left Shift make (0x12), cleared by its
+//                     matching release (F0 12).
+//   rshift_held_q  :  set by Right Shift make (0x59 plain or E0 59),
+//                     cleared by the matching release. Tracked
+//                     independently from lshift_held_q so releasing one
+//                     while the other is still held does not drop the
+//                     modifier. The effective shift used for ASCII
+//                     translation is lshift_held_q | rshift_held_q.
 //   caps_locked_q  :  toggled on each CapsLock make (0x58); release of
 //                     CapsLock is ignored (LED is host-managed in real
 //                     PS/2; we don't drive the LED -- agreed up-front
 //                     to keep the decoder receive-only).
+//                     Reset value is 0 by design. The keyboard's actual
+//                     CapsLock LED state on power-up is not observable
+//                     from a receive-only host, so if it boots with
+//                     CapsLock ON the user re-syncs by pressing Caps
+//                     once. This is the same behavior most PCs exhibit.
 //   seen_e0_q      :  1 for the cycle AFTER receiving 0xE0; tells the
 //                     next byte to be interpreted as an extended-key
 //                     make (or, with seen_f0_q, an extended release).
-//                     Cleared by every other byte.
+//                     Cleared by every other byte, or by the prefix
+//                     watchdog if no follow-up byte arrives in time.
 //   seen_f0_q      :  similar; means "the next byte is a release".
+//
+// Prefix watchdog:
+//   If seen_e0_q / seen_f0_q stay asserted for PREFIX_TIMEOUT_CYCLES
+//   local-clock cycles without a follow-up byte, both flags clear. This
+//   keeps a lost byte after E0/F0 (e.g. a phy frame error swallowed
+//   the release scancode) from poisoning subsequent decoding.
 //
 // ASCII mapping:
 //   * For LETTERS, effective_shift = shift_held_q XOR caps_locked_q.
@@ -48,7 +65,9 @@
 
 module io_ps2_decoder
     import chat_pkg::*;
-(
+#(
+    parameter int PREFIX_TIMEOUT_CYCLES = 1_000_000  // ~10 ms @ 100 MHz
+) (
     input  logic        clk,
     input  logic        rst_n,
 
@@ -65,10 +84,18 @@ module io_ps2_decoder
     // -----------------------------------------------------------------
     // Sticky modifier state and transient prefix flags.
     // -----------------------------------------------------------------
-    logic shift_held_q;
+    logic lshift_held_q;
+    logic rshift_held_q;
     logic caps_locked_q;
     logic seen_e0_q;
     logic seen_f0_q;
+
+    logic shift_held;
+    assign shift_held = lshift_held_q | rshift_held_q;
+
+    // Prefix watchdog counter.
+    localparam int PT_W = $clog2(PREFIX_TIMEOUT_CYCLES + 1);
+    logic [PT_W-1:0] prefix_timeout_q;
 
     // -----------------------------------------------------------------
     // Letter test (letters use shift XOR caps, others use plain shift).
@@ -159,53 +186,72 @@ module io_ps2_decoder
     byte_t  decoded_ascii;
 
     assign is_letter       = is_letter_scancode(byte_data);
-    assign effective_shift = is_letter ? (shift_held_q ^ caps_locked_q)
-                                       : shift_held_q;
+    assign effective_shift = is_letter ? (shift_held ^ caps_locked_q)
+                                       : shift_held;
     assign decoded_ascii   = scancode_to_ascii(byte_data, effective_shift);
+
+    // -----------------------------------------------------------------
+    // Shift release conditions (named for clarity inside the FSM).
+    //   - Left Shift release  = plain F0 12   (no E0)
+    //   - Right Shift release = F0 59 or E0 F0 59 (treat both identically)
+    // -----------------------------------------------------------------
+    logic is_lshift_release, is_rshift_release;
+    assign is_lshift_release = !seen_e0_q && (byte_data == 8'h12);
+    assign is_rshift_release =                (byte_data == 8'h59);
 
     // -----------------------------------------------------------------
     // Sequential state machine.
     // -----------------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            shift_held_q  <= 1'b0;
-            caps_locked_q <= 1'b0;
-            seen_e0_q     <= 1'b0;
-            seen_f0_q     <= 1'b0;
-            ev_valid      <= 1'b0;
-            ev_type       <= 3'd0;
-            ev_ascii      <= 8'd0;
+            lshift_held_q    <= 1'b0;
+            rshift_held_q    <= 1'b0;
+            caps_locked_q    <= 1'b0;
+            seen_e0_q        <= 1'b0;
+            seen_f0_q        <= 1'b0;
+            prefix_timeout_q <= '0;
+            ev_valid         <= 1'b0;
+            ev_type          <= 3'd0;
+            ev_ascii         <= 8'd0;
         end else begin
             // Per-cycle defaults; case branches override these.
             ev_valid <= 1'b0;
 
             if (byte_valid) begin
-                // Default the prefix flags low for this byte; the
-                // 0xE0 / 0xF0 case branches re-raise them.
-                seen_e0_q <= 1'b0;
-                seen_f0_q <= 1'b0;
+                prefix_timeout_q <= '0;
 
                 case (byte_data)
-                    8'hE0: seen_e0_q <= 1'b1;
-                    8'hF0: begin
-                        seen_f0_q <= 1'b1;
-                        seen_e0_q <= seen_e0_q;  // preserve E0 through F0
+                    8'hE0: begin
+                        // Extended-make prefix; consume any stale F0.
+                        seen_e0_q <= 1'b1;
+                        seen_f0_q <= 1'b0;
                     end
-                    8'hAA: ;  // BAT result, ignore
+                    8'hF0: begin
+                        // Release prefix. seen_e0_q intentionally kept --
+                        // an E0 F0 XX sequence is an extended-key release.
+                        seen_f0_q <= 1'b1;
+                    end
+                    8'hAA: begin
+                        // BAT result. Drop any pending prefix that was
+                        // probably stale across a keyboard reset.
+                        seen_e0_q <= 1'b0;
+                        seen_f0_q <= 1'b0;
+                    end
                     default: begin
+                        // Any other byte consumes both prefix flags.
+                        seen_e0_q <= 1'b0;
+                        seen_f0_q <= 1'b0;
+
                         // Decode based on PRE-edge prefix state.
                         if (seen_f0_q) begin
-                            // Release. Only Shift release is meaningful;
-                            // every other release (extended or not) is
-                            // dropped.
-                            if ((!seen_e0_q && (byte_data == 8'h12
-                                            || byte_data == 8'h59))
-                             || (seen_e0_q && byte_data == 8'h59))
-                                shift_held_q <= 1'b0;
+                            // Release. Only Shift releases are meaningful;
+                            // every other release is dropped.
+                            if (is_lshift_release) lshift_held_q <= 1'b0;
+                            if (is_rshift_release) rshift_held_q <= 1'b0;
                         end else if (seen_e0_q) begin
                             // Extended make.
                             unique case (byte_data)
-                                8'h59: shift_held_q <= 1'b1;  // Right Shift
+                                8'h59: rshift_held_q <= 1'b1;  // Right Shift
                                 8'h6B: begin
                                     ev_valid <= 1'b1;
                                     ev_type  <= 3'(KEY_LEFT);
@@ -231,11 +277,12 @@ module io_ps2_decoder
                         end else begin
                             // Plain make.
                             unique case (byte_data)
-                                8'h12, 8'h59: shift_held_q  <= 1'b1;
+                                8'h12:        lshift_held_q <= 1'b1;
+                                8'h59:        rshift_held_q <= 1'b1;
                                 8'h58:        caps_locked_q <= ~caps_locked_q;
                                 8'h5A: begin
                                     ev_valid <= 1'b1;
-                                    if (shift_held_q) begin
+                                    if (shift_held) begin
                                         ev_type  <= 3'(KEY_CHAR);
                                         ev_ascii <= 8'h0A;
                                     end else begin
@@ -264,6 +311,19 @@ module io_ps2_decoder
                         end
                     end
                 endcase
+            end else if (seen_e0_q || seen_f0_q) begin
+                // Prefix watchdog: if no follow-up byte arrives within
+                // PREFIX_TIMEOUT_CYCLES, drop the prefix so a lost byte
+                // doesn't poison subsequent decoding.
+                if (prefix_timeout_q == PT_W'(PREFIX_TIMEOUT_CYCLES - 1)) begin
+                    seen_e0_q        <= 1'b0;
+                    seen_f0_q        <= 1'b0;
+                    prefix_timeout_q <= '0;
+                end else begin
+                    prefix_timeout_q <= prefix_timeout_q + 1'b1;
+                end
+            end else begin
+                prefix_timeout_q <= '0;
             end
         end
     end
