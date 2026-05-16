@@ -82,10 +82,11 @@ static constexpr int MAX_INPUT_LINES  = 16;
 static constexpr int BUBBLE_MARGIN_L   = 2;
 static constexpr int BUBBLE_RIGHT_EDGE = 97;
 
-static constexpr uint8_t SPRITE_BL  = 0xF3;  // normal left border (rounded)
-static constexpr uint8_t SPRITE_BR  = 0xF4;  // normal right border (rounded)
-static constexpr uint8_t SPRITE_FBL = 0xF6;  // fail left border (square)
-static constexpr uint8_t SPRITE_FBR = 0xF7;  // fail right border (square)
+static constexpr uint8_t SPRITE_BL     = 0xF3;  // normal left border (rounded)
+static constexpr uint8_t SPRITE_BR     = 0xF4;  // normal right border (rounded)
+static constexpr uint8_t SPRITE_FBL    = 0xF6;  // fail left border (square)
+static constexpr uint8_t SPRITE_FBR    = 0xF7;  // fail right border (square)
+static constexpr uint8_t SPRITE_FAIL_X = 0xF2;  // X mark for failed local msgs
 
 // Mirror of the RTL MAX_LINES localparam in fe_render_decoder.sv.
 static constexpr int MAX_LINES = 16;
@@ -1069,14 +1070,15 @@ static void test_input_newline_renders_multirow() {
     CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor row = 1 (second line)");
     CHECK_EQ((int)dut->input_cursor_col_obs, 2, "cursor col = 2 (after 'cd')");
 
-    // Row 0 of the input region: "> ab" then blanks.
+    // Row 0 of the input region: "> ab" then ↵ then blanks.
     CHECK_EQ(read_cell(INPUT_ROW_START,    0), '>',  "row0 col0 prompt");
     CHECK_EQ(read_cell(INPUT_ROW_START,    1), ' ',  "row0 col1 prompt space");
     CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a',  "row0 col2 'a'");
     CHECK_EQ(read_cell(INPUT_ROW_START,    3), 'b',  "row0 col3 'b'");
-    CHECK_EQ(read_cell(INPUT_ROW_START,    4), ' ',  "row0 col4 blank past end");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    4), 0x0A, "row0 col4 NL glyph");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    5), ' ',  "row0 col5 blank past NL");
 
-    // Row 1: "cd" starting at col 0 (no prefix).
+    // Row 1: "cd" starting at col 0 (no prefix). Last line, no ↵.
     CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), 'c',  "row1 col0 'c'");
     CHECK_EQ(read_cell(INPUT_ROW_START+1,  1), 'd',  "row1 col1 'd'");
     CHECK_EQ(read_cell(INPUT_ROW_START+1,  2), ' ',  "row1 col2 blank");
@@ -1303,6 +1305,112 @@ static void test_input_soft_wrap_cursor_pre_wrap() {
     CHECK_EQ((int)dut->input_cursor_col_obs, 125, "cursor_pos=125 col=125");
 }
 
+// P5.3 -- NL glyph (return-arrow sprite at code 0x0A) is rendered at
+// the column right after the last content byte of any input row that
+// ended with a real 0x0A (Shift+Enter). Subsequent rows show their
+// own ↵; only the last (still-open) row has no ↵.
+static void test_input_nl_glyph_at_end_of_line() {
+    printf("== test_input_nl_glyph_at_end_of_line\n");
+    reset();
+    bring_up();
+    // "ab\nc\nd"
+    const uint8_t typed[] = {'a','b',0x0A,'c',0x0A,'d'};
+    for (int i = 0; i < 6; i++) {
+        RenderCmd ic;
+        ic.cmd = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii = typed[i];
+        send_cmd(ic);
+    }
+
+    // Row 0: "> ab↵". ↵ at col 4 (after 'b' at col 3).
+    CHECK_EQ(read_cell(INPUT_ROW_START,   2), 'a',  "row0 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   3), 'b',  "row0 'b'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   4), 0x0A, "row0 NL glyph at col 4");
+
+    // Row 1: "c↵". ↵ at col 1.
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 0), 'c',  "row1 'c'");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 1), 0x0A, "row1 NL glyph at col 1");
+
+    // Row 2: "d", no ↵ (last open line).
+    CHECK_EQ(read_cell(INPUT_ROW_START+2, 0), 'd',  "row2 'd'");
+    CHECK_EQ(read_cell(INPUT_ROW_START+2, 1), ' ',  "row2 col1 no NL glyph");
+}
+
+// P5.3 -- typing just "\n" produces an empty row 0 that should still
+// show a ↵ at col 2 (right after the prefix), since the row was
+// closed by a real 0x0A.
+static void test_input_nl_glyph_empty_line() {
+    printf("== test_input_nl_glyph_empty_line\n");
+    reset();
+    bring_up();
+    RenderCmd ic;
+    ic.cmd = RENDER_INSERT_AT_CURSOR;
+    ic.cursor_pos = 1;
+    ic.ascii = 0x0A;
+    send_cmd(ic);
+
+    // Row 0: "> ↵". ↵ at col 2.
+    CHECK_EQ(read_cell(INPUT_ROW_START,   2), 0x0A, "row0 NL glyph at col 2");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   3), ' ',  "row0 col3 blank");
+
+    // Row 1: empty (no ↵).
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 0), ' ',  "row1 col0 blank");
+}
+
+// P5.3 -- a row closed by soft-wrap (not \n) gets NO ↵; only newline-
+// terminated rows do. Type 127 'a's so row 0 fills via soft-wrap.
+static void test_input_no_nl_glyph_on_soft_wrap() {
+    printf("== test_input_no_nl_glyph_on_soft_wrap\n");
+    reset();
+    bring_up();
+    for (int i = 0; i < 127; i++) {
+        RenderCmd ic;
+        ic.cmd = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii = 'a';
+        send_cmd(ic);
+    }
+
+    // Row 0 ends at col 127 (full width). No ↵; no extra cell to
+    // check (col 128 doesn't exist).  Row 1 col 0 has the wrap'd 'a',
+    // and the byte right after ('a' at col 1 area) is blank, NOT ↵.
+    CHECK_EQ(read_cell(INPUT_ROW_START,   127), 'a', "row0 col127 last wrap byte");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 0),   'a', "row1 col0 wrap continuation");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 1),   ' ', "row1 col1 no NL glyph after wrap");
+}
+
+// P5.3 -- a failed local message gets an explicit X mark to the left
+// of the bubble's BL on the first visual row (in addition to the
+// square FBL/FBR border sprites it already has).
+static void test_local_fail_x_mark() {
+    printf("== test_local_fail_x_mark\n");
+    reset();
+    bring_up();
+    const uint8_t msg[] = {'h','i'};
+
+    // Append local pending, then mark fail.
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 7;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING;
+    c.payload = msg; c.payload_n = 2; c.len = 2;
+    send_cmd(c);
+
+    RenderCmd us;
+    us.cmd = RENDER_UPDATE_STATUS; us.msg_id = 7;
+    us.status = MSG_FAIL;
+    send_cmd(us);
+
+    // Local right-aligned: bubble_right=97, len=2 -> bubble_left=94.
+    // FBL at col 94, FBR at col 97. X mark at col 93.
+    int row = HIST_ROW_START;
+    CHECK_EQ(read_cell(row, 93), (uint8_t)SPRITE_FAIL_X, "X mark left of fail bubble");
+    CHECK_EQ(read_cell(row, 94), (uint8_t)SPRITE_FBL,    "FBL at bubble left");
+    CHECK_EQ(read_cell(row, 95), 'h',                    "row col95 'h'");
+    CHECK_EQ(read_cell(row, 96), 'i',                    "row col96 'i'");
+    CHECK_EQ(read_cell(row, 97), (uint8_t)SPRITE_FBR,    "FBR at bubble right");
+}
+
 // Enter-commit clears every visible input row, not just the first.
 static void test_input_commit_clears_all_rows() {
     printf("== test_input_commit_clears_all_rows\n");
@@ -1430,6 +1538,10 @@ int main(int argc, char** argv) {
     test_bubble_multiline_aligned();
     test_input_soft_wrap_long_line();
     test_input_soft_wrap_cursor_pre_wrap();
+    test_input_nl_glyph_at_end_of_line();
+    test_input_nl_glyph_empty_line();
+    test_input_no_nl_glyph_on_soft_wrap();
+    test_local_fail_x_mark();
 
     tfp->close();
     delete tfp;

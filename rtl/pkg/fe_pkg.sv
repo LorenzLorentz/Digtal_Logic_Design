@@ -83,6 +83,15 @@ package fe_pkg;
     localparam byte_t SPRITE_FBL     = 8'hF6;  // fail left border (square)
     localparam byte_t SPRITE_FBR     = 8'hF7;  // fail right border (square)
 
+    // Standalone status icons. 0x0A is the "return arrow" glyph -- it
+    // gets rendered at the end of input lines that are terminated by
+    // a real 0x0A byte so the user can see where Shift+Enter landed.
+    // 0xF2 is the "X" mark, drawn to the left of failed local bubbles
+    // so the fail is unambiguous even if the rounded vs. square corner
+    // sprites are hard to tell apart at a glance.
+    localparam byte_t SPRITE_NL_GLYPH = 8'h0A;
+    localparam byte_t SPRITE_FAIL_X   = 8'hF2;
+
     // -----------------------------------------------------------------
     // Pixel timing  (800x600 @ 60Hz, pixel clock = 40 MHz)
     //   Switched off the 72Hz example mode: many modern monitors don't

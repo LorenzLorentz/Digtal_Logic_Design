@@ -181,6 +181,10 @@ module fe_render_decoder
     logic [LINE_CNT_W-1:0]            input_n_lines_q;
     logic [LINE_IDX_W-1:0]            input_ml_offset_q [MAX_INPUT_LINES];
     msg_len_t                         input_ml_len_q    [MAX_INPUT_LINES];
+    // True iff this visual row was closed by a real 0x0A byte (i.e.
+    // the user hit Shift+Enter, not soft-wrap). The renderer paints
+    // SPRITE_NL_GLYPH right after the content on these rows.
+    logic                             input_ml_ended_nl_q [MAX_INPUT_LINES];
     logic [INPUT_LINE_W-1:0]          input_cursor_row_q;
     msg_len_t                         input_cursor_col_q;
     logic [INPUT_SCROLL_W-1:0]        input_scroll_offset_q;
@@ -382,9 +386,15 @@ module fe_render_decoder
     logic [LINE_IDX_W-1:0] payload_idx;
     logic              payload_in_range;
     msg_len_t          cur_sub_len;
+    // X-mark column for failed local messages: drawn one column to the
+    // left of the bubble's BL, on the first visual row only, so a fail
+    // is visible at a glance. bubble_left is always >= 16 (the soft-wrap
+    // caps message width at MAX_BUBBLE_INNER_W = 80), so the -1 is safe.
+    logic [FE_COL_W-1:0] fail_x_col;
 
     assign show_fail = (side_q == 2'(MSG_LOCAL)) && (status_q == 2'(MSG_FAIL));
     assign cur_sub_len = ml_len_q[cur_line_sel];
+    assign fail_x_col  = bubble_left - FE_COL_W'(1);
 
     // Bubble inner width is the message-wide max sub-line length. Every
     // sub-line of the same message uses the same width (shorter lines
@@ -429,8 +439,12 @@ module fe_render_decoder
         else
             titlebar_cell = " ";
 
-        // history row -- bubble layout (multi-line aware)
-        if (col_cnt_q == bubble_left)
+        // history row -- bubble layout (multi-line aware). Failed local
+        // messages get an explicit X mark in the first visual row at
+        // col bubble_left - 1.
+        if (show_fail && (cur_line_q == '0) && (col_cnt_q == fail_x_col))
+            hist_cell = SPRITE_FAIL_X;
+        else if (col_cnt_q == bubble_left)
             hist_cell = show_fail ? SPRITE_FBL : SPRITE_BL;
         else if (col_cnt_q == bubble_right)
             hist_cell = show_fail ? SPRITE_FBR : SPRITE_BR;
@@ -443,6 +457,9 @@ module fe_render_decoder
         // the input area carries the "> " prefix; rows 1..n_lines-1
         // start at col 0. Rows past n_lines are blanked so a buffer
         // that shrunk (e.g. Enter-commit) doesn't leave stale content.
+        // A row that ended with a logical newline gets a return-arrow
+        // sprite at the column right after its content (so the user
+        // can see where Shift+Enter landed).
         if (LINE_CNT_W'(input_row_cnt_q) >= input_n_lines_q) begin
             input_cell = " ";
         end else if (input_row_cnt_q == '0) begin
@@ -450,6 +467,9 @@ module fe_render_decoder
                 input_cell = input_prefix_byte(int'(col_cnt_q));
             else if (LEN_WIDTH'(input_idx) < input_ml_len_q[0])
                 input_cell = input_line_q[LINE_IDX_W'(input_idx)];
+            else if (input_ml_ended_nl_q[0]
+                     && (LEN_WIDTH'(input_idx) == input_ml_len_q[0]))
+                input_cell = SPRITE_NL_GLYPH;
             else
                 input_cell = " ";
         end else begin
@@ -458,6 +478,10 @@ module fe_render_decoder
                 input_cell = input_line_q[
                     input_ml_offset_q[input_row_cnt_q]
                     + LINE_IDX_W'(col_cnt_q)];
+            else if (input_ml_ended_nl_q[input_row_cnt_q]
+                     && (LEN_WIDTH'(col_cnt_q)
+                         == input_ml_len_q[input_row_cnt_q]))
+                input_cell = SPRITE_NL_GLYPH;
             else
                 input_cell = " ";
         end
@@ -715,8 +739,9 @@ module fe_render_decoder
                 input_line_q[i] <= 8'h20;
             input_n_lines_q       <= LINE_CNT_W'(1);
             for (int i = 0; i < MAX_INPUT_LINES; i++) begin
-                input_ml_offset_q[i] <= '0;
-                input_ml_len_q[i]    <= '0;
+                input_ml_offset_q[i]  <= '0;
+                input_ml_len_q[i]     <= '0;
+                input_ml_ended_nl_q[i] <= 1'b0;
             end
             input_cursor_row_q    <= '0;
             input_cursor_col_q    <= '0;
@@ -1085,6 +1110,7 @@ module fe_render_decoder
 
                 if (is_break) begin
                     input_ml_len_q[parse_last_sel] <= new_line_len;
+                    input_ml_ended_nl_q[parse_last_sel] <= is_nl;
                     input_ml_offset_q[parse_line_sel]
                         <= parse_idx_q + LINE_IDX_W'(1);
                     if (input_cursor_q > msg_len_t'(parse_idx_q)) begin
@@ -1108,6 +1134,10 @@ module fe_render_decoder
 
                     input_ml_len_q[parse_last_sel]
                         <= input_len_q - msg_len_t'(parse_line_start_q);
+                    // The final, still-open visual line never ended in a
+                    // newline (we exited because we ran out of bytes,
+                    // not because we hit a break).
+                    input_ml_ended_nl_q[parse_last_sel] <= 1'b0;
                     input_n_lines_q    <= parse_n_lines_q;
                     input_cursor_row_q <= parse_cursor_row_q;
                     input_cursor_col_q <= parse_cursor_col_q;
