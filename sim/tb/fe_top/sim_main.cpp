@@ -27,6 +27,13 @@
 //  16. test_pixel_boot_splash        BOOT splash colour emitted
 //  17. test_remote_long_message      max-length remote bubble fits
 //  18. test_local_long_message       max-length local bubble fits
+//  19. test_multiline_local          local "hi\nbye" -> 2 rows right-aligned
+//  20. test_multiline_remote         remote "ab\ncd" -> 2 rows left-aligned
+//  21. test_multiline_status_update  status update rewrites all rows
+//  22. test_multiline_wraps_ring     multi-line at end-of-ring wraps rows
+//                                    instead of spilling past HIST_ROW_END
+//  23. test_multiline_overflow       payload with >MAX_LINES newlines does
+//                                    not OOB; tail merges into last row
 // =====================================================================
 
 #include "Vfe_top.h"
@@ -736,6 +743,131 @@ static void test_multiline_status_update() {
     CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_FBR, "row1 fail right border");
 }
 
+// Multi-line message landing at the end of the history ring must wrap
+// its line writes modulo N_HIST_STORED -- otherwise the second line
+// spills into the sep row (HIST_ROW_END+1=66) and beyond, corrupting
+// non-history rows.
+//
+// Setup: push 63 single-line remote messages so hist_wr_row_q == 63;
+// then a 2-line local "a\nb". After fix:
+//   - line 0 -> text_ram row HIST_ROW_START+63 = 65
+//   - line 1 -> wraps to text_ram row HIST_ROW_START+0  = 2
+//   - row 66 (sep gap) and row 67 (INPUT_ROW) remain space
+//   - hist_wr_row_q advances to (63+2) & 63 = 1
+static void test_multiline_wraps_ring() {
+    printf("== test_multiline_wraps_ring\n");
+    reset();
+    bring_up();
+
+    // Push 63 single-byte remote messages to land hist_wr_row at 63.
+    const uint8_t tag[] = {'X'};
+    for (int i = 0; i < 63; i++) {
+        RenderCmd c;
+        c.cmd = RENDER_APPEND_REMOTE; c.msg_id = (uint8_t)i;
+        c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
+        c.payload = tag; c.payload_n = 1; c.len = 1;
+        send_cmd(c);
+    }
+    CHECK_EQ(dut->hist_wr_row_obs, 63, "hist_wr_row at 63 before multi-line");
+
+    // Sanity: row 66 (sep) and row 67 (INPUT_ROW) are still space.
+    CHECK_EQ(read_cell(66, 96), ' ', "row66 col96 pre = space");
+    CHECK_EQ(read_cell(67, 96), ' ', "row67 col96 pre = space");
+
+    // Now a 2-line local message "a\nb".
+    const uint8_t msg[] = {'a', 0x0A, 'b'};
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 200;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING;
+    c.payload = msg; c.payload_n = 3; c.len = 3;
+    send_cmd(c);
+
+    // Line 0 "a" right-aligned at row 65: BL@95, 'a'@96, BR@97.
+    CHECK_EQ(read_cell(65, 95), (uint8_t)SPRITE_BL, "row65 BL");
+    CHECK_EQ(read_cell(65, 96), 'a',                "row65 'a'");
+    CHECK_EQ(read_cell(65, 97), (uint8_t)SPRITE_BR, "row65 BR");
+
+    // Line 1 "b" MUST wrap to row 2 (HIST_ROW_START + 0).
+    CHECK_EQ(read_cell(2, 95), (uint8_t)SPRITE_BL, "wrap row2 BL");
+    CHECK_EQ(read_cell(2, 96), 'b',                "wrap row2 'b'");
+    CHECK_EQ(read_cell(2, 97), (uint8_t)SPRITE_BR, "wrap row2 BR");
+
+    // Row 66 and 67 must remain untouched.
+    CHECK_EQ(read_cell(66, 95), ' ', "row66 col95 untouched");
+    CHECK_EQ(read_cell(66, 96), ' ', "row66 col96 untouched");
+    CHECK_EQ(read_cell(66, 97), ' ', "row66 col97 untouched");
+    CHECK_EQ(read_cell(67, 96), ' ', "row67 (INPUT_ROW) col96 untouched");
+
+    // Ring head advanced by 2 from 63 -> 1.
+    CHECK_EQ(dut->hist_wr_row_obs, 1, "hist_wr_row wraps to 1");
+}
+
+// A message with more than MAX_LINES=8 newlines must NOT cause OOB
+// writes to ml_offset_q/ml_len_q, and must NOT silently truncate to
+// (n_lines mod 8) lines. Behavior we want: stop counting newlines once
+// MAX_LINES is reached; everything after merges into the final line.
+//
+// Send "a\nb\nc\nd\ne\nf\ng\nh\ni\nj" (10 single-char lines, 19 bytes).
+// After fix:
+//   - rows HIST_ROW_START+0..6 render 'a'..'g' (single-char bubbles)
+//   - row HIST_ROW_START+7 absorbs "h\ni\nj" (5 bytes; \n stays as
+//     a glyph byte 0x0A in the bubble)
+//   - row HIST_ROW_START+8 must remain space (no 9th row written)
+//   - hist_wr_row advances by MAX_LINES=8, not by 10
+static void test_multiline_overflow() {
+    printf("== test_multiline_overflow\n");
+    reset();
+    bring_up();
+
+    uint8_t msg[19];
+    int n = 0;
+    for (char ch = 'a'; ch <= 'j'; ch++) {
+        msg[n++] = (uint8_t)ch;
+        if (ch != 'j') msg[n++] = 0x0A;
+    }
+    // n == 19
+
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 1;
+    c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
+    c.payload = msg; c.payload_n = (size_t)n; c.len = (uint8_t)n;
+    send_cmd(c);
+
+    // Rows 0..6 (HIST_ROW_START + 0..6): single-char remote bubbles.
+    // Remote single char: BL@2, payload@3, BR@4.
+    const char lines[7] = {'a','b','c','d','e','f','g'};
+    for (int i = 0; i < 7; i++) {
+        int row = HIST_ROW_START + i;
+        char lbl[40];
+        snprintf(lbl, sizeof(lbl), "row %d BL", i);
+        CHECK_EQ(read_cell(row, 2), (uint8_t)SPRITE_BL, lbl);
+        snprintf(lbl, sizeof(lbl), "row %d char '%c'", i, lines[i]);
+        CHECK_EQ(read_cell(row, 3), (uint8_t)lines[i], lbl);
+        snprintf(lbl, sizeof(lbl), "row %d BR", i);
+        CHECK_EQ(read_cell(row, 4), (uint8_t)SPRITE_BR, lbl);
+    }
+
+    // Row 7 (HIST_ROW_START + 7): "h\ni\nj" merged. Length 5.
+    // Remote: BL@2, payload[0..4]@3..7, BR@8.
+    int row7 = HIST_ROW_START + 7;
+    CHECK_EQ(read_cell(row7, 2), (uint8_t)SPRITE_BL, "row7 BL");
+    CHECK_EQ(read_cell(row7, 3), 'h',                "row7 [0]='h'");
+    CHECK_EQ(read_cell(row7, 4), 0x0A,               "row7 [1]=0x0A");
+    CHECK_EQ(read_cell(row7, 5), 'i',                "row7 [2]='i'");
+    CHECK_EQ(read_cell(row7, 6), 0x0A,               "row7 [3]=0x0A");
+    CHECK_EQ(read_cell(row7, 7), 'j',                "row7 [4]='j'");
+    CHECK_EQ(read_cell(row7, 8), (uint8_t)SPRITE_BR, "row7 BR");
+
+    // Row 8 must be unwritten (space across the row).
+    int row8 = HIST_ROW_START + 8;
+    CHECK_EQ(read_cell(row8, 2), ' ', "row8 col2 space");
+    CHECK_EQ(read_cell(row8, 3), ' ', "row8 col3 space");
+    CHECK_EQ(read_cell(row8, 4), ' ', "row8 col4 space");
+
+    // Ring head moved exactly MAX_LINES=8 from 0.
+    CHECK_EQ(dut->hist_wr_row_obs, 8, "hist_wr_row advanced by 8");
+}
+
 // =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
@@ -766,6 +898,8 @@ int main(int argc, char** argv) {
     test_multiline_local();
     test_multiline_remote();
     test_multiline_status_update();
+    test_multiline_wraps_ring();
+    test_multiline_overflow();
 
     tfp->close();
     delete tfp;
