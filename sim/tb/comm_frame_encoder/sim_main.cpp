@@ -27,8 +27,8 @@ static int                     g_failures = 0;
 static Vcomm_frame_encoder*    dut        = nullptr;
 static VerilatedVcdC*          tfp        = nullptr;
 
-static constexpr int MAX_MSG_LEN = 640;
-static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;     // 160 dwords
+static constexpr int MAX_MSG_LEN = 128;
+static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;     // 32 dwords
 static constexpr uint8_t SOF_BYTE = 0x7E;
 
 // frame_type_e
@@ -270,12 +270,13 @@ static void test_max_payload() {
     check_stream_eq(got, want, lbl);
 }
 
-// Lengths that fit in the high byte (> 255) only, to confirm LEN_HI is
-// transmitted correctly.
-static void test_len_over_255() {
-    printf("== test_len_over_255\n");
+// Range coverage at the LEN_HI/LEN_LO boundary. With MAX_MSG_LEN=128
+// every encoded length has LEN_HI == 0, but the boundaries near 64,
+// 127, and 128 still exercise the loop / payload-size path.
+static void test_len_range() {
+    printf("== test_len_range\n");
     reset();
-    for (int L : {256, 320, 511, 512, MAX_MSG_LEN - 1}) {
+    for (int L : {1, 64, MAX_MSG_LEN - 1, MAX_MSG_LEN}) {
         std::vector<uint8_t> p(L);
         for (int i = 0; i < L; i++) p[i] = (uint8_t)((i * 31 + 17) & 0xFF);
         auto got  = send_frame(FRAME_DATA, (uint8_t)(L & 0xFF), p);
@@ -300,7 +301,7 @@ int main(int argc, char** argv) {
     test_back_to_back();
     test_consumer_throttle();
     test_max_payload();
-    test_len_over_255();
+    test_len_range();
 
     tfp->close();
     delete tfp;

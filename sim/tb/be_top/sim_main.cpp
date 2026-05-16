@@ -37,8 +37,8 @@ static int              g_failures = 0;
 static Vbe_top*         dut        = nullptr;
 static VerilatedVcdC*   tfp        = nullptr;
 
-static constexpr int MAX_LINE_LEN = 640;
-static constexpr int MAX_MSG_LEN  = 640;
+static constexpr int MAX_LINE_LEN = 128;
+static constexpr int MAX_MSG_LEN  = 128;
 static constexpr int PAYLOAD_W    = MAX_MSG_LEN * 8 / 32;
 
 // key_type_e

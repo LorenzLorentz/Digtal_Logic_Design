@@ -18,14 +18,14 @@ package chat_pkg;
     // -----------------------------------------------------------------
     // Sizing parameters
     // -----------------------------------------------------------------
-    // MAX_MSG_LEN/MAX_LINE_LEN bumped to 640 to support variable-length
-    // payloads up to ~10 visible rows of bubble text. LEN_WIDTH widens
-    // to 16 so msg_len_t (and the on-wire LEN field) can carry the full
-    // 0..MAX_MSG_LEN range. The frame layer transmits LEN as two bytes
-    // (LEN_HI then LEN_LO).
-    localparam int MAX_MSG_LEN  = 640;   // bytes per chat message payload
+    // Variable-length payload support. 128 is the current compile-and-
+    // board-test setting; the wire format still uses the 16-bit LEN
+    // (LEN_HI / LEN_LO) introduced in P2, so raising this back to
+    // 256/640 is a one-line change here -- see docs/synthesis_perf.md
+    // for the elab-time/BRAM trade-offs at higher MAX_MSG_LEN.
+    localparam int MAX_MSG_LEN  = 128;   // bytes per chat message payload
     localparam int MAX_MSG_NUM  = 64;    // chat history depth
-    localparam int MAX_LINE_LEN = 640;   // current input line buffer
+    localparam int MAX_LINE_LEN = 128;   // current input line buffer
     localparam int MAX_NAME_LEN = 16;    // peer username (ASCII bytes)
 
     localparam int MSG_ID_WIDTH = 8;

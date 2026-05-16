@@ -1085,17 +1085,17 @@ static void test_input_commit_clears_all_rows() {
     CHECK_EQ(read_cell(INPUT_ROW_START+2,  0), ' ',  "row2 col0 cleared");
 }
 
-// 256-byte remote payload with 4 newlines split into 5 lines of 50 chars
-// each. Validates that the MAX_MSG_LEN=640 widening + 2-byte wire LEN
-// flow through to the renderer without any 8-bit truncation.
+// Multi-line remote payload split into 5 lines. Validates that the
+// 16-bit LEN wire field and multi-line parser flow through to the
+// renderer correctly. Sized to fit in the current MAX_MSG_LEN cap.
 static void test_long_multiline_payload() {
     printf("== test_long_multiline_payload\n");
     reset();
     bring_up();
 
-    const int LINE_W   = 50;
+    const int LINE_W   = 20;
     const int N_LINES  = 5;
-    const int TOTAL    = LINE_W * N_LINES + (N_LINES - 1);  // 254 bytes
+    const int TOTAL    = LINE_W * N_LINES + (N_LINES - 1);  // 104 bytes
     uint8_t msg[TOTAL];
     int idx = 0;
     for (int ln = 0; ln < N_LINES; ln++) {

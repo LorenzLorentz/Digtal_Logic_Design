@@ -24,7 +24,7 @@ static int              g_failures = 0;
 static Vcomm_top_lb*    dut        = nullptr;
 static VerilatedVcdC*   tfp        = nullptr;
 
-static constexpr int MAX_MSG_LEN = 640;
+static constexpr int MAX_MSG_LEN = 128;
 static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;
 
 enum : uint8_t {
@@ -194,17 +194,18 @@ static void test_multiple_data() {
     }
 }
 
-// Long DATA round-trip exercises the 2-byte LEN wire format end-to-end
-// (encoder + uart loopback + decoder + rx fsm).
+// Long-ish DATA round-trip exercises the 2-byte LEN wire format
+// end-to-end (encoder + uart loopback + decoder + rx fsm). With
+// MAX_MSG_LEN=128 the LEN_HI byte is always 0 on the wire, so this
+// covers payload-byte plumbing rather than the LEN_HI path itself
+// (that's exercised by comm_frame_decoder's malformed-len tests).
 //
 // Per-byte serialisation cost in this TB: BAUD_DIV=16 cycles/bit *
-// 10 bits/byte = 160 cycles. A 300-byte payload + 7-byte header + ACK
-// frame round-trip easily exceeds the default 8000-cycle ARQ timeout,
-// so comm_top_lb sets TIMEOUT_CYCLES=200_000.
+// 10 bits/byte = 160 cycles. comm_top_lb sets TIMEOUT_CYCLES=200_000.
 static void test_long_data_roundtrip() {
     printf("== test_long_data_roundtrip\n");
     reset();
-    const int L = 300;  // > 255 to force LEN_HI != 0
+    const int L = MAX_MSG_LEN;  // exactly at the cap
     std::vector<uint8_t> p(L);
     for (int i = 0; i < L; i++) p[i] = (uint8_t)((i * 13 + 5) & 0xFF);
     submit(FRAME_DATA, 0x77, p);

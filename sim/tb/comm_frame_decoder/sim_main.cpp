@@ -28,7 +28,7 @@ static int                     g_failures = 0;
 static Vcomm_frame_decoder*    dut        = nullptr;
 static VerilatedVcdC*          tfp        = nullptr;
 
-static constexpr int      MAX_MSG_LEN = 640;
+static constexpr int      MAX_MSG_LEN = 128;
 static constexpr int      PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;
 static constexpr uint8_t  SOF_BYTE    = 0x7E;
 
@@ -277,7 +277,9 @@ static void test_malformed_len() {
     CHECK_EQ((int)events[0].ftype, FRAME_GOODBYE, "ftype");
 }
 
-// Length exactly at the boundary (MAX_MSG_LEN+1) should also drop.
+// Length exactly at the boundary (MAX_MSG_LEN+1) should also drop. The
+// LEN_HI byte is exercised here regardless of MAX_MSG_LEN value -- we
+// pick a 16-bit length whose high byte is nonzero.
 static void test_len_just_over_max() {
     printf("== test_len_just_over_max\n");
     reset();
@@ -291,13 +293,27 @@ static void test_len_just_over_max() {
     feed_stream(stream, events, drops);
     CHECK_EQ((int)events.size(), 0, "no delivery on len=MAX+1");
     CHECK_EQ(drops, 1, "one drop pulse on len=MAX+1");
+
+    // 0x0100 (=256) is > MAX_MSG_LEN (128) and has LEN_HI=1, so it also
+    // exercises the LEN_HI byte path end-to-end through the drop path.
+    reset();
+    std::vector<uint8_t> stream_hi = {
+        SOF_BYTE, FRAME_DATA, 0, 0x01, 0x00
+    };
+    std::vector<DeliverEvt> events2;
+    int drops2 = 0;
+    feed_stream(stream_hi, events2, drops2);
+    CHECK_EQ((int)events2.size(), 0, "no delivery on len=0x0100");
+    CHECK_EQ(drops2, 1, "one drop pulse on len=0x0100");
 }
 
-// Long payloads (> 255 bytes) verify the LEN_HI byte path end-to-end.
-static void test_decode_long_payload() {
-    printf("== test_decode_long_payload\n");
+// Round-trip decode at varying lengths. MAX_MSG_LEN=128 means LEN_HI is
+// always 0 on successful frames, so the boundary cases live in
+// test_len_just_over_max above.
+static void test_decode_payload_range() {
+    printf("== test_decode_payload_range\n");
     reset();
-    for (int L : {256, 512, MAX_MSG_LEN}) {
+    for (int L : {1, 64, MAX_MSG_LEN - 1, MAX_MSG_LEN}) {
         std::vector<uint8_t> p(L);
         for (int i = 0; i < L; i++) p[i] = (uint8_t)((i * 7 + 3) & 0xFF);
         auto stream = encode(FRAME_DATA, (uint8_t)(L & 0xFF), p);
@@ -382,7 +398,7 @@ int main(int argc, char** argv) {
     test_bad_crc();
     test_malformed_len();
     test_len_just_over_max();
-    test_decode_long_payload();
+    test_decode_payload_range();
     test_back_to_back();
     test_back_pressure_hold();
 
