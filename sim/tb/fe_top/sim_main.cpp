@@ -529,12 +529,30 @@ static void test_peer_change_clears_hist() {
 // ---------------------------------------------------------------------
 // Scroll tests (RENDER_SCROLL_UP / RENDER_SCROLL_DOWN)
 // ---------------------------------------------------------------------
+// Helper: append N short history rows (each a single byte 'X', no \n),
+// so used_hist_rows == N (until the ring fills at N_HIST_STORED = 64).
+static void append_n_short_msgs(int n) {
+    const uint8_t tag[] = {'X'};
+    for (int i = 0; i < n; i++) {
+        RenderCmd c;
+        c.cmd = RENDER_APPEND_REMOTE; c.msg_id = (uint8_t)i;
+        c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
+        c.payload = tag; c.payload_n = 1; c.len = 1;
+        send_cmd(c);
+    }
+}
+
 static void test_scroll_up_down() {
     printf("== test_scroll_up_down\n");
     reset();
     bring_up();
 
     CHECK_EQ(dut->scroll_offset_obs, 0, "scroll starts at 0");
+
+    // Need real content -- scroll cap is now derived from used_hist_rows,
+    // not the static buffer size. Pre-fill 40 single-row messages so the
+    // dynamic cap = 40 - N_HIST_VISIBLE(29) = 11 -- room for 3 ticks.
+    append_n_short_msgs(40);
 
     RenderCmd su; su.cmd = RENDER_SCROLL_UP;
     send_cmd(su); send_cmd(su); send_cmd(su);
@@ -548,13 +566,58 @@ static void test_scroll_up_down() {
     send_cmd(sd); send_cmd(sd); send_cmd(sd);
     CHECK_EQ(dut->scroll_offset_obs, 0, "scroll down clamps at 0");
 
-    // Scroll up past max -> clamps at SCROLL_MAX = N_HIST_STORED - N_HIST_VISIBLE.
-    // (P3 layout: N_HIST_STORED=64, N_HIST_VISIBLE=29 -> SCROLL_MAX=35.)
-    const int N_HIST_STORED  = 64;
+    // Scroll up past max -> clamps at dynamic max = used_hist_rows -
+    // N_HIST_VISIBLE = 40 - 29 = 11.
+    for (int i = 0; i < 64; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, 11,
+             "scroll up clamps at used_hist_rows - N_HIST_VISIBLE");
+}
+
+// With no history yet, RENDER_SCROLL_UP is a no-op (dynamic cap = 0).
+// Same for RENDER_INPUT_SCROLL_UP with input_n_lines = 1.
+static void test_scroll_clamps_when_empty() {
+    printf("== test_scroll_clamps_when_empty\n");
+    reset();
+    bring_up();
+
+    RenderCmd su; su.cmd = RENDER_SCROLL_UP;
+    for (int i = 0; i < 10; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, 0,
+             "scroll up no-op with empty history");
+
+    RenderCmd isu; isu.cmd = RENDER_INPUT_SCROLL_UP;
+    for (int i = 0; i < 10; i++) send_cmd(isu);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 0,
+             "input scroll up no-op with single input line");
+}
+
+// Scroll cap grows with each appended message until the ring fills.
+static void test_scroll_cap_tracks_content() {
+    printf("== test_scroll_cap_tracks_content\n");
+    reset();
+    bring_up();
     const int N_HIST_VISIBLE = 29;
-    const int SCROLL_MAX     = N_HIST_STORED - N_HIST_VISIBLE;
-    for (int i = 0; i < N_HIST_STORED + 4; i++) send_cmd(su);
-    CHECK_EQ((int)dut->scroll_offset_obs, SCROLL_MAX, "scroll up clamps at SCROLL_MAX");
+
+    // 29 short messages: cap still 0 (fits entirely in visible window).
+    append_n_short_msgs(N_HIST_VISIBLE);
+    RenderCmd su; su.cmd = RENDER_SCROLL_UP;
+    for (int i = 0; i < 5; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, 0,
+             "29 msgs => cap 0 (all fit in visible window)");
+
+    // 30 messages: cap = 1, so scroll up can reach 1.
+    append_n_short_msgs(1);
+    for (int i = 0; i < 5; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, 1,
+             "30 msgs => cap 1");
+
+    // 64 messages (ring full): cap = 35.
+    RenderCmd sd; sd.cmd = RENDER_SCROLL_DOWN;
+    for (int i = 0; i < 5; i++) send_cmd(sd);  // reset scroll
+    append_n_short_msgs(64 - 30);
+    for (int i = 0; i < 64; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, 64 - N_HIST_VISIBLE,
+             "ring full => cap = N_HIST_STORED - N_HIST_VISIBLE");
 }
 
 static void test_peer_change_resets_scroll() {
@@ -562,17 +625,25 @@ static void test_peer_change_resets_scroll() {
     reset();
     bring_up();
 
+    // Pre-fill enough rows that we can actually scroll.
+    append_n_short_msgs(35);
+
     RenderCmd su; su.cmd = RENDER_SCROLL_UP;
     for (int i = 0; i < 5; i++) send_cmd(su);
     CHECK_EQ(dut->scroll_offset_obs, 5, "scrolled up 5");
 
-    // Switch peer -> scroll resets to 0.
+    // Switch peer -> scroll AND used_hist_rows reset.
     const uint8_t eve[] = {'E','v','e'};
     RenderCmd cn2;
     cn2.cmd = RENDER_CONN_STATE; cn2.conn_state = CONN_CONNECTED;
     cn2.peer_name = eve; cn2.peer_name_n = 3; cn2.peer_name_len = 3;
     send_cmd(cn2);
     CHECK_EQ(dut->scroll_offset_obs, 0, "scroll reset on peer change");
+
+    // And after peer change the cap is back to 0 -- no scroll possible.
+    for (int i = 0; i < 5; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, 0,
+             "peer change resets used_hist_rows => scroll no-op");
 }
 
 static void test_hist_ring_wrap() {
@@ -1108,7 +1179,8 @@ static void test_cursor_auto_follow_scroll() {
 }
 
 // RENDER_INPUT_SCROLL_UP / DOWN nudge the input window without
-// repainting the input region; clamps at [0, INPUT_SCROLL_MAX].
+// repainting the input region; clamps at [0, input_n_lines -
+// N_INPUT_VISIBLE], i.e. the cap follows actual typed line count.
 static void test_input_scroll_clamps() {
     printf("== test_input_scroll_clamps\n");
     reset();
@@ -1116,26 +1188,41 @@ static void test_input_scroll_clamps() {
 
     CHECK_EQ((int)dut->input_scroll_offset_obs, 0, "input scroll starts at 0");
 
-    // Scroll up a few ticks, then verify it actually moves.
+    // Type 9 newline-separated short lines so input_n_lines = 9.
+    // Dynamic cap = 9 - N_INPUT_VISIBLE(5) = 4 -- room for 3 ticks.
+    for (int i = 0; i < 9; i++) {
+        if (i > 0) {
+            RenderCmd ic;
+            ic.cmd = RENDER_INSERT_AT_CURSOR;
+            ic.cursor_pos = (uint16_t)(2 * i);  // logical pos after this byte
+            ic.ascii = 0x0A;
+            send_cmd(ic);
+        }
+        RenderCmd ic;
+        ic.cmd = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(2 * i + 1);
+        ic.ascii = (uint8_t)('a' + i);
+        send_cmd(ic);
+    }
+
+    // Cursor is at last typed char on row 8, so auto-follow already
+    // pushed input_scroll_offset to 8 - (N_INPUT_VISIBLE-1) = 4.
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 4,
+             "auto-follow snapped scroll to keep cursor visible");
+
+    // Scroll back down to 0 manually.
+    RenderCmd sd; sd.cmd = RENDER_INPUT_SCROLL_DOWN;
+    for (int i = 0; i < 6; i++) send_cmd(sd);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 0, "scroll down clamps at 0");
+
+    // Scroll up: cap is now 4 (9 lines - 5 visible).
     RenderCmd su; su.cmd = RENDER_INPUT_SCROLL_UP;
     send_cmd(su); send_cmd(su); send_cmd(su);
     CHECK_EQ((int)dut->input_scroll_offset_obs, 3, "scroll up 3 ticks");
 
-    // Scroll back down once.
-    RenderCmd sd; sd.cmd = RENDER_INPUT_SCROLL_DOWN;
-    send_cmd(sd);
-    CHECK_EQ((int)dut->input_scroll_offset_obs, 2, "scroll down 1");
-
-    // Down past 0 clamps.
-    send_cmd(sd); send_cmd(sd); send_cmd(sd);
-    CHECK_EQ((int)dut->input_scroll_offset_obs, 0, "scroll down clamps at 0");
-
-    // Up past max clamps at INPUT_SCROLL_MAX = MAX_INPUT_LINES - N_INPUT_VISIBLE.
-    const int N_INPUT_VISIBLE = 5;
-    const int INPUT_SCROLL_MAX = MAX_INPUT_LINES - N_INPUT_VISIBLE;  // 11
-    for (int i = 0; i < MAX_INPUT_LINES + 4; i++) send_cmd(su);
-    CHECK_EQ((int)dut->input_scroll_offset_obs, INPUT_SCROLL_MAX,
-             "scroll up clamps at INPUT_SCROLL_MAX");
+    for (int i = 0; i < 10; i++) send_cmd(su);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 4,
+             "scroll up clamps at input_n_lines - N_INPUT_VISIBLE");
 }
 
 // P5.1 input area soft-wrap: typing a long line with no 0x0A wraps
@@ -1321,6 +1408,8 @@ int main(int argc, char** argv) {
     test_move_cursor();
     test_peer_change_clears_hist();
     test_scroll_up_down();
+    test_scroll_clamps_when_empty();
+    test_scroll_cap_tracks_content();
     test_peer_change_resets_scroll();
     test_hist_ring_wrap();
     test_pixel_boot_splash();

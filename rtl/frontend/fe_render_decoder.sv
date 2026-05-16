@@ -212,6 +212,12 @@ module fe_render_decoder
 
     logic [HIST_W-1:0]                hist_wr_row_q;
     logic [SCROLL_W-1:0]              scroll_offset_q;
+    // Total text-ram rows actually written for the current peer. Caps
+    // at N_HIST_STORED (the ring fills). Used to clamp scroll_offset_q
+    // so the user can't scroll up past the oldest stored message into
+    // empty ring slots. Width = HIST_W + 1 so the literal N_HIST_STORED
+    // (== 1 << HIST_W) fits without wrapping back to 0.
+    logic [HIST_W:0]                  used_hist_rows_q;
 
     // msg_id -> ring slot lookup (small: 256 entries, HIST_W+1 bits each)
     logic [HIST_W-1:0]                msg_id_row_q      [256];
@@ -301,6 +307,25 @@ module fe_render_decoder
 
     logic accept;
     assign accept = be_render_valid && be_render_ready;
+
+    // Effective scroll caps. Both grow with actual content (rather
+    // than the buffer size), so the user can't scroll up past the
+    // oldest stored row of history or the last typed input row.
+    logic [SCROLL_W-1:0]       hist_scroll_max;
+    logic [INPUT_SCROLL_W-1:0] input_scroll_max;
+    always_comb begin
+        if (used_hist_rows_q > (HIST_W+1)'(N_HIST_VISIBLE))
+            hist_scroll_max = SCROLL_W'(used_hist_rows_q
+                                         - (HIST_W+1)'(N_HIST_VISIBLE));
+        else
+            hist_scroll_max = '0;
+
+        if (input_n_lines_q > LINE_CNT_W'(N_INPUT_VISIBLE))
+            input_scroll_max = INPUT_SCROLL_W'(input_n_lines_q
+                                              - LINE_CNT_W'(N_INPUT_VISIBLE));
+        else
+            input_scroll_max = '0;
+    end
 
     // Peer-name change detection (used at CONN_STATE accept).
     logic peer_changed;
@@ -715,6 +740,7 @@ module fe_render_decoder
 
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
+            used_hist_rows_q  <= '0;
             for (int i = 0; i < 256; i++) begin
                 msg_id_row_q[i]   <= '0;
                 msg_id_valid_q[i] <= 1'b0;
@@ -811,8 +837,9 @@ module fe_render_decoder
                             chain_input_q    <= 1'b1;
                             chain_titlebar_q <= peer_changed;
                             if (peer_changed) begin
-                                hist_wr_row_q   <= '0;
-                                scroll_offset_q <= '0;
+                                hist_wr_row_q    <= '0;
+                                scroll_offset_q  <= '0;
+                                used_hist_rows_q <= '0;
                                 for (int i = 0; i < 256; i++)
                                     msg_id_valid_q[i] <= 1'b0;
                                 for (int i = 0; i < N_HIST_STORED; i++) begin
@@ -903,12 +930,17 @@ module fe_render_decoder
                     end
 
                     RENDER_SCROLL_UP: begin
-                        if (scroll_offset_q < SCROLL_W'(SCROLL_MAX))
+                        // Dynamic cap: can't scroll past the oldest
+                        // stored row. (Pre-fill ring: cap is 0 so
+                        // scroll up is a no-op.)
+                        if (scroll_offset_q < hist_scroll_max)
                             scroll_offset_q <= scroll_offset_q + 1'b1;
                     end
 
                     RENDER_INPUT_SCROLL_UP: begin
-                        if (input_scroll_offset_q < INPUT_SCROLL_W'(INPUT_SCROLL_MAX))
+                        // Dynamic cap: can't scroll past the last typed
+                        // input line.
+                        if (input_scroll_offset_q < input_scroll_max)
                             input_scroll_offset_q <= input_scroll_offset_q + 1'b1;
                     end
 
@@ -1071,24 +1103,45 @@ module fe_render_decoder
                 // auto-follow.
                 if ((LEN_WIDTH'(parse_idx_q) >= input_len_q)
                  || (parse_idx_q >= LINE_IDX_W'(MAX_LINE_LEN - 1))) begin
+                    automatic logic [INPUT_SCROLL_W-1:0] new_scroll;
+                    automatic logic [INPUT_SCROLL_W-1:0] new_scroll_max;
+
                     input_ml_len_q[parse_last_sel]
                         <= input_len_q - msg_len_t'(parse_line_start_q);
                     input_n_lines_q    <= parse_n_lines_q;
                     input_cursor_row_q <= parse_cursor_row_q;
                     input_cursor_col_q <= parse_cursor_col_q;
 
-                    // Auto-follow scroll (unchanged semantics).
+                    // Single computed write of input_scroll_offset_q so
+                    // auto-follow and the post-edit clamp don't fight.
+                    // Auto-follow keeps the cursor visible; the clamp
+                    // pins the scroll to "actually-typed rows" so a
+                    // delete that drops input_n_lines doesn't leave a
+                    // window scrolled past the last typed row.
                     if (LINE_CNT_W'(parse_cursor_row_q)
                         < LINE_CNT_W'(input_scroll_offset_q)) begin
-                        input_scroll_offset_q <= INPUT_SCROLL_W'(
-                            parse_cursor_row_q);
+                        new_scroll = INPUT_SCROLL_W'(parse_cursor_row_q);
                     end else if (LINE_CNT_W'(parse_cursor_row_q)
                                  >= LINE_CNT_W'(input_scroll_offset_q)
                                   + LINE_CNT_W'(N_INPUT_VISIBLE)) begin
-                        input_scroll_offset_q <= INPUT_SCROLL_W'(
+                        new_scroll = INPUT_SCROLL_W'(
                             LINE_CNT_W'(parse_cursor_row_q)
                             - LINE_CNT_W'(N_INPUT_VISIBLE - 1));
+                    end else begin
+                        new_scroll = input_scroll_offset_q;
                     end
+
+                    if (parse_n_lines_q > LINE_CNT_W'(N_INPUT_VISIBLE))
+                        new_scroll_max = INPUT_SCROLL_W'(
+                            parse_n_lines_q
+                            - LINE_CNT_W'(N_INPUT_VISIBLE));
+                    else
+                        new_scroll_max = '0;
+
+                    if (new_scroll > new_scroll_max)
+                        input_scroll_offset_q <= new_scroll_max;
+                    else
+                        input_scroll_offset_q <= new_scroll;
                 end else begin
                     parse_idx_q <= parse_idx_q + LINE_IDX_W'(1);
                 end
@@ -1190,6 +1243,16 @@ module fe_render_decoder
                     hist_wr_row_q <= (hist_wr_row_q
                         + HIST_W'(final_n_lines))
                         & HIST_W'(N_HIST_STORED - 1);
+                    // Track total rows ever written for the current
+                    // peer, capped at N_HIST_STORED. Drives the
+                    // dynamic hist_scroll_max.
+                    if ({1'b0, used_hist_rows_q}
+                        + {1'b0, (HIST_W+1)'(final_n_lines)}
+                        >= (HIST_W+2)'(N_HIST_STORED))
+                        used_hist_rows_q <= (HIST_W+1)'(N_HIST_STORED);
+                    else
+                        used_hist_rows_q <= used_hist_rows_q
+                            + (HIST_W+1)'(final_n_lines);
                 end else begin
                     byte_walk_idx_q <= byte_walk_idx_q + 1'b1;
                 end
