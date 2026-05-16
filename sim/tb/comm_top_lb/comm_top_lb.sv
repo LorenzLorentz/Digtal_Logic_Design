@@ -21,7 +21,7 @@ module comm_top_lb
 #(
     parameter int CLK_FREQ_HZ    = 160,
     parameter int BAUD           = 10,        // BAUD_DIV = 16
-    parameter int TIMEOUT_CYCLES = 8000
+    parameter int TIMEOUT_CYCLES = 200_000    // generous for long-frame TX/RX
 ) (
     input  logic                          clk,
     input  logic                          rst_n,

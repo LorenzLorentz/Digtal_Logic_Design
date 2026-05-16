@@ -24,7 +24,7 @@ static int              g_failures = 0;
 static Vcomm_top_lb*    dut        = nullptr;
 static VerilatedVcdC*   tfp        = nullptr;
 
-static constexpr int MAX_MSG_LEN = 64;
+static constexpr int MAX_MSG_LEN = 640;
 static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;
 
 enum : uint8_t {
@@ -37,7 +37,7 @@ enum : uint8_t { TX_SUCCESS = 0, TX_FAIL = 1 };
 struct RxEvt {
     uint8_t  type;
     uint8_t  seq;
-    uint8_t  len;
+    uint16_t len;
     uint8_t  payload[MAX_MSG_LEN];
 };
 struct StatusEvt {
@@ -70,7 +70,7 @@ static void sample_outputs() {
         RxEvt e;
         e.type = (uint8_t)dut->cm_rx_frame_type;
         e.seq  = (uint8_t)dut->cm_rx_seq;
-        e.len  = (uint8_t)dut->cm_rx_len;
+        e.len  = (uint16_t)dut->cm_rx_len;
         for (int i = 0; i < MAX_MSG_LEN; i++)
             e.payload[i] = payload_get_byte(dut->cm_rx_payload, i);
         rx_q.push(e);
@@ -127,7 +127,7 @@ static void submit(uint8_t ftype, uint8_t msg_id,
     while (!dut->be_tx_ready) tick();
     dut->be_tx_frame_type = ftype;
     dut->be_tx_msg_id     = msg_id;
-    dut->be_tx_len        = (uint8_t)payload.size();
+    dut->be_tx_len        = (uint16_t)payload.size();
     payload_load(dut->be_tx_payload, payload);
     dut->be_tx_valid      = 1;
     tick();
@@ -194,6 +194,33 @@ static void test_multiple_data() {
     }
 }
 
+// Long DATA round-trip exercises the 2-byte LEN wire format end-to-end
+// (encoder + uart loopback + decoder + rx fsm).
+//
+// Per-byte serialisation cost in this TB: BAUD_DIV=16 cycles/bit *
+// 10 bits/byte = 160 cycles. A 300-byte payload + 7-byte header + ACK
+// frame round-trip easily exceeds the default 8000-cycle ARQ timeout,
+// so comm_top_lb sets TIMEOUT_CYCLES=200_000.
+static void test_long_data_roundtrip() {
+    printf("== test_long_data_roundtrip\n");
+    reset();
+    const int L = 300;  // > 255 to force LEN_HI != 0
+    std::vector<uint8_t> p(L);
+    for (int i = 0; i < L; i++) p[i] = (uint8_t)((i * 13 + 5) & 0xFF);
+    submit(FRAME_DATA, 0x77, p);
+    RxEvt rx;
+    CHECK_EQ(wait_rx(rx, 200000) ? 1 : 0, 1, "long cm_rx received");
+    CHECK_EQ((int)rx.len, L, "long rx len matches");
+    bool ok = true;
+    for (int i = 0; i < L; i++)
+        if (rx.payload[i] != p[i]) { ok = false; break; }
+    CHECK_EQ(ok ? 1 : 0, 1, "long rx payload bytes match");
+    StatusEvt s;
+    CHECK_EQ(wait_status(s, 200000) ? 1 : 0, 1, "long cm_status received");
+    CHECK_EQ((int)s.msg_id, 0x77, "long status msg_id");
+    CHECK_EQ((int)s.code,   TX_SUCCESS, "long status SUCCESS");
+}
+
 // 3) Control frame: HELLO delivers cm_rx, no cm_status.
 static void test_hello_no_status() {
     printf("== test_hello_no_status\n");
@@ -226,6 +253,7 @@ int main(int argc, char** argv) {
     test_data_roundtrip();
     test_multiple_data();
     test_hello_no_status();
+    test_long_data_roundtrip();
 
     tfp->close();
     delete tfp;

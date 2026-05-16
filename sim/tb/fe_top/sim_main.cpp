@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 static vluint64_t   g_time_ns  = 0;
 static int          g_failures = 0;
@@ -81,6 +82,9 @@ static constexpr uint8_t SPRITE_BL  = 0xF3;  // normal left border (rounded)
 static constexpr uint8_t SPRITE_BR  = 0xF4;  // normal right border (rounded)
 static constexpr uint8_t SPRITE_FBL = 0xF6;  // fail left border (square)
 static constexpr uint8_t SPRITE_FBR = 0xF7;  // fail right border (square)
+
+// Mirror of the RTL MAX_LINES localparam in fe_render_decoder.sv.
+static constexpr int MAX_LINES = 16;
 
 // ---------------------------------------------------------------------
 // clocking / reset
@@ -169,8 +173,8 @@ struct RenderCmd {
     uint8_t  msg_id       = 0;
     uint8_t  side         = 0;
     uint8_t  status       = 0;
-    uint8_t  len          = 0;
-    uint8_t  cursor_pos   = 0;
+    uint16_t len          = 0;
+    uint16_t cursor_pos   = 0;
     uint8_t  ascii        = 0;
     uint8_t  conn_state   = 0;
     uint8_t  peer_name_len = 0;
@@ -802,70 +806,116 @@ static void test_multiline_wraps_ring() {
     CHECK_EQ(dut->hist_wr_row_obs, 1, "hist_wr_row wraps to 1");
 }
 
-// A message with more than MAX_LINES=8 newlines must NOT cause OOB
-// writes to ml_offset_q/ml_len_q, and must NOT silently truncate to
-// (n_lines mod 8) lines. Behavior we want: stop counting newlines once
-// MAX_LINES is reached; everything after merges into the final line.
+// A message with more than MAX_LINES newlines must NOT cause OOB writes
+// to ml_offset_q/ml_len_q, and must NOT silently truncate to
+// (n_lines mod MAX_LINES) lines. Behavior we want: stop counting
+// newlines once MAX_LINES is reached; everything after merges into the
+// final line.
 //
-// Send "a\nb\nc\nd\ne\nf\ng\nh\ni\nj" (10 single-char lines, 19 bytes).
-// After fix:
-//   - rows HIST_ROW_START+0..6 render 'a'..'g' (single-char bubbles)
-//   - row HIST_ROW_START+7 absorbs "h\ni\nj" (5 bytes; \n stays as
-//     a glyph byte 0x0A in the bubble)
-//   - row HIST_ROW_START+8 must remain space (no 9th row written)
-//   - hist_wr_row advances by MAX_LINES=8, not by 10
+// Send MAX_LINES+2 single-char lines (each one byte 'a'+i separated by
+// 0x0A). After fix:
+//   - rows HIST_ROW_START+0..MAX_LINES-2 render lines 0..MAX_LINES-2
+//     as single-char bubbles
+//   - row HIST_ROW_START+MAX_LINES-1 absorbs the tail (5 bytes: last
+//     single char + 0x0A + next char + 0x0A + final char) -- 0x0A
+//     bytes render as the return-arrow glyph in the bubble
+//   - row HIST_ROW_START+MAX_LINES must remain space
+//   - hist_wr_row advances by MAX_LINES (not by the raw line count)
 static void test_multiline_overflow() {
     printf("== test_multiline_overflow\n");
     reset();
     bring_up();
 
-    uint8_t msg[19];
-    int n = 0;
-    for (char ch = 'a'; ch <= 'j'; ch++) {
-        msg[n++] = (uint8_t)ch;
-        if (ch != 'j') msg[n++] = 0x0A;
+    const int N = MAX_LINES + 2;             // lines requested
+    const int BYTES = 2 * N - 1;              // 'a','\n','b','\n',...
+    std::vector<uint8_t> msg(BYTES);
+    int idx = 0;
+    for (int i = 0; i < N; i++) {
+        msg[idx++] = (uint8_t)('a' + i);
+        if (i != N - 1) msg[idx++] = 0x0A;
     }
-    // n == 19
 
     RenderCmd c;
     c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 1;
     c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
-    c.payload = msg; c.payload_n = (size_t)n; c.len = (uint8_t)n;
+    c.payload = msg.data(); c.payload_n = (size_t)BYTES;
+    c.len = (uint16_t)BYTES;
     send_cmd(c);
 
-    // Rows 0..6 (HIST_ROW_START + 0..6): single-char remote bubbles.
-    // Remote single char: BL@2, payload@3, BR@4.
-    const char lines[7] = {'a','b','c','d','e','f','g'};
-    for (int i = 0; i < 7; i++) {
+    // Rows 0..MAX_LINES-2: single-char remote bubbles 'a'..'a'+M-2.
+    for (int i = 0; i < MAX_LINES - 1; i++) {
         int row = HIST_ROW_START + i;
         char lbl[40];
         snprintf(lbl, sizeof(lbl), "row %d BL", i);
         CHECK_EQ(read_cell(row, 2), (uint8_t)SPRITE_BL, lbl);
-        snprintf(lbl, sizeof(lbl), "row %d char '%c'", i, lines[i]);
-        CHECK_EQ(read_cell(row, 3), (uint8_t)lines[i], lbl);
+        snprintf(lbl, sizeof(lbl), "row %d char", i);
+        CHECK_EQ(read_cell(row, 3), (uint8_t)('a' + i), lbl);
         snprintf(lbl, sizeof(lbl), "row %d BR", i);
         CHECK_EQ(read_cell(row, 4), (uint8_t)SPRITE_BR, lbl);
     }
 
-    // Row 7 (HIST_ROW_START + 7): "h\ni\nj" merged. Length 5.
-    // Remote: BL@2, payload[0..4]@3..7, BR@8.
-    int row7 = HIST_ROW_START + 7;
-    CHECK_EQ(read_cell(row7, 2), (uint8_t)SPRITE_BL, "row7 BL");
-    CHECK_EQ(read_cell(row7, 3), 'h',                "row7 [0]='h'");
-    CHECK_EQ(read_cell(row7, 4), 0x0A,               "row7 [1]=0x0A");
-    CHECK_EQ(read_cell(row7, 5), 'i',                "row7 [2]='i'");
-    CHECK_EQ(read_cell(row7, 6), 0x0A,               "row7 [3]=0x0A");
-    CHECK_EQ(read_cell(row7, 7), 'j',                "row7 [4]='j'");
-    CHECK_EQ(read_cell(row7, 8), (uint8_t)SPRITE_BR, "row7 BR");
+    // Row MAX_LINES-1 absorbs "<a+M-1>\n<a+M>\n<a+M+1>" -- 5 bytes.
+    int row_last = HIST_ROW_START + MAX_LINES - 1;
+    CHECK_EQ(read_cell(row_last, 2), (uint8_t)SPRITE_BL, "row_last BL");
+    CHECK_EQ(read_cell(row_last, 3), (uint8_t)('a' + MAX_LINES - 1), "row_last [0]");
+    CHECK_EQ(read_cell(row_last, 4), 0x0A,                            "row_last [1]");
+    CHECK_EQ(read_cell(row_last, 5), (uint8_t)('a' + MAX_LINES),     "row_last [2]");
+    CHECK_EQ(read_cell(row_last, 6), 0x0A,                            "row_last [3]");
+    CHECK_EQ(read_cell(row_last, 7), (uint8_t)('a' + MAX_LINES + 1), "row_last [4]");
+    CHECK_EQ(read_cell(row_last, 8), (uint8_t)SPRITE_BR, "row_last BR");
 
-    // Row 8 must be unwritten (space across the row).
-    int row8 = HIST_ROW_START + 8;
-    CHECK_EQ(read_cell(row8, 2), ' ', "row8 col2 space");
-    CHECK_EQ(read_cell(row8, 3), ' ', "row8 col3 space");
-    CHECK_EQ(read_cell(row8, 4), ' ', "row8 col4 space");
+    // Row MAX_LINES is unwritten (no overflow).
+    int row_off = HIST_ROW_START + MAX_LINES;
+    CHECK_EQ(read_cell(row_off, 2), ' ', "row past cap col2 space");
+    CHECK_EQ(read_cell(row_off, 3), ' ', "row past cap col3 space");
+    CHECK_EQ(read_cell(row_off, 4), ' ', "row past cap col4 space");
 
-    // Ring head moved exactly MAX_LINES=8 from 0.
-    CHECK_EQ(dut->hist_wr_row_obs, 8, "hist_wr_row advanced by 8");
+    // Ring head moved exactly MAX_LINES from 0.
+    CHECK_EQ(dut->hist_wr_row_obs, MAX_LINES, "hist_wr_row advanced by MAX_LINES");
+}
+
+// 256-byte remote payload with 4 newlines split into 5 lines of 50 chars
+// each. Validates that the MAX_MSG_LEN=640 widening + 2-byte wire LEN
+// flow through to the renderer without any 8-bit truncation.
+static void test_long_multiline_payload() {
+    printf("== test_long_multiline_payload\n");
+    reset();
+    bring_up();
+
+    const int LINE_W   = 50;
+    const int N_LINES  = 5;
+    const int TOTAL    = LINE_W * N_LINES + (N_LINES - 1);  // 254 bytes
+    uint8_t msg[TOTAL];
+    int idx = 0;
+    for (int ln = 0; ln < N_LINES; ln++) {
+        for (int i = 0; i < LINE_W; i++) {
+            msg[idx++] = (uint8_t)('a' + (ln % 26));  // line ln filled with 'a'+ln
+        }
+        if (ln != N_LINES - 1) msg[idx++] = 0x0A;
+    }
+
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 42;
+    c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
+    c.payload = msg; c.payload_n = (size_t)TOTAL; c.len = (uint16_t)TOTAL;
+    send_cmd(c);
+
+    // Each row N: remote bubble BL@2, payload[0]@3, ..., payload[49]@52, BR@53.
+    for (int ln = 0; ln < N_LINES; ln++) {
+        int row = HIST_ROW_START + ln;
+        char lbl[40];
+        snprintf(lbl, sizeof(lbl), "long row %d BL", ln);
+        CHECK_EQ(read_cell(row, 2),  (uint8_t)SPRITE_BL, lbl);
+        snprintf(lbl, sizeof(lbl), "long row %d first", ln);
+        CHECK_EQ(read_cell(row, 3),  (uint8_t)('a' + ln), lbl);
+        snprintf(lbl, sizeof(lbl), "long row %d last", ln);
+        CHECK_EQ(read_cell(row, 2 + LINE_W), (uint8_t)('a' + ln), lbl);
+        snprintf(lbl, sizeof(lbl), "long row %d BR", ln);
+        CHECK_EQ(read_cell(row, 3 + LINE_W), (uint8_t)SPRITE_BR, lbl);
+    }
+
+    // ring head advanced by 5
+    CHECK_EQ(dut->hist_wr_row_obs, 5, "hist_wr_row advanced by 5");
 }
 
 // =====================================================================
@@ -900,6 +950,7 @@ int main(int argc, char** argv) {
     test_multiline_status_update();
     test_multiline_wraps_ring();
     test_multiline_overflow();
+    test_long_multiline_payload();
 
     tfp->close();
     delete tfp;

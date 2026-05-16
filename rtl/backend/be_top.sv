@@ -655,8 +655,8 @@ module be_top
                                         line_buf[i] <= line_buf[i-1];
                                     end
                                 end
-                                len_q              <= len_q + 8'd1;
-                                cursor_pos_q       <= cursor_pos_q + 8'd1;
+                                len_q              <= len_q + LEN_WIDTH'(1);
+                                cursor_pos_q       <= cursor_pos_q + LEN_WIDTH'(1);
                                 last_event_ascii_q <= io_key_ascii;
                             end
                         end
@@ -670,19 +670,19 @@ module be_top
                                         line_buf[i] <= line_buf[i+1];
                                     end
                                 end
-                                len_q        <= len_q - 8'd1;
-                                cursor_pos_q <= cursor_pos_q - 8'd1;
+                                len_q        <= len_q - LEN_WIDTH'(1);
+                                cursor_pos_q <= cursor_pos_q - LEN_WIDTH'(1);
                             end
                         end
 
                         KEY_LEFT: begin
                             if (cursor_pos_q != 0)
-                                cursor_pos_q <= cursor_pos_q - 8'd1;
+                                cursor_pos_q <= cursor_pos_q - LEN_WIDTH'(1);
                         end
 
                         KEY_RIGHT: begin
                             if (cursor_pos_q < len_q)
-                                cursor_pos_q <= cursor_pos_q + 8'd1;
+                                cursor_pos_q <= cursor_pos_q + LEN_WIDTH'(1);
                         end
 
                         KEY_ENTER: begin

@@ -28,7 +28,7 @@ static int                     g_failures = 0;
 static Vcomm_frame_decoder*    dut        = nullptr;
 static VerilatedVcdC*          tfp        = nullptr;
 
-static constexpr int      MAX_MSG_LEN = 64;
+static constexpr int      MAX_MSG_LEN = 640;
 static constexpr int      PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;
 static constexpr uint8_t  SOF_BYTE    = 0x7E;
 
@@ -73,12 +73,15 @@ static uint16_t sw_crc16(const std::vector<uint8_t>& v) {
     }
     return c;
 }
+// Wire layout: SOF | TYPE | SEQ | LEN_HI | LEN_LO | PAYLOAD[..] | CRC_HI | CRC_LO
 static std::vector<uint8_t> encode(uint8_t ftype, uint8_t seq,
                                    const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> body;
     body.push_back(ftype & 0x07);
     body.push_back(seq);
-    body.push_back((uint8_t)payload.size());
+    uint16_t L = (uint16_t)payload.size();
+    body.push_back((uint8_t)((L >> 8) & 0xFF));
+    body.push_back((uint8_t)(L & 0xFF));
     for (uint8_t b : payload) body.push_back(b);
     uint16_t c = sw_crc16(body);
     std::vector<uint8_t> out;
@@ -93,7 +96,7 @@ static std::vector<uint8_t> encode(uint8_t ftype, uint8_t seq,
 struct DeliverEvt {
     uint8_t  ftype;
     uint8_t  seq;
-    uint8_t  len;
+    uint16_t len;
     uint8_t  payload[MAX_MSG_LEN];
 };
 
@@ -123,7 +126,7 @@ static bool capture_frame(DeliverEvt& evt) {
     if (!dut->frame_out_valid) return false;
     evt.ftype = (uint8_t)dut->frame_out_type;
     evt.seq   = (uint8_t)dut->frame_out_seq;
-    evt.len   = (uint8_t)dut->frame_out_len;
+    evt.len   = (uint16_t)dut->frame_out_len;
     for (int i = 0; i < MAX_MSG_LEN; i++)
         evt.payload[i] = payload_get_byte(dut->frame_out_payload, i);
     return true;
@@ -257,9 +260,10 @@ static void test_bad_crc() {
 static void test_malformed_len() {
     printf("== test_malformed_len\n");
     reset();
-    // Hand-crafted: SOF, type=DATA, seq=0, len=200 (out of range).
-    // Decoder should drop on the LEN byte, then look for next SOF.
-    std::vector<uint8_t> stream = {SOF_BYTE, FRAME_DATA, 0, 200};
+    // Hand-crafted: SOF, type=DATA, seq=0, len=0x0F00 (=3840, way > MAX_MSG_LEN=640).
+    // Decoder should drop at the LEN_LO byte once the assembled 16-bit
+    // value exceeds the cap, then resync.
+    std::vector<uint8_t> stream = {SOF_BYTE, FRAME_DATA, 0, 0x0F, 0x00};
     std::vector<DeliverEvt> events;
     int drops = 0;
     feed_stream(stream, events, drops);
@@ -271,6 +275,52 @@ static void test_malformed_len() {
     feed_stream(good, events, drops);
     CHECK_EQ((int)events.size(), 1, "recovers");
     CHECK_EQ((int)events[0].ftype, FRAME_GOODBYE, "ftype");
+}
+
+// Length exactly at the boundary (MAX_MSG_LEN+1) should also drop.
+static void test_len_just_over_max() {
+    printf("== test_len_just_over_max\n");
+    reset();
+    uint16_t L = (uint16_t)(MAX_MSG_LEN + 1);
+    std::vector<uint8_t> stream = {
+        SOF_BYTE, FRAME_DATA, 0,
+        (uint8_t)((L >> 8) & 0xFF), (uint8_t)(L & 0xFF)
+    };
+    std::vector<DeliverEvt> events;
+    int drops = 0;
+    feed_stream(stream, events, drops);
+    CHECK_EQ((int)events.size(), 0, "no delivery on len=MAX+1");
+    CHECK_EQ(drops, 1, "one drop pulse on len=MAX+1");
+}
+
+// Long payloads (> 255 bytes) verify the LEN_HI byte path end-to-end.
+static void test_decode_long_payload() {
+    printf("== test_decode_long_payload\n");
+    reset();
+    for (int L : {256, 512, MAX_MSG_LEN}) {
+        std::vector<uint8_t> p(L);
+        for (int i = 0; i < L; i++) p[i] = (uint8_t)((i * 7 + 3) & 0xFF);
+        auto stream = encode(FRAME_DATA, (uint8_t)(L & 0xFF), p);
+        std::vector<DeliverEvt> events;
+        int drops = 0;
+        feed_stream(stream, events, drops, /*idle_after=*/8);
+        char lbl[40];
+        snprintf(lbl, sizeof(lbl), "len=%d delivered", L);
+        if (events.size() != 1) {
+            ++g_failures;
+            printf("  [FAIL] len=%d expected 1 delivery, got %zu (drops=%d)\n",
+                   L, events.size(), drops);
+            continue;
+        }
+        CHECK_EQ((int)events[0].len, L, lbl);
+        bool ok = true;
+        for (int i = 0; i < L; i++)
+            if (events[0].payload[i] != p[i]) { ok = false; break; }
+        if (!ok) {
+            ++g_failures;
+            printf("  [FAIL] len=%d payload mismatch\n", L);
+        }
+    }
 }
 
 static void test_back_to_back() {
@@ -331,6 +381,8 @@ int main(int argc, char** argv) {
     test_junk_before_sof();
     test_bad_crc();
     test_malformed_len();
+    test_len_just_over_max();
+    test_decode_long_payload();
     test_back_to_back();
     test_back_pressure_hold();
 

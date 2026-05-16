@@ -18,14 +18,19 @@ package chat_pkg;
     // -----------------------------------------------------------------
     // Sizing parameters
     // -----------------------------------------------------------------
-    localparam int MAX_MSG_LEN  = 64;   // bytes per chat message payload
-    localparam int MAX_MSG_NUM  = 64;   // chat history depth
-    localparam int MAX_LINE_LEN = 64;   // current input line buffer
-    localparam int MAX_NAME_LEN = 16;   // peer username (ASCII bytes)
+    // MAX_MSG_LEN/MAX_LINE_LEN bumped to 640 to support variable-length
+    // payloads up to ~10 visible rows of bubble text. LEN_WIDTH widens
+    // to 16 so msg_len_t (and the on-wire LEN field) can carry the full
+    // 0..MAX_MSG_LEN range. The frame layer transmits LEN as two bytes
+    // (LEN_HI then LEN_LO).
+    localparam int MAX_MSG_LEN  = 640;   // bytes per chat message payload
+    localparam int MAX_MSG_NUM  = 64;    // chat history depth
+    localparam int MAX_LINE_LEN = 640;   // current input line buffer
+    localparam int MAX_NAME_LEN = 16;    // peer username (ASCII bytes)
 
     localparam int MSG_ID_WIDTH = 8;
     localparam int SEQ_WIDTH    = 8;
-    localparam int LEN_WIDTH    = 8;
+    localparam int LEN_WIDTH    = 16;
     localparam int RETRY_WIDTH  = 4;
 
     localparam int MAX_RETRY    = 4;    // max retransmissions before TX_FAIL

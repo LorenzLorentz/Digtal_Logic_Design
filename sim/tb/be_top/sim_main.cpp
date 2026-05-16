@@ -37,8 +37,8 @@ static int              g_failures = 0;
 static Vbe_top*         dut        = nullptr;
 static VerilatedVcdC*   tfp        = nullptr;
 
-static constexpr int MAX_LINE_LEN = 64;
-static constexpr int MAX_MSG_LEN  = 64;
+static constexpr int MAX_LINE_LEN = 640;
+static constexpr int MAX_MSG_LEN  = 640;
 static constexpr int PAYLOAD_W    = MAX_MSG_LEN * 8 / 32;
 
 // key_type_e
@@ -124,13 +124,15 @@ static void payload_load(uint32_t* sig, const std::vector<uint8_t>& bytes) {
 
 // ---- Capturing render / tx events -----------------------------------
 struct RenderEvent {
-    uint8_t  cmd, msg_id, side, status, len, cursor_pos, ascii, conn_state;
+    uint8_t  cmd, msg_id, side, status, ascii, conn_state;
+    uint16_t len, cursor_pos;
     uint8_t  peer_name_len;
     uint32_t payload[PAYLOAD_W];
     uint8_t  peer_name[16];
 };
 struct TxEvent {
-    uint8_t  frame_type, msg_id, len;
+    uint8_t  frame_type, msg_id;
+    uint16_t len;
     uint32_t payload[PAYLOAD_W];
 };
 
@@ -226,7 +228,7 @@ static void reset_no_drain(int cycles = 4) {
 }
 
 // Forward declaration: bring_up_connection drives a peer USERNAME.
-static void inject_rx_frame(uint8_t frame_type, uint8_t seq, uint8_t len,
+static void inject_rx_frame(uint8_t frame_type, uint8_t seq, uint16_t len,
                             const std::vector<uint8_t>& bytes,
                             int timeout = 200);
 
@@ -298,7 +300,7 @@ static void send_key(uint8_t kt, uint8_t a, int timeout = 200) {
     dut->io_key_valid = 0;
 }
 
-static void inject_rx_frame(uint8_t frame_type, uint8_t seq, uint8_t len,
+static void inject_rx_frame(uint8_t frame_type, uint8_t seq, uint16_t len,
                             const std::vector<uint8_t>& bytes,
                             int timeout) {
     dut->cm_rx_valid      = 1;
@@ -326,7 +328,7 @@ static void inject_rx_frame(uint8_t frame_type, uint8_t seq, uint8_t len,
 }
 
 // Backward-compat wrapper: existing tests just inject DATA frames.
-static void inject_rx(uint8_t seq, uint8_t len,
+static void inject_rx(uint8_t seq, uint16_t len,
                       const std::vector<uint8_t>& bytes, int timeout = 200) {
     inject_rx_frame(FRAME_DATA, seq, len, bytes, timeout);
 }
@@ -380,13 +382,13 @@ static uint8_t read_buf(int i) {
     dut->eval();
     return dut->line_rd_data;
 }
-struct StoreRead { uint8_t valid, msg_id, side, status, len; };
+struct StoreRead { uint8_t valid, msg_id, side, status; uint16_t len; };
 static StoreRead read_store(int idx) {
     dut->store_rd_idx = idx;
     dut->eval();
     return {(uint8_t)dut->store_rd_valid, (uint8_t)dut->store_rd_msg_id,
             (uint8_t)dut->store_rd_side,  (uint8_t)dut->store_rd_status,
-            (uint8_t)dut->store_rd_len};
+            (uint16_t)dut->store_rd_len};
 }
 static uint8_t store_payload_byte(int i) {
     return payload_get_byte(&dut->store_rd_payload[0], i);
@@ -930,12 +932,12 @@ static void test_cm_rx_len_clamped() {
     printf("== test_cm_rx_len_clamped\n");
     reset();
     std::vector<uint8_t> bytes(MAX_MSG_LEN, 'Z');  // wide bus is exactly MAX_MSG_LEN bytes
-    inject_rx(/*seq=*/3, /*len=*/200, bytes);
+    inject_rx(/*seq=*/3, /*len=*/(uint16_t)(MAX_MSG_LEN + 100), bytes);
     RenderEvent e;
     CHECK_EQ(wait_render(e, 5), true, "render fires");
-    CHECK_EQ(e.len, MAX_MSG_LEN, "render len clamped");
+    CHECK_EQ((int)e.len, MAX_MSG_LEN, "render len clamped");
     auto r = read_store(0);
-    CHECK_EQ(r.len, MAX_MSG_LEN, "store len clamped");
+    CHECK_EQ((int)r.len, MAX_MSG_LEN, "store len clamped");
 }
 
 static void test_cm_rx_len_passthrough_when_small() {

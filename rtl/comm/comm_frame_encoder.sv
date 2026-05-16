@@ -2,10 +2,10 @@
 // comm_frame_encoder.sv  --  Frame -> byte-stream serialiser
 // ---------------------------------------------------------------------
 // Accepts a request:
-//   { frame_type[2:0], seq[7:0], len[7:0], payload[MAX_MSG_LEN*8-1:0] }
+//   { frame_type[2:0], seq[7:0], len[LEN_WIDTH-1:0], payload[MAX_MSG_LEN*8-1:0] }
 // and emits the byte stream:
 //
-//   SOF(0x7E) | TYPE | SEQ | LEN | PAYLOAD[0..len-1] | CRC16_HI | CRC16_LO
+//   SOF(0x7E) | TYPE | SEQ | LEN_HI | LEN_LO | PAYLOAD[0..len-1] | CRC16_HI | CRC16_LO
 //
 // CRC16 (CCITT, see rtl/common/crc16.sv) covers TYPE..PAYLOAD only --
 // not SOF, not the CRC bytes themselves. CRC is transmitted big-endian
@@ -81,7 +81,8 @@ module comm_frame_encoder
         S_SOF,
         S_TYPE,
         S_SEQ,
-        S_LEN,
+        S_LEN_HI,
+        S_LEN_LO,
         S_PAYLOAD,
         S_CRC_HI,
         S_CRC_LO
@@ -101,7 +102,8 @@ module comm_frame_encoder
             S_SOF:     begin byte_out_valid = 1'b1; byte_out_data = SOF_BYTE; end
             S_TYPE:    begin byte_out_valid = 1'b1; byte_out_data = {5'b0, type_q}; end
             S_SEQ:     begin byte_out_valid = 1'b1; byte_out_data = seq_q; end
-            S_LEN:     begin byte_out_valid = 1'b1; byte_out_data = len_q; end
+            S_LEN_HI:  begin byte_out_valid = 1'b1; byte_out_data = len_q[15:8]; end
+            S_LEN_LO:  begin byte_out_valid = 1'b1; byte_out_data = len_q[7:0];  end
             S_PAYLOAD: begin byte_out_valid = 1'b1;
                               byte_out_data = payload_q[pld_idx_q*8 +: 8]; end
             S_CRC_HI:  begin byte_out_valid = 1'b1; byte_out_data = crc_state[15:8]; end
@@ -126,7 +128,8 @@ module comm_frame_encoder
             unique case (state_q)
                 S_TYPE:    begin crc_en = 1'b1; crc_byte_in = {5'b0, type_q}; end
                 S_SEQ:     begin crc_en = 1'b1; crc_byte_in = seq_q; end
-                S_LEN:     begin crc_en = 1'b1; crc_byte_in = len_q; end
+                S_LEN_HI:  begin crc_en = 1'b1; crc_byte_in = len_q[15:8]; end
+                S_LEN_LO:  begin crc_en = 1'b1; crc_byte_in = len_q[7:0];  end
                 S_PAYLOAD: begin crc_en = 1'b1;
                                   crc_byte_in = payload_q[pld_idx_q*8 +: 8]; end
                 default:   ;
@@ -141,8 +144,9 @@ module comm_frame_encoder
             S_IDLE:    if (frame_in_valid) state_d = S_SOF;
             S_SOF:     if (accept_byte)    state_d = S_TYPE;
             S_TYPE:    if (accept_byte)    state_d = S_SEQ;
-            S_SEQ:     if (accept_byte)    state_d = S_LEN;
-            S_LEN:     if (accept_byte)
+            S_SEQ:     if (accept_byte)    state_d = S_LEN_HI;
+            S_LEN_HI:  if (accept_byte)    state_d = S_LEN_LO;
+            S_LEN_LO:  if (accept_byte)
                           state_d = (len_q == 0) ? S_CRC_HI : S_PAYLOAD;
             S_PAYLOAD: if (accept_byte
                        && (pld_idx_q == len_q - LEN_WIDTH'(1)))
@@ -176,7 +180,7 @@ module comm_frame_encoder
 
             // Advance payload index as bytes are sent.
             if (state_q == S_PAYLOAD && accept_byte) begin
-                pld_idx_q <= pld_idx_q + 8'd1;
+                pld_idx_q <= pld_idx_q + LEN_WIDTH'(1);
             end
         end
     end

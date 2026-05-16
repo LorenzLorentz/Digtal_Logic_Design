@@ -7,12 +7,13 @@
 //
 // Frame layout (matches comm_frame_encoder.sv):
 //
-//   SOF(0x7E) | TYPE | SEQ | LEN | PAYLOAD[0..len-1] | CRC16_HI | CRC16_LO
+//   SOF(0x7E) | TYPE | SEQ | LEN_HI | LEN_LO | PAYLOAD[0..len-1] | CRC16_HI | CRC16_LO
 //
 // Recovery rules:
 //   - In WAIT_SOF, we wait for byte == SOF_BYTE. CRC engine reloads
 //     INIT on the SOF cycle.
-//   - LEN > MAX_MSG_LEN is treated as malformed: drop and resync.
+//   - LEN > MAX_MSG_LEN (16-bit, assembled at LEN_LO) is treated as
+//     malformed: drop and resync.
 //   - If CRC mismatches at the LO byte, drop and resync.
 //   - On success, hold frame_out_valid until rx_fsm asserts ready.
 //     During DELIVER, additional bytes from uart_rx are dropped (in
@@ -59,7 +60,8 @@ module comm_frame_decoder
         S_WAIT_SOF,
         S_TYPE,
         S_SEQ,
-        S_LEN,
+        S_LEN_HI,
+        S_LEN_LO,
         S_PAYLOAD,
         S_CRC_HI,
         S_CRC_LO,
@@ -73,6 +75,7 @@ module comm_frame_decoder
     logic [2:0]                  type_q;
     seq_t                        seq_q;
     msg_len_t                    len_q;
+    logic [7:0]                  len_hi_q;     // captured at LEN_HI byte
     msg_len_t                    pld_idx_q;
     logic [MAX_MSG_LEN*8-1:0]    payload_q;
     logic [7:0]                  rx_crc_hi_q;
@@ -105,7 +108,7 @@ module comm_frame_decoder
         end
         if (byte_in_valid) begin
             unique case (state_q)
-                S_TYPE, S_SEQ, S_LEN, S_PAYLOAD: crc_en = 1'b1;
+                S_TYPE, S_SEQ, S_LEN_HI, S_LEN_LO, S_PAYLOAD: crc_en = 1'b1;
                 default: ;
             endcase
         end
@@ -121,6 +124,11 @@ module comm_frame_decoder
     assign crc_match_now =
         (crc_state == {rx_crc_hi_q, byte_in_data});
 
+    // Full 16-bit length is only known at the LEN_LO byte; reuse the
+    // assembled value for both the malformed check and the latch.
+    logic [LEN_WIDTH-1:0] len_full_now;
+    assign len_full_now = {len_hi_q, byte_in_data};
+
     always_comb begin
         state_d = state_q;
 
@@ -130,12 +138,14 @@ module comm_frame_decoder
                     state_d = S_TYPE;
 
             S_TYPE: if (byte_in_valid) state_d = S_SEQ;
-            S_SEQ:  if (byte_in_valid) state_d = S_LEN;
+            S_SEQ:  if (byte_in_valid) state_d = S_LEN_HI;
 
-            S_LEN: if (byte_in_valid) begin
-                if (byte_in_data > LEN_WIDTH'(MAX_MSG_LEN))
+            S_LEN_HI: if (byte_in_valid) state_d = S_LEN_LO;
+
+            S_LEN_LO: if (byte_in_valid) begin
+                if (len_full_now > LEN_WIDTH'(MAX_MSG_LEN))
                     state_d = S_WAIT_SOF;          // malformed -- drop
-                else if (byte_in_data == 0)
+                else if (len_full_now == 0)
                     state_d = S_CRC_HI;
                 else
                     state_d = S_PAYLOAD;
@@ -164,8 +174,8 @@ module comm_frame_decoder
     always_comb begin
         drop_d = 1'b0;
         if (byte_in_valid) begin
-            if (state_q == S_LEN
-              && byte_in_data > LEN_WIDTH'(MAX_MSG_LEN))
+            if (state_q == S_LEN_LO
+              && len_full_now > LEN_WIDTH'(MAX_MSG_LEN))
                 drop_d = 1'b1;
             else if (state_q == S_CRC_LO && !crc_match_now)
                 drop_d = 1'b1;
@@ -181,6 +191,7 @@ module comm_frame_decoder
             type_q      <= 3'd0;
             seq_q       <= '0;
             len_q       <= '0;
+            len_hi_q    <= 8'd0;
             pld_idx_q   <= '0;
             payload_q   <= '0;
             rx_crc_hi_q <= 8'd0;
@@ -193,8 +204,9 @@ module comm_frame_decoder
                 unique case (state_q)
                     S_TYPE: type_q <= byte_in_data[2:0];
                     S_SEQ:  seq_q  <= byte_in_data;
-                    S_LEN:  begin
-                        len_q     <= byte_in_data;
+                    S_LEN_HI: len_hi_q <= byte_in_data;
+                    S_LEN_LO: begin
+                        len_q     <= len_full_now;
                         pld_idx_q <= '0;
                         // (Wipe payload_q so a short frame leaves zeros
                         // in the unused upper bytes -- makes downstream
@@ -203,7 +215,7 @@ module comm_frame_decoder
                     end
                     S_PAYLOAD: begin
                         payload_q[pld_idx_q*8 +: 8] <= byte_in_data;
-                        pld_idx_q <= pld_idx_q + 8'd1;
+                        pld_idx_q <= pld_idx_q + LEN_WIDTH'(1);
                     end
                     S_CRC_HI: rx_crc_hi_q <= byte_in_data;
                     default: ;

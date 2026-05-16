@@ -27,8 +27,8 @@ static int                     g_failures = 0;
 static Vcomm_frame_encoder*    dut        = nullptr;
 static VerilatedVcdC*          tfp        = nullptr;
 
-static constexpr int MAX_MSG_LEN = 64;
-static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;     // 16 dwords
+static constexpr int MAX_MSG_LEN = 640;
+static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;     // 160 dwords
 static constexpr uint8_t SOF_BYTE = 0x7E;
 
 // frame_type_e
@@ -86,12 +86,15 @@ static uint16_t sw_crc16(const std::vector<uint8_t>& v) {
 }
 
 // Software-encode: returns the canonical wire byte stream.
+// Wire layout: SOF | TYPE | SEQ | LEN_HI | LEN_LO | PAYLOAD[..] | CRC_HI | CRC_LO
 static std::vector<uint8_t> sw_encode(uint8_t ftype, uint8_t seq,
                                       const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> body;
     body.push_back(ftype & 0x07);
     body.push_back(seq);
-    body.push_back((uint8_t)payload.size());
+    uint16_t L = (uint16_t)payload.size();
+    body.push_back((uint8_t)((L >> 8) & 0xFF));
+    body.push_back((uint8_t)(L & 0xFF));
     for (uint8_t b : payload) body.push_back(b);
     uint16_t c = sw_crc16(body);
     std::vector<uint8_t> out;
@@ -128,7 +131,7 @@ static std::vector<uint8_t> send_frame(uint8_t ftype, uint8_t seq,
     while (!dut->frame_in_ready) tick();
     dut->frame_in_type = ftype;
     dut->frame_in_seq  = seq;
-    dut->frame_in_len  = (uint8_t)payload.size();
+    dut->frame_in_len  = (uint16_t)payload.size();
     payload_load(dut->frame_in_payload, payload);
     dut->frame_in_valid = 1;
     tick();
@@ -263,7 +266,23 @@ static void test_max_payload() {
     for (int i = 0; i < MAX_MSG_LEN; i++) p[i] = (uint8_t)(i ^ 0xA5);
     auto got  = send_frame(FRAME_DATA, 9, p);
     auto want = sw_encode(FRAME_DATA, 9, p);
-    check_stream_eq(got, want, "DATA len=64");
+    char lbl[40]; snprintf(lbl, sizeof(lbl), "DATA len=%d (max)", MAX_MSG_LEN);
+    check_stream_eq(got, want, lbl);
+}
+
+// Lengths that fit in the high byte (> 255) only, to confirm LEN_HI is
+// transmitted correctly.
+static void test_len_over_255() {
+    printf("== test_len_over_255\n");
+    reset();
+    for (int L : {256, 320, 511, 512, MAX_MSG_LEN - 1}) {
+        std::vector<uint8_t> p(L);
+        for (int i = 0; i < L; i++) p[i] = (uint8_t)((i * 31 + 17) & 0xFF);
+        auto got  = send_frame(FRAME_DATA, (uint8_t)(L & 0xFF), p);
+        auto want = sw_encode(FRAME_DATA, (uint8_t)(L & 0xFF), p);
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "DATA len=%d", L);
+        check_stream_eq(got, want, lbl);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -281,6 +300,7 @@ int main(int argc, char** argv) {
     test_back_to_back();
     test_consumer_throttle();
     test_max_payload();
+    test_len_over_255();
 
     tfp->close();
     delete tfp;

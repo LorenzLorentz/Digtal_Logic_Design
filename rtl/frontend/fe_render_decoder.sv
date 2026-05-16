@@ -119,7 +119,10 @@ module fe_render_decoder
     // loop without wrapping to 0. LINE_IDX_BITS sizes the array index port
     // (always one bit narrower than LINE_CNT_W when MAX_LINES is a power of
     // two, so we slice cur_line_q below for array reads).
-    localparam int MAX_LINES     = 8;
+    // Sized so a typical 640-byte payload (~40 chars/line * 16 lines)
+    // never overflows; the parser absorbs further newlines into the last
+    // bubble row.
+    localparam int MAX_LINES     = 16;
     localparam int LINE_CNT_W    = $clog2(MAX_LINES + 1);
     localparam int LINE_SEL_W    = (MAX_LINES <= 1) ? 1 : $clog2(MAX_LINES);
 
@@ -147,12 +150,20 @@ module fe_render_decoder
     logic [HIST_W-1:0]                hist_wr_row_q;
     logic [SCROLL_W-1:0]              scroll_offset_q;
 
-    // msg_id -> row offset (within history region) lookup
+    // msg_id -> ring slot lookup (small: 256 entries, HIST_W+1 bits each)
     logic [HIST_W-1:0]                msg_id_row_q      [256];
     logic                             msg_id_valid_q    [256];
-    logic [1:0]                       msg_id_side_q     [256];
-    logic [MAX_MSG_LEN*8-1:0]         msg_id_payload_q  [256];
-    msg_len_t                         msg_id_len_q      [256];
+
+    // Per-ring-slot metadata used by RENDER_UPDATE_STATUS to redraw the
+    // entire bubble row (border position depends on payload length, and
+    // the FAIL border swap needs the original payload). Indexed by ring
+    // slot rather than by msg_id so it stays at N_HIST_STORED entries
+    // even as MAX_MSG_LEN grows -- e.g. with MAX_MSG_LEN=640 and 64
+    // slots, this is ~41 KB instead of the 164 KB a 256-deep table
+    // would consume.
+    logic [1:0]                       slot_side_q     [N_HIST_STORED];
+    logic [MAX_MSG_LEN*8-1:0]         slot_payload_q  [N_HIST_STORED];
+    msg_len_t                         slot_len_q      [N_HIST_STORED];
 
     // chained transitions (set on CONN_STATE accept that needs a
     // multi-step redraw)
@@ -274,11 +285,13 @@ module fe_render_decoder
         else
             hist_cell = " ";
 
-        // input row
+        // input row. col_cnt_q only sweeps 0..FE_N_COLS-1=127, so even
+        // with MAX_LINE_LEN >= 128 only the first 128 bytes are visible
+        // on the single-row input bar -- multi-row input is P3.
         if (col_cnt_q < FE_COL_W'(INPUT_PREFIX_LEN))
             input_cell = input_prefix_byte(int'(col_cnt_q));
         else if (LEN_WIDTH'(input_idx) < input_len_q)
-            input_cell = input_line_q[input_idx[LINE_IDX_W-1:0]];
+            input_cell = input_line_q[LINE_IDX_W'(input_idx)];
         else
             input_cell = " ";
     end
@@ -447,11 +460,13 @@ module fe_render_decoder
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
             for (int i = 0; i < 256; i++) begin
-                msg_id_row_q[i]     <= '0;
-                msg_id_valid_q[i]   <= 1'b0;
-                msg_id_side_q[i]    <= 2'(MSG_LOCAL);
-                msg_id_payload_q[i] <= '0;
-                msg_id_len_q[i]     <= '0;
+                msg_id_row_q[i]   <= '0;
+                msg_id_valid_q[i] <= 1'b0;
+            end
+            for (int i = 0; i < N_HIST_STORED; i++) begin
+                slot_side_q[i]    <= 2'(MSG_LOCAL);
+                slot_payload_q[i] <= '0;
+                slot_len_q[i]     <= '0;
             end
 
             chain_titlebar_q  <= 1'b0;
@@ -537,10 +552,11 @@ module fe_render_decoder
                             if (peer_changed) begin
                                 hist_wr_row_q   <= '0;
                                 scroll_offset_q <= '0;
-                                for (int i = 0; i < 256; i++) begin
+                                for (int i = 0; i < 256; i++)
                                     msg_id_valid_q[i] <= 1'b0;
-                                    msg_id_side_q[i]  <= 2'(MSG_LOCAL);
-                                    msg_id_len_q[i]   <= '0;
+                                for (int i = 0; i < N_HIST_STORED; i++) begin
+                                    slot_side_q[i] <= 2'(MSG_LOCAL);
+                                    slot_len_q[i]  <= '0;
                                 end
                             end
                         end else begin
@@ -562,11 +578,11 @@ module fe_render_decoder
                         payload_q     <= be_render_payload;
                         target_row_q  <= FE_ROW_W'(HIST_ROW_START)
                                          + FE_ROW_W'(hist_wr_row_q);
-                        msg_id_row_q[be_render_msg_id]     <= hist_wr_row_q;
-                        msg_id_valid_q[be_render_msg_id]   <= 1'b1;
-                        msg_id_side_q[be_render_msg_id]    <= be_render_side;
-                        msg_id_payload_q[be_render_msg_id] <= be_render_payload;
-                        msg_id_len_q[be_render_msg_id]     <= be_render_len;
+                        msg_id_row_q[be_render_msg_id]   <= hist_wr_row_q;
+                        msg_id_valid_q[be_render_msg_id] <= 1'b1;
+                        slot_side_q[hist_wr_row_q]       <= be_render_side;
+                        slot_payload_q[hist_wr_row_q]    <= be_render_payload;
+                        slot_len_q[hist_wr_row_q]        <= be_render_len;
                         // Multi-line parsing. Cap at MAX_LINES so we
                         // never write ml_*_q[MAX_LINES..] (OOB) and never
                         // truncate n_lines_q via narrow-cast wrap. Bytes
@@ -602,12 +618,17 @@ module fe_render_decoder
 
                     RENDER_UPDATE_STATUS: begin
                         if (msg_id_valid_q[be_render_msg_id]) begin
+                            // Snapshot the ring slot owning this msg_id
+                            // once; both target_row_q and slot_*_q reads
+                            // use it.
+                            automatic logic [HIST_W-1:0] slot;
+                            slot = msg_id_row_q[be_render_msg_id];
+
                             status_q     <= be_render_status;
                             target_row_q <= FE_ROW_W'(HIST_ROW_START)
-                                            + FE_ROW_W'(
-                                                msg_id_row_q[be_render_msg_id]);
-                            side_q        <= msg_id_side_q[be_render_msg_id];
-                            payload_q     <= msg_id_payload_q[be_render_msg_id];
+                                            + FE_ROW_W'(slot);
+                            side_q       <= slot_side_q[slot];
+                            payload_q    <= slot_payload_q[slot];
                             // Re-parse multi-line boundaries. Same
                             // MAX_LINES cap as the APPEND path.
                             begin
@@ -616,8 +637,8 @@ module fe_render_decoder
                                 ml_offset_q[0] <= '0;
                                 line_start = 0;
                                 for (int i = 0; i < MAX_MSG_LEN; i++) begin
-                                    if (i < int'(msg_id_len_q[be_render_msg_id])
-                                        && msg_id_payload_q[be_render_msg_id][i*8 +: 8]
+                                    if (i < int'(slot_len_q[slot])
+                                        && slot_payload_q[slot][i*8 +: 8]
                                            == 8'h0A
                                         && n_lines < MAX_LINES) begin
                                         ml_len_q[n_lines - 1]
@@ -629,9 +650,8 @@ module fe_render_decoder
                                     end
                                 end
                                 ml_len_q[n_lines - 1]
-                                    <= msg_len_t'(int'(
-                                        msg_id_len_q[be_render_msg_id])
-                                        - line_start);
+                                    <= msg_len_t'(int'(slot_len_q[slot])
+                                                  - line_start);
                                 n_lines_q  <= LINE_CNT_W'(n_lines);
                                 cur_line_q <= '0;
                             end
@@ -660,7 +680,7 @@ module fe_render_decoder
                                 input_line_q[i] <= input_line_q[i-1];
                             end
                         end
-                        input_len_q    <= input_len_q + 8'd1;
+                        input_len_q    <= input_len_q + LEN_WIDTH'(1);
                         input_cursor_q <= be_render_cursor_pos;
 
                         // Redraw cells from (insert_pos) through
@@ -685,9 +705,9 @@ module fe_render_decoder
                         // Clear the now-invalid old tail cell so the
                         // input_cell lookup writes a space there.
                         if (input_len_q > 0)
-                            input_line_q[LINE_IDX_W'(input_len_q - 8'd1)] <= 8'h20;
+                            input_line_q[LINE_IDX_W'(input_len_q - LEN_WIDTH'(1))] <= 8'h20;
 
-                        input_len_q    <= input_len_q - 8'd1;
+                        input_len_q    <= input_len_q - LEN_WIDTH'(1);
                         input_cursor_q <= be_render_cursor_pos;
 
                         pos_start_q <= FE_COL_W'(INPUT_PREFIX_LEN)
