@@ -480,10 +480,17 @@ module fe_render_decoder
     // -----------------------------------------------------------------
     // Sequential logic
     // -----------------------------------------------------------------
+    // Synchronous reset: registers in this module (target_row_q,
+    // row_cnt_q, input_row_cnt_q, state_q, ...) drive fe_text_ram's
+    // BRAM address inputs (via wr_row). Xilinx BRAM ADDRARDADDR pins
+    // do not tolerate asynchronous resets on the registers that drive
+    // them -- when rst_n asserts, the address can briefly glitch and
+    // corrupt the BRAM contents. (Vivado DRC REQP-1839.) Same logic
+    // and reset values as before, just sampled synchronously.
     logic entering_new_state;
     assign entering_new_state = (state_d != state_q);
 
-    always_ff @(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk) begin
         if (!rst_n) begin
             state_q           <= S_IDLE;
             col_cnt_q         <= '0;

@@ -122,7 +122,11 @@ static void reset() {
     dut->clk = 0; dut->clk_pix = 0;
     for (int i = 0; i < 4; i++) tick();
     dut->rst_n = 1;
-    tick();
+    // Give the sync_2ff reset synchroniser (sync_out of u_sync_rst feeds
+    // fe_render_decoder's sync reset) a few ticks to walk to 1 after
+    // raw rst_n deasserts -- otherwise the decoder is still in
+    // synchronous reset when the first command arrives.
+    for (int i = 0; i < 4; i++) tick();
 }
 
 // ---------------------------------------------------------------------

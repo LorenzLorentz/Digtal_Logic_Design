@@ -89,9 +89,21 @@ module fe_top
     assign hist_wr_row_obs   = hist_wr_row_dec;
     assign scroll_offset_obs = scroll_offset_dec;
 
+    // fe_render_decoder uses synchronous reset (its FFs drive
+    // fe_text_ram's BRAM address pins, and Xilinx BRAM doesn't tolerate
+    // async-reset on those inputs). Synchronise the raw rst_n into the
+    // chat clock so we don't mix sync + async reset domains.
+    logic rst_n_sync;
+    sync_2ff #(.RST_VAL(1'b0)) u_sync_rst (
+        .clk     (clk),
+        .rst_n   (rst_n),
+        .async_in(1'b1),
+        .sync_out(rst_n_sync)
+    );
+
     fe_render_decoder u_decoder (
         .clk                    (clk),
-        .rst_n                  (rst_n),
+        .rst_n                  (rst_n_sync),
         .be_render_valid        (be_render_valid),
         .be_render_ready        (be_render_ready),
         .be_render_cmd          (be_render_cmd),
