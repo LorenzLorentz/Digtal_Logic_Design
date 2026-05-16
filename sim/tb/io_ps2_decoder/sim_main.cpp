@@ -237,18 +237,52 @@ static void test_extended_arrows() {
     feed_byte(0xE0);
     Event eL = feed_byte(0x6B);
     CHECK_EQ(eL.type, KEY_LEFT, "KEY_LEFT");
+    CHECK_EQ((int)eL.ascii, 0, "KEY_LEFT no shift -> ascii 0");
 
     feed_byte(0xE0);
     Event eR = feed_byte(0x74);
     CHECK_EQ(eR.type, KEY_RIGHT, "KEY_RIGHT");
+    CHECK_EQ((int)eR.ascii, 0, "KEY_RIGHT no shift -> ascii 0");
 
     feed_byte(0xE0);
     Event eU = feed_byte(0x75);
     CHECK_EQ(eU.type, KEY_UP, "KEY_UP");
+    CHECK_EQ((int)eU.ascii, 0, "KEY_UP no shift -> ascii 0");
 
     feed_byte(0xE0);
     Event eD = feed_byte(0x72);
     CHECK_EQ(eD.type, KEY_DOWN, "KEY_DOWN");
+    CHECK_EQ((int)eD.ascii, 0, "KEY_DOWN no shift -> ascii 0");
+}
+
+// Arrow keys held under Shift come through as the same KEY_* type but
+// with ascii bit 0 set, so the backend can route Shift+Up/Down to the
+// multi-row input scroll instead of the history scroll.
+static void test_shift_arrows_set_ascii_bit() {
+    printf("== test_shift_arrows_set_ascii_bit\n");
+    reset();
+    feed_byte(0x12);                  // Left Shift make (no event)
+    feed_byte(0xE0); Event eU = feed_byte(0x75);
+    CHECK_EQ(eU.valid, 1,             "Shift+Up fires");
+    CHECK_EQ(eU.type,  KEY_UP,        "Shift+Up still KEY_UP");
+    CHECK_EQ((int)eU.ascii, 1,        "Shift+Up sets ascii bit 0");
+
+    feed_byte(0xE0); Event eD = feed_byte(0x72);
+    CHECK_EQ(eD.type,  KEY_DOWN,      "Shift+Down still KEY_DOWN");
+    CHECK_EQ((int)eD.ascii, 1,        "Shift+Down sets ascii bit 0");
+
+    feed_byte(0xE0); Event eL = feed_byte(0x6B);
+    CHECK_EQ(eL.type,  KEY_LEFT,      "Shift+Left still KEY_LEFT");
+    CHECK_EQ((int)eL.ascii, 1,        "Shift+Left sets ascii bit 0");
+
+    feed_byte(0xE0); Event eR = feed_byte(0x74);
+    CHECK_EQ(eR.type,  KEY_RIGHT,     "Shift+Right still KEY_RIGHT");
+    CHECK_EQ((int)eR.ascii, 1,        "Shift+Right sets ascii bit 0");
+
+    // Release Shift and re-test: ascii must drop back to 0.
+    feed_byte(0xF0); feed_byte(0x12);
+    feed_byte(0xE0); Event eU2 = feed_byte(0x75);
+    CHECK_EQ((int)eU2.ascii, 0, "Up after Shift release -> ascii 0");
 }
 
 // Release of a non-shift key (e.g. 'a') is dropped.
@@ -384,6 +418,7 @@ int main(int argc, char** argv) {
     test_space();
     test_special_keys();
     test_extended_arrows();
+    test_shift_arrows_set_ascii_bit();
     test_release_dropped();
     test_extended_release_dropped();
     test_bat_byte_dropped();

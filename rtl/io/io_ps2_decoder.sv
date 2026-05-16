@@ -252,25 +252,29 @@ module io_ps2_decoder
                             // Extended make.
                             unique case (byte_data)
                                 8'h59: rshift_held_q <= 1'b1;  // Right Shift
+                                // Arrow keys piggy-back the Shift-held
+                                // state on ev_ascii bit 0 (see chat_pkg
+                                // KEY_SHIFT_MASK). Backend uses it to
+                                // route Shift+Up/Down -> input scroll.
                                 8'h6B: begin
                                     ev_valid <= 1'b1;
                                     ev_type  <= 3'(KEY_LEFT);
-                                    ev_ascii <= 8'h00;
+                                    ev_ascii <= shift_held ? KEY_SHIFT_MASK : 8'h00;
                                 end
                                 8'h74: begin
                                     ev_valid <= 1'b1;
                                     ev_type  <= 3'(KEY_RIGHT);
-                                    ev_ascii <= 8'h00;
+                                    ev_ascii <= shift_held ? KEY_SHIFT_MASK : 8'h00;
                                 end
                                 8'h75: begin
                                     ev_valid <= 1'b1;
                                     ev_type  <= 3'(KEY_UP);
-                                    ev_ascii <= 8'h00;
+                                    ev_ascii <= shift_held ? KEY_SHIFT_MASK : 8'h00;
                                 end
                                 8'h72: begin
                                     ev_valid <= 1'b1;
                                     ev_type  <= 3'(KEY_DOWN);
-                                    ev_ascii <= 8'h00;
+                                    ev_ascii <= shift_held ? KEY_SHIFT_MASK : 8'h00;
                                 end
                                 default: ;  // unsupported extended key
                             endcase

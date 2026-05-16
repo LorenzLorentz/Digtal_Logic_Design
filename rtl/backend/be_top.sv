@@ -178,7 +178,9 @@ module be_top
         S_RENDER_CONN_DISCONNECTED = 5'd16,
         S_DISCONNECTED_IDLE        = 5'd17,
         S_RENDER_SCROLL_UP         = 5'd18,
-        S_RENDER_SCROLL_DOWN       = 5'd19
+        S_RENDER_SCROLL_DOWN       = 5'd19,
+        S_RENDER_INPUT_SCROLL_UP   = 5'd20,
+        S_RENDER_INPUT_SCROLL_DOWN = 5'd21
     } state_e;
 
     state_e state_q, state_d;
@@ -365,8 +367,14 @@ module be_top
                         KEY_ESC: begin
                             state_d = S_TX_GOODBYE;
                         end
-                        KEY_UP:   state_d = S_RENDER_SCROLL_UP;
-                        KEY_DOWN: state_d = S_RENDER_SCROLL_DOWN;
+                        // Shift+Up/Down scroll the input area (multi-row
+                        // input buffer); plain Up/Down scroll history.
+                        KEY_UP: state_d = (io_key_ascii[0])
+                                          ? S_RENDER_INPUT_SCROLL_UP
+                                          : S_RENDER_SCROLL_UP;
+                        KEY_DOWN: state_d = (io_key_ascii[0])
+                                            ? S_RENDER_INPUT_SCROLL_DOWN
+                                            : S_RENDER_SCROLL_DOWN;
                         default: state_d = S_IDLE;
                     endcase
                 end
@@ -377,6 +385,8 @@ module be_top
             S_RENDER_DELETE:            if (be_render_ready) state_d = S_IDLE;
             S_RENDER_SCROLL_UP:         if (be_render_ready) state_d = S_IDLE;
             S_RENDER_SCROLL_DOWN:       if (be_render_ready) state_d = S_IDLE;
+            S_RENDER_INPUT_SCROLL_UP:   if (be_render_ready) state_d = S_IDLE;
+            S_RENDER_INPUT_SCROLL_DOWN: if (be_render_ready) state_d = S_IDLE;
             S_ENTER_RENDER_LOCAL:       if (be_render_ready) state_d = S_ENTER_SEND_COMM;
             S_ENTER_SEND_COMM:          if (be_tx_ready)     state_d = S_ENTER_RENDER_INPUT_CLEAR;
             S_ENTER_RENDER_INPUT_CLEAR: if (be_render_ready) state_d = S_IDLE;
@@ -539,6 +549,14 @@ module be_top
             S_RENDER_SCROLL_DOWN: begin
                 be_render_valid = 1'b1;
                 be_render_cmd   = 4'(RENDER_SCROLL_DOWN);
+            end
+            S_RENDER_INPUT_SCROLL_UP: begin
+                be_render_valid = 1'b1;
+                be_render_cmd   = 4'(RENDER_INPUT_SCROLL_UP);
+            end
+            S_RENDER_INPUT_SCROLL_DOWN: begin
+                be_render_valid = 1'b1;
+                be_render_cmd   = 4'(RENDER_INPUT_SCROLL_DOWN);
             end
             default: ;
         endcase

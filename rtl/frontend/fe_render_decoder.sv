@@ -389,7 +389,9 @@ module fe_render_decoder
                         RENDER_REDRAW_ALL,
                         RENDER_CLEAR_SCREEN,
                         RENDER_SCROLL_UP,
-                        RENDER_SCROLL_DOWN:
+                        RENDER_SCROLL_DOWN,
+                        RENDER_INPUT_SCROLL_UP,
+                        RENDER_INPUT_SCROLL_DOWN:
                             // single-cycle: just latch, stay idle
                             state_d = S_IDLE;
 
@@ -768,6 +770,16 @@ module fe_render_decoder
                     RENDER_SCROLL_UP: begin
                         if (scroll_offset_q < SCROLL_W'(SCROLL_MAX))
                             scroll_offset_q <= scroll_offset_q + 1'b1;
+                    end
+
+                    RENDER_INPUT_SCROLL_UP: begin
+                        if (input_scroll_offset_q < INPUT_SCROLL_W'(INPUT_SCROLL_MAX))
+                            input_scroll_offset_q <= input_scroll_offset_q + 1'b1;
+                    end
+
+                    RENDER_INPUT_SCROLL_DOWN: begin
+                        if (input_scroll_offset_q != '0)
+                            input_scroll_offset_q <= input_scroll_offset_q - 1'b1;
                     end
 
                     RENDER_SCROLL_DOWN: begin

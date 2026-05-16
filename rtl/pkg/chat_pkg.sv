@@ -62,6 +62,12 @@ package chat_pkg;
     // -----------------------------------------------------------------
     // io <-> backend : key event types
     //   Width matches README: io_key_type[2:0]
+    //
+    // Shift sideband: for arrow keys (KEY_LEFT/RIGHT/UP/DOWN) the PS/2
+    // decoder sets io_key_ascii bit 0 when Shift was held at the moment
+    // of the keystroke. ASCII is otherwise 0x00 for arrow keys, so this
+    // does not collide with anything. Backend uses bit 0 to distinguish
+    // history-scroll (Shift cleared) from input-scroll (Shift set).
     // -----------------------------------------------------------------
     typedef enum logic [2:0] {
         KEY_CHAR      = 3'd0,
@@ -73,6 +79,9 @@ package chat_pkg;
         KEY_UP        = 3'd6,    // history scroll up   (oldwards)
         KEY_DOWN      = 3'd7     // history scroll down (newwards)
     } key_type_e;
+
+    // Mask for the Shift-held bit in io_key_ascii on arrow-key events.
+    localparam byte_t KEY_SHIFT_MASK = 8'h01;
 
     // -----------------------------------------------------------------
     // comm -> backend : final transmission status of a message
@@ -121,7 +130,11 @@ package chat_pkg;
         // History scroll: shift the visible window in the history
         // ring buffer. No payload; clamped at fe.
         RENDER_SCROLL_UP            = 4'd10,
-        RENDER_SCROLL_DOWN          = 4'd11
+        RENDER_SCROLL_DOWN          = 4'd11,
+        // Input scroll: shift the visible window in the multi-row
+        // input buffer. Emitted on Shift+Up / Shift+Down. Clamped at fe.
+        RENDER_INPUT_SCROLL_UP      = 4'd12,
+        RENDER_INPUT_SCROLL_DOWN    = 4'd13
     } render_cmd_e;
 
     // -----------------------------------------------------------------

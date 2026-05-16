@@ -63,6 +63,8 @@ enum : uint8_t {
     RENDER_CONN_STATE           = 9,
     RENDER_SCROLL_UP            = 10,
     RENDER_SCROLL_DOWN          = 11,
+    RENDER_INPUT_SCROLL_UP      = 12,
+    RENDER_INPUT_SCROLL_DOWN    = 13,
 };
 enum : uint8_t { CONN_BOOT = 0, CONN_HANDSHAKE = 1, CONN_CONNECTED = 2,
                  CONN_DISCONNECTED = 3 };
@@ -921,6 +923,37 @@ static void test_input_newline_renders_multirow() {
     CHECK_EQ(read_cell(INPUT_ROW_START+2,  5), ' ',  "row2 col5 blank");
 }
 
+// RENDER_INPUT_SCROLL_UP / DOWN nudge the input window without
+// repainting the input region; clamps at [0, INPUT_SCROLL_MAX].
+static void test_input_scroll_clamps() {
+    printf("== test_input_scroll_clamps\n");
+    reset();
+    bring_up();
+
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 0, "input scroll starts at 0");
+
+    // Scroll up a few ticks, then verify it actually moves.
+    RenderCmd su; su.cmd = RENDER_INPUT_SCROLL_UP;
+    send_cmd(su); send_cmd(su); send_cmd(su);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 3, "scroll up 3 ticks");
+
+    // Scroll back down once.
+    RenderCmd sd; sd.cmd = RENDER_INPUT_SCROLL_DOWN;
+    send_cmd(sd);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 2, "scroll down 1");
+
+    // Down past 0 clamps.
+    send_cmd(sd); send_cmd(sd); send_cmd(sd);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 0, "scroll down clamps at 0");
+
+    // Up past max clamps at INPUT_SCROLL_MAX = MAX_INPUT_LINES - N_INPUT_VISIBLE.
+    const int N_INPUT_VISIBLE = 5;
+    const int INPUT_SCROLL_MAX = MAX_INPUT_LINES - N_INPUT_VISIBLE;  // 11
+    for (int i = 0; i < MAX_INPUT_LINES + 4; i++) send_cmd(su);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, INPUT_SCROLL_MAX,
+             "scroll up clamps at INPUT_SCROLL_MAX");
+}
+
 // Enter-commit clears every visible input row, not just the first.
 static void test_input_commit_clears_all_rows() {
     printf("== test_input_commit_clears_all_rows\n");
@@ -1039,6 +1072,7 @@ int main(int argc, char** argv) {
     test_long_multiline_payload();
     test_input_newline_renders_multirow();
     test_input_commit_clears_all_rows();
+    test_input_scroll_clamps();
 
     tfp->close();
     delete tfp;

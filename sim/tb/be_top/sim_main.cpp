@@ -64,6 +64,8 @@ enum : uint8_t {
     RENDER_CONN_STATE           = 9,
     RENDER_SCROLL_UP            = 10,
     RENDER_SCROLL_DOWN          = 11,
+    RENDER_INPUT_SCROLL_UP      = 12,
+    RENDER_INPUT_SCROLL_DOWN    = 13,
 };
 // frame_type_e
 enum : uint8_t {
@@ -631,7 +633,7 @@ static void test_left_right_emit_move_cursor() {
 
 // KEY_UP / KEY_DOWN in S_IDLE emit RENDER_SCROLL_UP / RENDER_SCROLL_DOWN
 // frames. They don't touch the input line buffer or send anything via
-// comm.
+// comm. Shift-arrow (ascii bit 0 set) routes to RENDER_INPUT_SCROLL_*.
 static void test_scroll_keys_emit_render() {
     printf("== test_scroll_keys_emit_render\n");
     reset();
@@ -644,6 +646,18 @@ static void test_scroll_keys_emit_render() {
     RenderEvent d;
     CHECK_EQ(wait_render(d, 5), true,         "DOWN render fires");
     CHECK_EQ(d.cmd, RENDER_SCROLL_DOWN,       "cmd SCROLL_DOWN");
+
+    // Shift+Up / Shift+Down (ascii=KEY_SHIFT_MASK=0x01) route to
+    // RENDER_INPUT_SCROLL_* instead.
+    send_key(KEY_UP, 0x01);
+    RenderEvent su;
+    CHECK_EQ(wait_render(su, 5), true,             "Shift+UP render fires");
+    CHECK_EQ(su.cmd, RENDER_INPUT_SCROLL_UP,       "cmd INPUT_SCROLL_UP");
+
+    send_key(KEY_DOWN, 0x01);
+    RenderEvent sd;
+    CHECK_EQ(wait_render(sd, 5), true,             "Shift+DOWN render fires");
+    CHECK_EQ(sd.cmd, RENDER_INPUT_SCROLL_DOWN,     "cmd INPUT_SCROLL_DOWN");
 
     // Scroll keys must not alter the input line.
     CHECK_EQ(dut->line_len,   0, "line_len untouched");
