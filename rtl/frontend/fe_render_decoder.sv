@@ -478,7 +478,15 @@ module fe_render_decoder
                             if (cur_line_q + 1 < n_lines_q) begin
                                 col_cnt_q   <= '0;
                                 cur_line_q  <= cur_line_q + 1'b1;
-                                target_row_q <= target_row_q + 1'b1;
+                                // Wrap target_row within the history ring
+                                // (rows HIST_ROW_START..HIST_ROW_END). Without
+                                // this a multi-line message starting near
+                                // HIST_ROW_END spills into the sep row and
+                                // INPUT_ROW below.
+                                if (target_row_q == FE_ROW_W'(HIST_ROW_END))
+                                    target_row_q <= FE_ROW_W'(HIST_ROW_START);
+                                else
+                                    target_row_q <= target_row_q + 1'b1;
                             end
                         end else begin
                             col_cnt_q <= col_cnt_q + 1'b1;
