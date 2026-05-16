@@ -678,14 +678,16 @@ static void test_multiline_local() {
     c.payload = msg; c.payload_n = 6;
     send_cmd(c);
 
-    // Row 0 (HIST_ROW_START): "hi" right-aligned bubble
+    // Bubble width = max sub-line length = 3 ("bye"). All rows share
+    // that width, so row 0's "hi" gets one trailing space of padding.
+    // bubble_left = 97 - 3 - 1 = 93; BR at 97 for every row.
     int row0 = HIST_ROW_START;
-    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_BL, "row0 left border");
-    CHECK_EQ(read_cell(row0, 95), 'h', "row0 'h'");
-    CHECK_EQ(read_cell(row0, 96), 'i', "row0 'i'");
+    CHECK_EQ(read_cell(row0, 93), (uint8_t)SPRITE_BL, "row0 left border");
+    CHECK_EQ(read_cell(row0, 94), 'h', "row0 'h'");
+    CHECK_EQ(read_cell(row0, 95), 'i', "row0 'i'");
+    CHECK_EQ(read_cell(row0, 96), ' ', "row0 padding");
     CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "row0 right border");
 
-    // Row 1 (HIST_ROW_START+1): "bye" right-aligned bubble
     int row1 = HIST_ROW_START + 1;
     CHECK_EQ(read_cell(row1, 93), (uint8_t)SPRITE_BL, "row1 left border");
     CHECK_EQ(read_cell(row1, 94), 'b', "row1 'b'");
@@ -747,15 +749,17 @@ static void test_multiline_status_update() {
     u.status = MSG_FAIL;
     send_cmd(u);
 
-    // Row 0 "xy": FBL@94, x@95, y@96, FBR@97
+    // Bubble width = max sub-line length = 2 ("xy"). All rows use that
+    // width: row 0 "xy" fills it, row 1 "z" gets one trailing space.
+    // bubble_left = 97 - 2 - 1 = 94; BR at 97 for every row.
     CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_FBL, "row0 fail left border");
     CHECK_EQ(read_cell(row0, 95), 'x', "row0 x after fail");
     CHECK_EQ(read_cell(row0, 96), 'y', "row0 y after fail");
     CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_FBR, "row0 fail right border");
-    // Row 1 "z": FBL@95, z@96, FBR@97
     int row1 = HIST_ROW_START + 1;
-    CHECK_EQ(read_cell(row1, 95), (uint8_t)SPRITE_FBL, "row1 fail left border");
-    CHECK_EQ(read_cell(row1, 96), 'z', "row1 z after fail");
+    CHECK_EQ(read_cell(row1, 94), (uint8_t)SPRITE_FBL, "row1 fail left border");
+    CHECK_EQ(read_cell(row1, 95), 'z', "row1 z after fail");
+    CHECK_EQ(read_cell(row1, 96), ' ', "row1 padding after fail");
     CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_FBR, "row1 fail right border");
 }
 
@@ -854,7 +858,10 @@ static void test_multiline_overflow() {
     c.len = (uint16_t)BYTES;
     send_cmd(c);
 
-    // Rows 0..MAX_LINES-2: single-char remote bubbles 'a'..'a'+M-2.
+    // Bubble width = max sub-line length = 5 (the final merged line
+    // "x\ny\nz"). Every row shares that width, so the single-char
+    // rows get 4 columns of trailing padding before BR.
+    // Remote left-aligned: BL@2, content@3..7, BR@8.
     for (int i = 0; i < MAX_LINES - 1; i++) {
         int row = HIST_ROW_START + i;
         char lbl[40];
@@ -862,11 +869,14 @@ static void test_multiline_overflow() {
         CHECK_EQ(read_cell(row, 2), (uint8_t)SPRITE_BL, lbl);
         snprintf(lbl, sizeof(lbl), "row %d char", i);
         CHECK_EQ(read_cell(row, 3), (uint8_t)('a' + i), lbl);
+        snprintf(lbl, sizeof(lbl), "row %d padding", i);
+        CHECK_EQ(read_cell(row, 5), ' ', lbl);
         snprintf(lbl, sizeof(lbl), "row %d BR", i);
-        CHECK_EQ(read_cell(row, 4), (uint8_t)SPRITE_BR, lbl);
+        CHECK_EQ(read_cell(row, 8), (uint8_t)SPRITE_BR, lbl);
     }
 
-    // Row MAX_LINES-1 absorbs "<a+M-1>\n<a+M>\n<a+M+1>" -- 5 bytes.
+    // Row MAX_LINES-1 absorbs "<a+M-1>\n<a+M>\n<a+M+1>" -- 5 bytes
+    // (full bubble width).
     int row_last = HIST_ROW_START + MAX_LINES - 1;
     CHECK_EQ(read_cell(row_last, 2), (uint8_t)SPRITE_BL, "row_last BL");
     CHECK_EQ(read_cell(row_last, 3), (uint8_t)('a' + MAX_LINES - 1), "row_last [0]");
@@ -884,6 +894,84 @@ static void test_multiline_overflow() {
 
     // Ring head moved exactly MAX_LINES from 0.
     CHECK_EQ(dut->hist_wr_row_obs, MAX_LINES, "hist_wr_row advanced by MAX_LINES");
+}
+
+// P4: A long single-line message (no \n) gets soft-wrapped onto
+// multiple visual rows of the same bubble. With MAX_BUBBLE_INNER_W=80
+// a 100-char message wraps to row0 (80 bytes) + row1 (20 bytes, padded
+// to 80). All rows share the same width so borders line up vertically.
+static void test_bubble_soft_wrap_long_line() {
+    printf("== test_bubble_soft_wrap_long_line\n");
+    reset();
+    bring_up();
+    const int MAX_W   = 80;
+    const int L       = 100;
+    std::vector<uint8_t> msg(L);
+    for (int i = 0; i < L; i++) msg[i] = (uint8_t)('A' + (i % 26));
+
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 51;
+    c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
+    c.payload = msg.data(); c.payload_n = (size_t)L; c.len = (uint16_t)L;
+    send_cmd(c);
+
+    // Bubble inner width = MAX_W = 80. Remote: BL@2, content@3..82,
+    // BR@83. row0 has bytes 0..79; row1 has bytes 80..99 then padding.
+    int row0 = HIST_ROW_START;
+    int row1 = HIST_ROW_START + 1;
+    CHECK_EQ(read_cell(row0, 2),  (uint8_t)SPRITE_BL, "wrap row0 BL");
+    CHECK_EQ(read_cell(row0, 3),  msg[0],            "wrap row0 first byte");
+    CHECK_EQ(read_cell(row0, 82), msg[79],           "wrap row0 last byte");
+    CHECK_EQ(read_cell(row0, 83), (uint8_t)SPRITE_BR, "wrap row0 BR");
+
+    CHECK_EQ(read_cell(row1, 2),  (uint8_t)SPRITE_BL, "wrap row1 BL");
+    CHECK_EQ(read_cell(row1, 3),  msg[80],           "wrap row1 first byte");
+    CHECK_EQ(read_cell(row1, 22), msg[99],           "wrap row1 last data byte");
+    CHECK_EQ(read_cell(row1, 23), ' ',               "wrap row1 first padding");
+    CHECK_EQ(read_cell(row1, 82), ' ',               "wrap row1 padding before BR");
+    CHECK_EQ(read_cell(row1, 83), (uint8_t)SPRITE_BR, "wrap row1 BR");
+
+    // hist_wr_row advanced by 2 visual rows.
+    CHECK_EQ(dut->hist_wr_row_obs, 2, "wrap advances head by 2");
+}
+
+// P4: Multi-line short messages have one continuous bubble (left/right
+// borders line up across rows) because every row uses the max sub-line
+// length, padded with spaces.
+static void test_bubble_multiline_aligned() {
+    printf("== test_bubble_multiline_aligned\n");
+    reset();
+    bring_up();
+    // 3 lines: "ab", "wxyz", "c".  max sub-len = 4.
+    uint8_t msg[] = {'a','b', 0x0A, 'w','x','y','z', 0x0A, 'c'};
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 99;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING;
+    c.payload = msg; c.payload_n = sizeof(msg); c.len = (uint16_t)sizeof(msg);
+    send_cmd(c);
+
+    // Local right-aligned: bubble_right=97, width=4 -> bubble_left=92.
+    // BL at col 92, BR at col 97 on every row of the message.
+    int row0 = HIST_ROW_START;
+    int row1 = HIST_ROW_START + 1;
+    int row2 = HIST_ROW_START + 2;
+    CHECK_EQ(read_cell(row0, 92), (uint8_t)SPRITE_BL, "row0 BL");
+    CHECK_EQ(read_cell(row0, 93), 'a',                "row0 'a'");
+    CHECK_EQ(read_cell(row0, 94), 'b',                "row0 'b'");
+    CHECK_EQ(read_cell(row0, 95), ' ',                "row0 pad1");
+    CHECK_EQ(read_cell(row0, 96), ' ',                "row0 pad2");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "row0 BR");
+
+    CHECK_EQ(read_cell(row1, 92), (uint8_t)SPRITE_BL, "row1 BL");
+    CHECK_EQ(read_cell(row1, 93), 'w',                "row1 'w'");
+    CHECK_EQ(read_cell(row1, 96), 'z',                "row1 'z'");
+    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR, "row1 BR");
+
+    CHECK_EQ(read_cell(row2, 92), (uint8_t)SPRITE_BL, "row2 BL");
+    CHECK_EQ(read_cell(row2, 93), 'c',                "row2 'c'");
+    CHECK_EQ(read_cell(row2, 94), ' ',                "row2 pad1");
+    CHECK_EQ(read_cell(row2, 96), ' ',                "row2 pad3");
+    CHECK_EQ(read_cell(row2, 97), (uint8_t)SPRITE_BR, "row2 BR");
 }
 
 // P3.1 input area: Shift+Enter inserts a 0x0A byte; the input region
@@ -1171,6 +1259,8 @@ int main(int argc, char** argv) {
     test_input_scroll_clamps();
     test_cursor_crosses_newline();
     test_cursor_auto_follow_scroll();
+    test_bubble_soft_wrap_long_line();
+    test_bubble_multiline_aligned();
 
     tfp->close();
     delete tfp;

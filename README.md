@@ -1,98 +1,28 @@
-## 数设方案草稿
+# FPGA 双端聊天系统
 
-### 1. 大纲
+两块 FPGA 通过 UART 链路通信, 各自接 PS/2 键盘 + HDMI 显示器, 实现一对一文字聊天.
 
-**模块设计**:
+目录结构:
 
-io (外设交互)
+```text
+rtl/
+  pkg/               chat_pkg.sv, fe_pkg.sv     -- 全局类型/参数
+  common/            crc16, sync_2ff, debouncer, handshake_fifo
+  io/                PS/2 phy + 解码 + 事件 FIFO
+  comm/              UART + 帧编解码 + ARQ FSM + 仲裁
+  backend/           聊天主控 (连接管理 + 输入/收发/存储)
+  frontend/          render decoder + text_ram + scan + glyph_rom
+  chat_top.sv        Verilator/仿真顶层 (无 HDMI 编码)
+  chat_top_board.sv  Vivado 板级顶层 (ip_pll + ip_rgb2dvi)
+sim/tb/              每个模块的 Verilator testbench
+scripts/             gen_font.py, frame_codec.py, crc16_ref.py, run_test.py
+constraints/         chat_top_board.xdc (Genesys 2 / xc7a200t)
+vivado/              build.tcl, ip_repo
+```
 
-frontend (前端渲染)
+---
 
-comm (通信)
-
-backend (聊天系统核心状态机, 含连接管理)
-
-**大概思路**: (非状态机表述)
-
-io接受输入 -> 向backend发送信号 -> backend通过comm发送信息 -> comm接受信息 -> comm向backend发送信号 -> backend接受信息 -> backend向前端发送新渲染请求
-
-backend 同时管理"连接 / 用户名"的握手流程: 上电向对方索取用户名, 对方回应后进入聊天; ESC 通知对方断开, 双方进 disconnected 屏; SPACE 重新发起握手. 详见 §6 (Backend).
-
-**Backend**
-
-状态机分两层:
-
-**外层 (连接管理)**:
-
-1. 上电 -> 发 HELLO -> 等对方回应 -> 进入 connected
-2. connected 中 -> ESC -> 发 GOODBYE -> disconnected; 收到 GOODBYE 同理
-3. disconnected -> SPACE 或 收到 HELLO -> 重新走 1
-
-**内层 (聊天主流程, 仅在 connected 下使能)**:
-
-1. io信号 -> 接受io信息 (光标编辑/输入行) -> 前端渲染
-
-2. io信号 (Enter) -> 存本地消息 -> 通过 comm 发送 -> 收到发送结果 (SUCCESS/FAIL) -> 前端渲染
-
-3. comm信号 (DATA) -> 接受远端消息 -> 存信息 -> 前端渲染
-
-其中细节的要实现:
-
-握手与用户名比较 (含 store 清空判定);
-
-发信息;
-
-收信息;
-
-存储;
-
-向前端发信号.
-
-**Comm**
-
-状态机:
-
-后端发送信号 -> 发消息 (不太确定可靠传输要怎么实现) -> 返回结果 (success or fail) 向后端
-
-收到信号 -> 收消息 -> 回复确认消息给对方 -> 如果成功, 向后端发送信号
-
-可靠传输的状态机细节: IDLE, SEND, WAIT_ACK, RETRY, SUCESS, FAIL; IDLE, RECV, CHECK, SEND_ACK, NOTIFY
-
-
-
-其中细节的要实现:
-
-把消息按照特定协议编码;
-
-对消息解码;
-
-通知后端
-
-**io**
-
-状态机:
-
-外设改变电平 -> 发消息
-
-
-
-**Frontend**
-
-状态机:
-
-后端发送消息信号 -> 渲染消息
-
-后端发送消息发送成功信号 -> 渲染成功或者失败
-
-
-
-**锁机制**
-
-注意上述都要实现一个等待锁状态, 当仲裁官判定等待的时候
-
-
-
-**程序框图**
+## 1. 系统框图 (端到端时序)
 
 (1) 上电握手 + 聊天 + ESC 断开 + SPACE 重连:
 
@@ -104,19 +34,19 @@ sequenceDiagram
     participant CM as comm
     participant PEER as peer FPGA
 
-    Note over BE: reset → S_BOOT
+    Note over BE: reset → S_BOOT_REDRAW
     BE->>FE: render_cmd RENDER_REDRAW_ALL (boot 屏)
-    BE->>CM: tx_req(HELLO, my_name)
-    CM->>PEER: HELLO(seq, my_name)
-    Note over BE: → S_HANDSHAKE
+    BE->>CM: be_tx(HELLO, MY_NAME)  (S_TX_HELLO)
+    CM->>PEER: HELLO(seq, MY_NAME)
+    Note over BE: → S_HANDSHAKE_IDLE
 
     PEER->>CM: HELLO(seq, peer_name)
-    CM->>BE: rx(HELLO, peer_name)
-    BE->>BE: 存 peer_name
-    BE->>CM: tx_req(USERNAME, my_name)
-    CM->>PEER: USERNAME(seq, my_name)
-    Note over BE: → S_CONNECTED
-    BE->>FE: render_cmd RENDER_CONN_STATE (connected, peer_name)
+    CM->>BE: cm_rx(HELLO, peer_name)
+    BE->>BE: 存 peer_name (不同则清空 store)
+    BE->>CM: be_tx(USERNAME, MY_NAME)  (S_TX_USERNAME)
+    CM->>PEER: USERNAME(seq, MY_NAME)
+    Note over BE: → S_RENDER_CONN_CONNECTED → S_IDLE
+    BE->>FE: render_cmd RENDER_CONN_STATE (CONNECTED, peer_name)
 
     IO->>BE: key_event(char)
     BE->>BE: 更新输入行 (cursor insert)
@@ -125,554 +55,624 @@ sequenceDiagram
     IO->>BE: key_event(enter)
     BE->>BE: 生成本地消息 msg_id, 存 Store=PENDING
     BE->>FE: render_cmd RENDER_APPEND_LOCAL_PENDING
-    BE->>CM: tx_req(DATA, msg_id, payload)
+    BE->>CM: be_tx(DATA, msg_id, payload)
+    BE->>FE: render_cmd RENDER_UPDATE_INPUT_LINE (len=0)
 
     CM->>PEER: DATA(seq, payload)
     PEER->>CM: ACK(seq)
-    CM->>BE: tx_status(msg_id, SUCCESS)
+    CM->>BE: cm_status(msg_id, SUCCESS)
     BE->>FE: render_cmd RENDER_UPDATE_STATUS
 
     PEER->>CM: DATA(seq, payload)
     CM->>PEER: ACK(seq)
-    CM->>BE: rx(DATA, payload)
+    CM->>BE: cm_rx(DATA, payload)
     BE->>BE: Store, side=REMOTE
     BE->>FE: render_cmd RENDER_APPEND_REMOTE
 
     IO->>BE: key_event(esc)
-    BE->>CM: tx_req(GOODBYE)
+    BE->>CM: be_tx(GOODBYE)  (S_TX_GOODBYE)
     CM->>PEER: GOODBYE(seq)
-    Note over BE: → S_DISCONNECTED
-    BE->>FE: render_cmd RENDER_CONN_STATE (disconnected)
+    Note over BE: → S_RENDER_CONN_DISCONNECTED → S_DISCONNECTED_IDLE
+    BE->>FE: render_cmd RENDER_CONN_STATE (DISCONNECTED)
 
     IO->>BE: key_event(char ' ')  %% SPACE
-    Note over BE: → S_BOOT
-    BE->>CM: tx_req(HELLO, my_name)
-    CM->>PEER: HELLO(seq, my_name)
+    Note over BE: → S_TX_HELLO
+    BE->>CM: be_tx(HELLO, MY_NAME)
+    CM->>PEER: HELLO(seq, MY_NAME)
 ```
 
 (2) mid-chat 时对方重启的处理 (REHELLO 防循环):
 
 ```mermaid
 sequenceDiagram
-    participant A as A (S_CONNECTED)
-    participant B as B (重启)
+    participant A
+    participant B
 
-    Note over B: reset → S_BOOT
+    Note over A: 处于 S_IDLE
+    Note over B: reset → S_BOOT_REDRAW → S_TX_HELLO
     B->>A: HELLO(B_name)
-    Note over A: 在 S_CONNECTED 收到 HELLO
-    A->>A: 比较 B_name 与已存 不同→清空 store
-    A->>B: REHELLO(A_name)
-    Note over A: 状态不变 (仍 S_CONNECTED)
+    Note over A: cm_rx HELLO in S_IDLE
+    A->>A: 比较 B_name 与 peer_name_q, 不同则全清 store
+    A->>B: REHELLO(A_name), S_TX_REHELLO
+    Note over A: 状态不变, 仍 S_IDLE
 
-    Note over B: 在 S_HANDSHAKE 收到 REHELLO
+    Note over B: cm_rx REHELLO in S_HANDSHAKE_IDLE
     B->>B: 存 A_name
-    B->>A: USERNAME(B_name)
-    Note over B: → S_CONNECTED
-    Note over A: 收 USERNAME, 状态不变
+    B->>A: USERNAME(B_name), S_TX_USERNAME
+    Note over B: → S_RENDER_CONN_CONNECTED → S_IDLE
+    Note over A: cm_rx USERNAME, 状态不变
 ```
 
+两块板各自编译, 通过 `MY_NAME_LEN` / `MY_NAME_PACKED` 参数把用户名硬编码进 bitstream. 链路层是单根 UART 双工对接, 上层走 stop-and-wait ARQ.
 
+`chat_top_board.sv` 在 `chat_top.sv` 之上叠了两个 Xilinx IP:
 
-### 2. 模块间接口
+- `ip_pll`: 100 MHz → 40 MHz pixel clock (800×600 @ 60 Hz)
+- `ip_rgb2dvi`: RGB888 + sync → HDMI TMDS 差分对
 
-1. `io -> backend`
+`chat_top.sv` 本身只输出 RGB+sync+DE, 没有 TMDS 编码, 这样 Verilator 能直接 elaborate 整个 chat_top 做集成测试.
 
-传递键盘事件
+---
 
-| 信号                | 方向         | 含义                       |
-| ------------------- | ------------ | -------------------------- |
-| `io_key_valid`      | io → backend | io 有一个键盘事件          |
-| `io_key_ready`      | backend → io | backend 可以接收           |
-| `io_key_type[2:0]`  | io → backend | 字符、回车、退格、方向键等 |
-| `io_key_ascii[7:0]` | io → backend | ASCII 字符                 |
-| `io_key_code[7:0]`  | io → backend | 原始键码，可选             |
+## 2. 子系统 (顶层模块)
 
-事件类型:
+| 模块            | 文件                              | 作用                                                  |
+| --------------- | --------------------------------- | ----------------------------------------------------- |
+| `io_top`        | `rtl/io/io_top.sv`                | PS/2 解码 → key event FIFO                            |
+| `be_top`        | `rtl/backend/be_top.sv`           | 连接管理 + 聊天 FSM + 消息存储                         |
+| `comm_top`      | `rtl/comm/comm_top.sv`            | UART 收发 + 帧编解码 + ARQ + ACK 仲裁                  |
+| `fe_top`        | `rtl/frontend/fe_top.sv`          | render decoder + text_ram + 像素 scan + glyph_rom      |
+| `chat_top`      | `rtl/chat_top.sv`                 | 四子系统互联 + reset sync                              |
+| `chat_top_board`| `rtl/chat_top_board.sv`           | 板级: ip_pll + chat_top + ip_rgb2dvi                   |
+
+---
+
+## 3. 模块间接口
+
+所有跨模块接口都遵循 `valid / ready` 握手. 类型/常量定义在 `rtl/pkg/chat_pkg.sv`.
+
+### 3.1 `io_top → be_top` (键盘事件)
+
+| 信号                  | 方向          | 含义                              |
+| --------------------- | ------------- | --------------------------------- |
+| `io_key_valid`        | io → backend  | 有键盘事件                        |
+| `io_key_ready`        | backend → io  | backend 可接收                    |
+| `io_key_type[2:0]`    | io → backend  | `key_type_e`                      |
+| `io_key_ascii[7:0]`   | io → backend  | KEY_CHAR 时的 ASCII; 其他类型忽略 |
+
+`key_type_e` (`chat_pkg.sv`):
 
 ```text
-KEY_CHAR      = 0
-KEY_ENTER     = 1
-KEY_BACKSPACE = 2
-KEY_LEFT      = 3
-KEY_RIGHT     = 4
-KEY_ESC       = 5
+KEY_CHAR      = 0    KEY_LEFT     = 3
+KEY_ENTER     = 1    KEY_RIGHT    = 4
+KEY_BACKSPACE = 2    KEY_ESC      = 5
+KEY_UP        = 6    KEY_DOWN     = 7    // 历史滚动
 ```
 
-2. `backend -> comm`
+### 3.2 `be_top → comm_top` (TX 请求)
 
-用于请求发送一帧 (聊天 DATA, 也包括 HELLO/REHELLO/USERNAME/GOODBYE 控制帧).
+发送一帧, 类型可以是 DATA 或四种控制帧 (HELLO / REHELLO / USERNAME / GOODBYE).
 
-| 信号                     | 方向           | 含义                              |
-| ------------------------ | -------------- | --------------------------------- |
-| `be_tx_valid`            | backend → comm | backend 有帧要发送                |
-| `be_tx_ready`            | comm → backend | comm 可以接收发送请求             |
-| `be_tx_frame_type[2:0]`  | backend → comm | DATA / HELLO / REHELLO / USERNAME / GOODBYE |
-| `be_tx_msg_id[7:0]`      | backend → comm | 仅 DATA 帧使用; 之后用来更新发送状态 |
-| `be_tx_len[7:0]`         | backend → comm | payload 长度 (HELLO/REHELLO/USERNAME 用 name_len; GOODBYE=0) |
-| `be_tx_payload[...]`     | backend → comm | DATA 时是消息内容; HELLO/REHELLO/USERNAME 时是用户名; GOODBYE 时不用 |
+| 信号                       | 方向            | 含义                              |
+| -------------------------- | --------------- | --------------------------------- |
+| `be_tx_valid`              | backend → comm  | backend 要发一帧                  |
+| `be_tx_ready`              | comm → backend  | comm 空闲, 可接                   |
+| `be_tx_frame_type[2:0]`    | backend → comm  | `frame_type_e`                    |
+| `be_tx_msg_id[7:0]`        | backend → comm  | 仅 DATA 用; 用于状态回报          |
+| `be_tx_len[7:0]`           | backend → comm  | payload 字节数                    |
+| `be_tx_payload[MAX*8-1:0]` | backend → comm  | DATA 内容 / 用户名 / 空           |
 
-`msg_id` 仅对 DATA 有意义, 控制帧由 backend 视作 fire-and-forget (依赖 comm 的 ARQ 可靠送达, 不通过 `cm_status` 回报). ACK / NAK 由 comm 内部生成, 不走这个接口.
-
-3. `comm -> backend`
-
-分成两类事件：收到远端消息、发送结果返回。
-
-### 收到远端帧
-
-| 信号                     | 方向           | 含义                                            |
-| ------------------------ | -------------- | ----------------------------------------------- |
-| `cm_rx_valid`            | comm → backend | comm 收到新帧                                   |
-| `cm_rx_ready`            | backend → comm | backend 可以接收                                |
-| `cm_rx_frame_type[2:0]`  | comm → backend | DATA / HELLO / REHELLO / USERNAME / GOODBYE     |
-| `cm_rx_seq[7:0]`         | comm → backend | 对端帧序号                                      |
-| `cm_rx_len[7:0]`         | comm → backend | payload 长度 (DATA: 消息长; HELLO 等: 用户名长) |
-| `cm_rx_payload[...]`     | comm → backend | DATA 时是消息; HELLO/REHELLO/USERNAME 时是用户名; GOODBYE 时无意义 |
-
-### 发送结果
-
-| 信号                         | 方向           | 含义                 |
-| ---------------------------- | -------------- | -------------------- |
-| `cm_status_valid`            | comm → backend | 某条消息发送结束     |
-| `cm_status_ready`            | backend → comm | backend 可以接收状态 |
-| `cm_status_msg_id[7:0]`      | comm → backend | 对应本地消息 ID      |
-| `cm_status_code[1:0]`        | comm → backend | SUCCESS / FAIL       |
-| `cm_status_retry_count[3:0]` | comm → backend | 重传次数，可选       |
-
-状态码：
+`frame_type_e`:
 
 ```text
-TX_SUCCESS = 0
-TX_FAIL    = 1
+FRAME_DATA     = 0   FRAME_HELLO    = 3
+FRAME_ACK      = 1   FRAME_REHELLO  = 4
+FRAME_NAK      = 2   FRAME_USERNAME = 5
+                     FRAME_GOODBYE  = 6
 ```
 
-4.  `backend -> frontend`
+所有 backend 发出的帧都走 ARQ (重传到 MAX_RETRY=4 次), 只有 DATA 帧会经由 `cm_status_*` 回报最终结果, 其它控制帧是 fire-and-forget.
 
-backend 向 frontend 发送渲染命令
+### 3.3 `comm_top → be_top` (RX 帧 + TX 状态)
 
-| 信号                          | 方向               | 含义                                            |
-| ----------------------------- | ------------------ | ----------------------------------------------- |
-| `be_render_valid`             | backend → frontend | backend 有渲染命令                              |
-| `be_render_ready`             | frontend → backend | frontend 可以接收                               |
-| `be_render_cmd[3:0]`          | backend → frontend | 渲染命令类型                                    |
-| `be_render_msg_id[7:0]`       | backend → frontend | APPEND_LOCAL/APPEND_REMOTE/UPDATE_STATUS 用     |
-| `be_render_side[1:0]`         | backend → frontend | 本地消息 / 远端消息 / 系统消息                  |
-| `be_render_status[1:0]`       | backend → frontend | pending / success / fail                        |
-| `be_render_len[7:0]`          | backend → frontend | 文本长度 (消息或输入行)                         |
-| `be_render_payload[...]`      | backend → frontend | 文本内容 (消息或输入行)                         |
-| `be_render_cursor_pos[7:0]`   | backend → frontend | 编辑后光标位置 (MOVE/INSERT/DELETE/UPDATE_INPUT) |
-| `be_render_ascii[7:0]`        | backend → frontend | INSERT_AT_CURSOR 时新插入的字符                  |
-| `be_render_conn_state[1:0]`   | backend → frontend | boot / handshake / connected / disconnected     |
-| `be_render_peer_name_len[7:0]`| backend → frontend | 对端用户名长度 (CONN_STATE / REDRAW_ALL 用)     |
-| `be_render_peer_name[...]`    | backend → frontend | 对端用户名 (16 byte)                            |
+收到的远端帧:
 
-渲染命令:
+| 信号                       | 方向            | 含义                       |
+| -------------------------- | --------------- | -------------------------- |
+| `cm_rx_valid`              | comm → backend  | 收到一帧                   |
+| `cm_rx_ready`              | backend → comm  | backend 可消化             |
+| `cm_rx_frame_type[2:0]`    | comm → backend  | 与 be_tx_frame_type 同表   |
+| `cm_rx_seq[7:0]`           | comm → backend  | 对端帧序号                 |
+| `cm_rx_len[7:0]`           | comm → backend  | payload 字节数             |
+| `cm_rx_payload[MAX*8-1:0]` | comm → backend  | 帧载荷 (长度 ≤ MAX_MSG_LEN)|
+
+ACK / NAK 由 comm 自己消化, 不上送 backend.
+
+DATA 帧的最终发送状态:
+
+| 信号                     | 方向            | 含义                          |
+| ------------------------ | --------------- | ----------------------------- |
+| `cm_status_valid`        | comm → backend  | 某条 DATA 已收到 ACK 或超时失败 |
+| `cm_status_ready`        | backend → comm  | backend 可接                  |
+| `cm_status_msg_id[7:0]`  | comm → backend  | 对应 backend 给的 msg_id      |
+| `cm_status_code[1:0]`    | comm → backend  | `TX_SUCCESS=0` / `TX_FAIL=1`  |
+
+### 3.4 `be_top → fe_top` (渲染命令)
+
+| 信号                              | 方向                | 含义                                          |
+| --------------------------------- | ------------------- | --------------------------------------------- |
+| `be_render_valid`                 | backend → frontend  | 有渲染命令                                    |
+| `be_render_ready`                 | frontend → backend  | frontend 可接                                 |
+| `be_render_cmd[3:0]`              | backend → frontend  | `render_cmd_e`                                |
+| `be_render_msg_id[7:0]`           | backend → frontend  | APPEND/UPDATE_STATUS 时用                     |
+| `be_render_side[1:0]`             | backend → frontend  | LOCAL / REMOTE / SYSTEM                       |
+| `be_render_status[1:0]`           | backend → frontend  | PENDING / SUCCESS / FAIL                      |
+| `be_render_len[7:0]`              | backend → frontend  | payload 长度                                  |
+| `be_render_payload[MAX*8-1:0]`    | backend → frontend  | 消息文本 / 输入行                             |
+| `be_render_cursor_pos[7:0]`       | backend → frontend  | 编辑后的光标位置                              |
+| `be_render_ascii[7:0]`            | backend → frontend  | INSERT_AT_CURSOR 时刚插入的字符               |
+| `be_render_conn_state[1:0]`       | backend → frontend  | `conn_state_e`                                |
+| `be_render_peer_name_len[7:0]`    | backend → frontend  | 对端用户名长度                                |
+| `be_render_peer_name[NAME*8-1:0]` | backend → frontend  | 对端用户名 (16 字节定长)                      |
+
+`render_cmd_e`:
 
 ```text
-RENDER_APPEND_LOCAL_PENDING = 0    // 新增本地 pending 消息
-RENDER_APPEND_REMOTE        = 1    // 新增远端消息
-RENDER_UPDATE_STATUS        = 2    // 更新某条本地消息状态
-RENDER_UPDATE_INPUT_LINE    = 3    // 整行刷新输入区 (清空/REDRAW 配合)
-RENDER_CLEAR_SCREEN         = 4    // 清屏
-RENDER_REDRAW_ALL           = 5    // 全屏重画 (boot 后, 切换 conn_state 配合)
-RENDER_MOVE_CURSOR          = 6    // 仅光标移动
-RENDER_INSERT_AT_CURSOR     = 7    // 在光标位置插入一字符
-RENDER_DELETE_AT_CURSOR     = 8    // 删除光标左一字符
-RENDER_CONN_STATE           = 9    // 连接状态切换 (含 peer_name)
+RENDER_APPEND_LOCAL_PENDING = 0    RENDER_REDRAW_ALL       = 5
+RENDER_APPEND_REMOTE        = 1    RENDER_MOVE_CURSOR      = 6
+RENDER_UPDATE_STATUS        = 2    RENDER_INSERT_AT_CURSOR = 7
+RENDER_UPDATE_INPUT_LINE    = 3    RENDER_DELETE_AT_CURSOR = 8
+RENDER_CLEAR_SCREEN         = 4    RENDER_CONN_STATE       = 9
+                                   RENDER_SCROLL_UP        = 10
+                                   RENDER_SCROLL_DOWN      = 11
 ```
 
-### 3. Frontend设计
-
-frontend 只处理 backend 发来的渲染命令, 状态机如下
-
-```mermaid
-stateDiagram-v2
-    [*] --> FE_IDLE
-
-    FE_IDLE --> FE_FETCH_CMD: render_cmd_valid
-    FE_FETCH_CMD --> FE_DECODE_CMD
-
-    FE_DECODE_CMD --> FE_APPEND_MSG: cmd == APPEND_LOCAL or APPEND_REMOTE
-    FE_DECODE_CMD --> FE_UPDATE_STATUS: cmd == UPDATE_STATUS
-    FE_DECODE_CMD --> FE_UPDATE_INPUT_LINE: cmd == UPDATE_INPUT_LINE
-    FE_DECODE_CMD --> FE_INSERT_AT_CURSOR: cmd == INSERT_AT_CURSOR
-    FE_DECODE_CMD --> FE_DELETE_AT_CURSOR: cmd == DELETE_AT_CURSOR
-    FE_DECODE_CMD --> FE_MOVE_CURSOR: cmd == MOVE_CURSOR
-    FE_DECODE_CMD --> FE_CLEAR_SCREEN: cmd == CLEAR_SCREEN
-    FE_DECODE_CMD --> FE_REDRAW_ALL: cmd == REDRAW_ALL
-    FE_DECODE_CMD --> FE_CONN_STATE: cmd == CONN_STATE
-
-    FE_APPEND_MSG --> FE_WRITE_TEXT_RAM
-    FE_UPDATE_STATUS --> FE_WRITE_STATUS_AREA
-    FE_UPDATE_INPUT_LINE --> FE_WRITE_INPUT_AREA
-    FE_INSERT_AT_CURSOR --> FE_WRITE_INPUT_AREA
-    FE_DELETE_AT_CURSOR --> FE_WRITE_INPUT_AREA
-    FE_MOVE_CURSOR --> FE_WRITE_INPUT_AREA
-    FE_CLEAR_SCREEN --> FE_CLEAR_VRAM
-    FE_REDRAW_ALL --> FE_CLEAR_VRAM
-    FE_CONN_STATE --> FE_WRITE_TITLEBAR
-
-    FE_WRITE_TEXT_RAM --> FE_DONE
-    FE_WRITE_STATUS_AREA --> FE_DONE
-    FE_WRITE_INPUT_AREA --> FE_DONE
-    FE_WRITE_TITLEBAR --> FE_DONE
-    FE_CLEAR_VRAM --> FE_DONE
-
-    FE_DONE --> FE_IDLE
-```
-
-frontend 内部根据 `conn_state` 决定全局画面布局; 不同的连接状态对应 4 种屏:
+`conn_state_e`:
 
 ```text
-boot 屏:                            handshake 屏:
-+--------------------------------+   +--------------------------------+
-|   Chat (booting...)            |   |   Connecting to peer...        |
-+--------------------------------+   +--------------------------------+
-
-connected 屏 (主聊天):              disconnected 屏:
-+--------------------------------+   +--------------------------------+
-| Chat with: peer_name           |   |   Disconnected.                |
-|                                |   |   Press SPACE to reconnect.    |
-| peer: hello                    |   |                                |
-| me:   hi😘            [✅]     |   |                                |
-| me:   are you there?  [❗️]     |   |                                |
-|                                |   |                                |
-+--------------------------------+   +--------------------------------+
-| Input: current typing line   _ |   +--------------------------------+
-+--------------------------------+
+CONN_BOOT         = 0   CONN_CONNECTED    = 2
+CONN_HANDSHAKE    = 1   CONN_DISCONNECTED = 3
 ```
 
-`RENDER_CONN_STATE` 命令带 `conn_state` (boot/handshake/connected/disconnected) 与 (仅 connected 时) `peer_name`. frontend 据此重画顶栏/全屏布局.
-
-### 4. IO 设计
-
-io 负责把外部电平变化转换为标准事件, 状态机如下:
-
-```mermaid
-stateDiagram-v2
-    [*] --> IO_IDLE
-
-    IO_IDLE --> DETECT_EDGE: input_changed
-    DETECT_EDGE --> DEBOUNCE
-    DEBOUNCE --> DECODE_KEY: stable
-    DECODE_KEY --> MAKE_EVENT
-    MAKE_EVENT --> WAIT_FIFO_READY: key_fifo_full
-    WAIT_FIFO_READY --> PUSH_EVENT: !key_fifo_full
-    MAKE_EVENT --> PUSH_EVENT: !key_fifo_full
-    PUSH_EVENT --> IO_IDLE
-```
-
-注意:
-
-- 外部按键是异步信号, 必须同步;
-- 机械按键需要消抖;
-- PS/2 键盘需要扫描码解码, UART 输入设备则需要 UART RX 解码.
-
-### 5. Comm 设计
-
-(1) 通信协议设计
-
-当前设计, 一次只发一帧, 等 ACK, 超时重传.
-
-帧种类:
+### 3.5 关键尺寸参数 (`chat_pkg.sv`)
 
 ```text
-DATA       聊天消息
-ACK        ARQ 确认
-NAK        ARQ 否定确认 (可选)
-HELLO      "我刚 boot/重连, 我是 X"   (payload = 自己的用户名)
-REHELLO    "我也想知道你是谁, 但你别再问我了"   (payload = 自己的用户名)
-USERNAME   "我是 X" (回应)            (payload = 自己的用户名)
-GOODBYE    "我要断开"                 (payload 为空)
+MAX_MSG_LEN  = 64    // 每条消息字节数
+MAX_MSG_NUM  = 64    // 历史消息环大小
+MAX_LINE_LEN = 64    // 当前输入行长度
+MAX_NAME_LEN = 16    // 用户名长度
+MAX_RETRY    = 4     // ARQ 最大重传
 ```
 
-帧格式:
+---
 
-```text
-+------+-------+------+--------+---------+-------+
-| SOF  | TYPE  | SEQ  | LEN    | PAYLOAD | CRC16 |
-+------+-------+------+--------+---------+-------+
-  8b     3b      8b     8b       N bytes   16b
-```
+## 4. IO 子系统
 
-字段含义:
-
-| 字段      | 含义                                                   |
-| --------- | ------------------------------------------------------ |
-| `SOF`     | 帧起始标志, 例如 `0x7E`                                |
-| `TYPE`    | `DATA / ACK / NAK / HELLO / REHELLO / USERNAME / GOODBYE` |
-| `SEQ`     | 序号, 用于 ACK 和去重                                  |
-| `LEN`     | payload 长度 (DATA 时是消息长; HELLO/REHELLO/USERNAME 时是用户名长; ACK/NAK/GOODBYE 时为 0) |
-| `PAYLOAD` | DATA 时是聊天消息; HELLO/REHELLO/USERNAME 时是用户名; ACK/NAK/GOODBYE 时不存在 |
-| `CRC16`   | 校验码                                                 |
-
-ACK / NAK / GOODBYE 没有 payload:
-
-```text
-+------+-------+------+-------+
-| SOF  | TYPE  | SEQ  | CRC16 |
-+------+-------+------+-------+
-```
-
-**ARQ 范围**: DATA 和所有控制帧 (HELLO/REHELLO/USERNAME/GOODBYE) 都走 ARQ, 由 comm 内部统一处理. ACK/NAK 自身不走 ARQ.
-
-(2) 发送状态机
-
-发送状态机:
-
-```mermaid
-stateDiagram-v2
-    [*] --> TX_IDLE
-
-    TX_IDLE --> LOAD_REQ: tx_req_valid
-    LOAD_REQ --> BUILD_DATA_FRAME
-    BUILD_DATA_FRAME --> SEND_DATA_FRAME
-    SEND_DATA_FRAME --> WAIT_ACK
-
-    WAIT_ACK --> TX_SUCCESS: ack_valid && ack_seq == current_seq
-    WAIT_ACK --> RETRY: timeout && retry_count < MAX_RETRY
-    WAIT_ACK --> TX_FAIL: timeout && retry_count == MAX_RETRY
-
-    RETRY --> SEND_DATA_FRAME
-
-    TX_SUCCESS --> REPORT_SUCCESS
-    REPORT_SUCCESS --> TOGGLE_SEQ
-    TOGGLE_SEQ --> TX_IDLE
-
-    TX_FAIL --> REPORT_FAIL
-    REPORT_FAIL --> TX_IDLE
-```
-
-相关寄存器:
-
-```text
-current_seq
-retry_count
-timeout_counter
-current_msg_id
-current_payload
-current_len
-```
-
-(3) 接收状态机
+`io_top` = `io_ps2_phy` → `io_ps2_decoder` → `handshake_fifo` → backend.
 
 ```mermaid
 flowchart LR
-    PEER[另一块 FPGA] --> UARTRX[UART RX]
-    UARTRX --> DECODER[Frame Decoder]
-    DECODER --> RXFSM[ARQ RX FSM]
-    RXFSM --> RXFIFO[RX Message FIFO]
-    RXFIFO --> BE[backend]
-
-    RXFSM --> ACKGEN[ACK Generator]
-    ACKGEN --> ACKQ[ACK Queue]
-    ACKQ --> TXARB[TX Frame Arbiter]
-    TXARB --> UARTTX[UART TX]
-    UARTTX --> PEER
+    PS2[ps2_clk / ps2_data<br/>async] --> PHY[io_ps2_phy<br/>2-FF sync + 11-bit shift]
+    PHY -- byte_valid/data --> DEC[io_ps2_decoder<br/>scancode → key event]
+    DEC -- ev_valid/type/ascii --> FIFO[handshake_fifo<br/>WIDTH=11, DEPTH=16]
+    FIFO -- io_key_* --> BE[be_top]
 ```
 
-接收状态机:
+**io_ps2_phy**: PS/2 帧 `start(0) | d0..d7 | parity_odd | stop(1)`. 在 ps2_clk 下降沿采样 ps2_data, 凑齐 11 bit 后做起始位 / 校验 / 停止位检查, 通过则脉冲 `byte_valid`. PS/2 ~10–16 kHz, 输入两个 pin 都先过 `sync_2ff`.
+
+**io_ps2_decoder**: 解释 Set-2 扫描码. 维护三个 sticky 状态:
+
+- `shift_held_q`: Shift make/release (0x12 / 0x59)
+- `caps_locked_q`: CapsLock make toggle (0x58)
+- `seen_e0_q`, `seen_f0_q`: 前缀字节标志
+
+字母使用 `shift XOR caps`, 其他键只看 shift. 扩展键 (方向键 / Home / End ...) 都带 E0 前缀, 当前实现支持 LEFT / RIGHT / UP / DOWN.
+
+事件输出表:
+
+| 输入                  | 产生事件         | ASCII             |
+| --------------------- | ---------------- | ----------------- |
+| 字母 / 数字 / 符号    | `KEY_CHAR`       | 标准 ASCII (含大小写) |
+| 0x5A                  | `KEY_ENTER`      | -                 |
+| 0x66                  | `KEY_BACKSPACE`  | -                 |
+| 0x76                  | `KEY_ESC`        | -                 |
+| 0xE0 0x6B / 0x74      | `KEY_LEFT/RIGHT` | -                 |
+| 0xE0 0x75 / 0x72      | `KEY_UP/DOWN`    | -                 |
+
+任何 release 序列 (0xF0 ...) 和未映射字节都被静默丢弃.
+
+io 状态机非常浅 (phy 是计数+移位, decoder 是 prefix tracker), 整体行为可以总结为:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RX_IDLE
-
-    RX_IDLE --> ACCUM_FRAME: uart_byte_valid && byte == SOF
-    ACCUM_FRAME --> CHECK_FRAME: frame_done
-
-    CHECK_FRAME --> DROP_FRAME: crc_error
-    CHECK_FRAME --> HANDLE_ACK: type == ACK / NAK
-    CHECK_FRAME --> HANDLE_NONACK: type ∈ {DATA, HELLO, REHELLO, USERNAME, GOODBYE}
-
-    HANDLE_ACK --> NOTIFY_TX_FSM
-    NOTIFY_TX_FSM --> RX_IDLE
-
-    HANDLE_NONACK --> DUPLICATE_FRAME: seq != expected_seq
-    HANDLE_NONACK --> WAIT_BACKEND_FIFO: seq == expected_seq && rx_fifo_full
-    HANDLE_NONACK --> ENQUEUE_RX_FRAME: seq == expected_seq && !rx_fifo_full
-
-    WAIT_BACKEND_FIFO --> ENQUEUE_RX_FRAME: !rx_fifo_full
-
-    ENQUEUE_RX_FRAME --> QUEUE_ACK
-    QUEUE_ACK --> TOGGLE_EXPECTED_SEQ
-    TOGGLE_EXPECTED_SEQ --> RX_IDLE
-
-    DUPLICATE_FRAME --> QUEUE_DUP_ACK
-    QUEUE_DUP_ACK --> RX_IDLE
-
-    DROP_FRAME --> RX_IDLE
+    [*] --> WAIT_FALL
+    WAIT_FALL --> SHIFT: ps2_clk falling
+    SHIFT --> CHECK: bit_idx == 10
+    SHIFT --> WAIT_FALL: bit_idx < 10
+    CHECK --> EMIT_BYTE: start/parity/stop OK
+    CHECK --> FRAME_ERR: 校验失败
+    EMIT_BYTE --> DECODE
+    FRAME_ERR --> WAIT_FALL
+    DECODE --> WAIT_FALL: 前缀 / release / 未映射 → 丢弃
+    DECODE --> EMIT_EVENT: make + 映射成功
+    EMIT_EVENT --> WAIT_FALL
 ```
 
-注: 链路层不区分 DATA 和控制帧, 全部由 ARQ 统一处理. 帧类型只在 backend 接口侧透传 (`cm_rx_frame_type`).
+---
 
-**注意**:
+## 5. Comm 子系统
 
-收到重复帧 (DATA / HELLO / REHELLO / USERNAME / GOODBYE) 时, 要重新发送 ACK, 但不要重复交给 backend. 因为对方可能已经发送成功了, 只是 ACK 在路上丢了, 所以它重传了原帧. 应该帮它补 ACK, 但不能让聊天窗口出现两条一样的消息, 也不能让 backend 重复处理握手.
+`comm_top` 把链路层拆成 RX / TX 两路, 中间靠 ACK 队列连起来.
 
-(4) comm 内部仲裁
+```mermaid
+flowchart LR
+    UARTRX[uart_rx] --> DEC[comm_frame_decoder]
+    DEC -- frame --> RXFSM[comm_rx_fsm]
 
-comm 内部至少有两类东西要发:
+    RXFSM -- cm_rx_* --> BE[backend]
+    RXFSM -- ack_q_enq --> ACKQ[comm_ack_queue]
+    RXFSM -- tx_ack pulse --> TXFSM[comm_tx_fsm]
 
-1. backend 请求发送的 DATA / HELLO / REHELLO / USERNAME / GOODBYE 帧 (走 ARQ);
-2. 接收端需要回复的 ACK / NAK 帧 (不走 ARQ).
+    BE -- be_tx_* --> TXFSM
+    TXFSM -- cm_status_* --> BE
 
-优先级: ACK > 其它
+    ACKQ --> ARB[comm_tx_arbiter<br/>ACK 优先]
+    TXFSM --> ARB
+    ARB --> ENC[comm_frame_encoder]
+    ENC --> UARTTX[uart_tx]
+```
 
-### 6. Backend 设计
+### 5.1 帧格式
 
-backend 是核心控制器, 同时承担两件事:
+```text
++------+------+------+------+----------+--------+--------+
+| SOF  | TYPE | SEQ  | LEN  | PAYLOAD  | CRC_HI | CRC_LO |
++------+------+------+------+----------+--------+--------+
+ 8 bit  3 bit  8 bit  8 bit   LEN byte   8 bit    8 bit
+```
 
-- **连接管理 FSM** (外层): 上电握手 / 用户名交换 / ESC-GOODBYE / SPACE 重连
-- **聊天 FSM** (内层, 仅在 `S_CONNECTED` 下使能): 输入行编辑 / 消息发送与确认 / 消息接收
+- `SOF = 0x7E`, 固定起始字节. 无字节填充 (payload 中允许 0x7E, 靠 LEN 定边界).
+- `TYPE` 3 bit, 高 5 bit 在编码时被零填充为完整字节.
+- `CRC16` CCITT, 多项式 `0x1021`, 初值 `0xFFFF`, 校验范围 = TYPE..PAYLOAD (不含 SOF 与 CRC 本身), 大端发送.
+- 控制帧 (HELLO / REHELLO / USERNAME) 用 payload 携带发送方用户名; ACK / NAK / GOODBYE 的 LEN=0, 无 payload.
 
-(1) 连接管理 FSM (外层)
+### 5.2 TX FSM (stop-and-wait, alternating bit)
+
+`comm_tx_fsm` 只用 SEQ 的最低位 (`tx_seq_q[0]`) 做交替位. SUCCESS 时翻转, FAIL 时不翻转 (因为对端的 expected 也没动).
+
+```mermaid
+stateDiagram-v2
+    [*] --> S_IDLE
+    S_IDLE --> S_SEND: be_tx_valid
+    S_SEND --> S_WAIT_ACK: arbiter 接受帧
+    S_WAIT_ACK --> S_REPORT_SUCCESS: ack_match && DATA
+    S_WAIT_ACK --> S_IDLE: ack_match && 控制帧
+    S_WAIT_ACK --> S_SEND: timeout && retry < MAX_RETRY
+    S_WAIT_ACK --> S_REPORT_FAIL: timeout && retry == MAX_RETRY && DATA
+    S_WAIT_ACK --> S_IDLE: timeout && retry == MAX_RETRY && 控制帧
+    S_REPORT_SUCCESS --> S_IDLE: cm_status_ready
+    S_REPORT_FAIL --> S_IDLE: cm_status_ready
+```
+
+控制帧成功后不上报 (fire-and-forget), 失败也不上报 — 上层不为之做任何 retry/超时逻辑, 双方靠 HELLO 的反复重发自然收敛.
+
+`TIMEOUT_CYCLES` 默认 `2_000_000` (100 MHz × 20 ms). testbench 用更小值缩短仿真.
+
+### 5.3 RX FSM
+
+```mermaid
+stateDiagram-v2
+    [*] --> S_IDLE
+    S_IDLE --> S_IDLE: frame_is_ack/nak<br/>(脉冲 tx_ack, 无 FSM 工作)
+    S_IDLE --> S_DELIVER_BE: DATA 非 dup, 或控制帧
+    S_IDLE --> S_QUEUE_ACK: DATA 是 dup<br/>(seq 与期望不匹配)
+    S_DELIVER_BE --> S_QUEUE_ACK: cm_rx_ready
+    S_QUEUE_ACK --> S_IDLE: ack_q_ready<br/>(若是新 DATA, 翻转 expected_rx_seq)
+```
+
+- DATA 用交替位过滤重复, 同 seq 重复包只补 ACK, 不上送 backend.
+- 控制帧不查交替位 (对方可能刚重启, seq 已被复位), 始终上送 + 补 ACK. 由 backend 的"比较 + 存用户名"逻辑保证幂等.
+- CRC 错误 / LEN 超限 / 未知 type 都在更早环节静默丢弃 (decoder `drop_pulse` 给 sim 观测).
+
+### 5.4 TX 仲裁
+
+`comm_tx_arbiter` 是纯组合 mux: ack_queue 有内容 → 合成一个 `FRAME_ACK` (LEN=0, payload=0); 否则透传 tx_fsm 的请求. 编码器只在帧边界 (`frame_req_ready` 高) 切换源, 所以不会在帧中途切换.
+
+优先级: ACK > tx_fsm. 这保证 ACK 不会被对端的 DATA 流卡住.
+
+---
+
+## 6. Backend
+
+`be_top` 是核心控制器, 一个 20 态 FSM 同时承担:
+
+1. **连接管理** (外层): boot → handshake → connected → disconnected
+2. **聊天主循环** (内层, 仅 connected): 光标编辑 / Enter 提交 / 远端消息接收 / TX 状态更新 / 历史滚动
+
+### 6.1 状态总图
 
 ```mermaid
 stateDiagram-v2
     [*] --> S_BOOT_REDRAW
-    S_BOOT_REDRAW --> S_BOOT: render_ack (RENDER_REDRAW_ALL)
+    S_BOOT_REDRAW --> S_TX_HELLO: render_ready (REDRAW_ALL 发出)
+    S_TX_HELLO --> S_HANDSHAKE_IDLE: be_tx_ready
 
-    S_BOOT --> S_HANDSHAKE: 发出 HELLO
-    S_HANDSHAKE --> S_CONNECTED: 收 USERNAME (或 收 HELLO 并完成回应)
+    state S_HANDSHAKE_IDLE {
+        [*] --> wait
+        wait --> [*]: 收到 HELLO/REHELLO/USERNAME
+    }
 
-    S_CONNECTED --> S_DISCONNECTED: ESC (并发 GOODBYE)
-    S_CONNECTED --> S_DISCONNECTED: 收 GOODBYE
+    S_HANDSHAKE_IDLE --> S_TX_USERNAME: 收 HELLO 或 REHELLO
+    S_HANDSHAKE_IDLE --> S_RENDER_CONN_CONNECTED: 收 USERNAME
+    S_TX_USERNAME --> S_RENDER_CONN_CONNECTED: be_tx_ready
+    S_RENDER_CONN_CONNECTED --> S_IDLE: render_ready
 
-    S_DISCONNECTED --> S_BOOT: SPACE
-    S_DISCONNECTED --> S_BOOT: 收 HELLO (对方邀请重连)
+    S_IDLE --> S_RENDER_MOVE_CURSOR: LEFT/RIGHT
+    S_IDLE --> S_RENDER_INSERT: KEY_CHAR && line_len<MAX
+    S_IDLE --> S_RENDER_DELETE: BACKSPACE && cursor>0
+    S_IDLE --> S_ENTER_RENDER_LOCAL: ENTER && line_len>0
+    S_IDLE --> S_RX_RENDER: cm_rx_valid (DATA)
+    S_IDLE --> S_STATUS_RENDER: cm_status_valid
+    S_IDLE --> S_TX_REHELLO: cm_rx HELLO (mid-chat)
+    S_IDLE --> S_TX_USERNAME: cm_rx REHELLO
+    S_IDLE --> S_TX_GOODBYE: ESC
+    S_IDLE --> S_RENDER_CONN_DISCONNECTED: cm_rx GOODBYE
+    S_IDLE --> S_RENDER_SCROLL_UP: KEY_UP
+    S_IDLE --> S_RENDER_SCROLL_DOWN: KEY_DOWN
+
+    S_RENDER_MOVE_CURSOR --> S_IDLE: render_ready
+    S_RENDER_INSERT --> S_IDLE: render_ready
+    S_RENDER_DELETE --> S_IDLE: render_ready
+    S_RX_RENDER --> S_IDLE: render_ready
+    S_STATUS_RENDER --> S_IDLE: render_ready
+    S_RENDER_SCROLL_UP --> S_IDLE: render_ready
+    S_RENDER_SCROLL_DOWN --> S_IDLE: render_ready
+
+    S_ENTER_RENDER_LOCAL --> S_ENTER_SEND_COMM: render_ready
+    S_ENTER_SEND_COMM --> S_ENTER_RENDER_INPUT_CLEAR: be_tx_ready
+    S_ENTER_RENDER_INPUT_CLEAR --> S_IDLE: render_ready
+
+    S_TX_REHELLO --> S_IDLE: be_tx_ready
+    S_TX_GOODBYE --> S_RENDER_CONN_DISCONNECTED: be_tx_ready
+    S_RENDER_CONN_DISCONNECTED --> S_DISCONNECTED_IDLE: render_ready
+
+    S_DISCONNECTED_IDLE --> S_TX_HELLO: KEY_CHAR ascii==' '
+    S_DISCONNECTED_IDLE --> S_TX_USERNAME: cm_rx HELLO/REHELLO
+    S_DISCONNECTED_IDLE --> S_RENDER_CONN_CONNECTED: cm_rx USERNAME
 ```
 
-`S_BOOT` 是个单周期 launcher 状态: 一进来就向 comm 发 HELLO 帧 (载荷 = 自己用户名), 然后转 `S_HANDSHAKE`.
+### 6.2 事件仲裁优先级 (S_IDLE)
 
-收到帧的反应表 (覆盖所有外层状态):
+```text
+cm_status_valid  >  cm_rx_valid  >  io_key_valid
+```
 
-| 收到帧       | S_BOOT / S_HANDSHAKE                | S_CONNECTED                                | S_DISCONNECTED                          |
-|--------------|-------------------------------------|--------------------------------------------|------------------------------------------|
-| `HELLO`      | 比较+存用户名, 发 USERNAME, → S_CONNECTED | 比较+存用户名, 发 REHELLO, 状态不变        | 比较+存用户名, 发 USERNAME, → S_CONNECTED |
-| `REHELLO`    | 比较+存用户名, 发 USERNAME, → S_CONNECTED | 比较+存用户名, 发 USERNAME, 不变            | 比较+存用户名, 发 USERNAME, 不变           |
-| `USERNAME`   | 比较+存用户名, → S_CONNECTED         | 比较+存用户名, 不变                        | 比较+存用户名, 不变                       |
-| `GOODBYE`    | 忽略                                 | → S_DISCONNECTED                            | 忽略                                      |
-| `DATA`       | 忽略                                 | 走聊天 FSM 接收流程                         | 忽略                                      |
+同 cycle 三者同时来时按上述顺序, 其余两个的 ready 不拉, 等下次轮到.
 
-**比较+存用户名** 的语义: 跟内部 `peer_name_q / peer_name_len_q` 比较, 不同 → 把整个 message_store 清空, 然后用新用户名替换 (LOCAL 也清, 上下文已失效); 相同 → 仅刷新; 首次收到 (`peer_name_valid_q == 0`) → 只存, 不算切换不清空.
+### 6.3 收到帧的反应表
 
-**REHELLO 的作用**: HELLO 在 mid-chat 时不能直接回 USERNAME (那样对方不知道我是 in-chat 状态), 但也不能再发 HELLO (对方又会发 REHELLO 给我, 死循环). REHELLO 的契约就是 "终止索取链" — 收到 REHELLO 一律只回 USERNAME, 永远不再发 REHELLO/HELLO.
+|             | S_BOOT / S_HANDSHAKE                                  | S_CONNECTED (S_IDLE)                                    | S_DISCONNECTED                                       |
+| ----------- | ----------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------- |
+| `HELLO`     | 比较 + 存用户名, 发 USERNAME, → S_RENDER_CONN_CONNECTED | 比较 + 存用户名, 发 REHELLO (S_TX_REHELLO), 状态不变      | 比较 + 存用户名, 发 USERNAME, → S_RENDER_CONN_CONNECTED |
+| `REHELLO`   | 比较 + 存用户名, 发 USERNAME, → S_RENDER_CONN_CONNECTED | 比较 + 存用户名, 发 USERNAME (S_TX_USERNAME), 状态不变    | 比较 + 存用户名, 发 USERNAME, → S_RENDER_CONN_CONNECTED |
+| `USERNAME`  | 比较 + 存用户名, → S_RENDER_CONN_CONNECTED              | 比较 + 存用户名, 状态不变                                | 比较 + 存用户名, → S_RENDER_CONN_CONNECTED            |
+| `GOODBYE`   | 忽略                                                  | → S_RENDER_CONN_DISCONNECTED                            | 忽略                                                 |
+| `DATA`      | 忽略                                                  | 进 S_RX_RENDER, 写 store + APPEND_REMOTE                | 忽略                                                 |
 
-按键事件 (与帧事件并行, 由仲裁优先级 `cm_status > cm_rx > io_key` 选择):
+**"比较 + 存用户名"** 的语义: 与 `peer_name_q` 比较, 若不同则 `clear_en` 拉一个周期, message_store 全部 valid 清零, `wr_ptr_q` / `next_msg_id_q` 复位; 若相同则只刷新; 首次收到 (`peer_name_valid_q == 0`) 则只存不清.
 
-| io 事件                  | S_BOOT / S_HANDSHAKE | S_CONNECTED                       | S_DISCONNECTED                  |
-|--------------------------|----------------------|-----------------------------------|---------------------------------|
-| `KEY_CHAR` (非 SPACE)    | 丢弃                  | 走聊天 FSM (光标插入)               | 丢弃                             |
-| `KEY_CHAR` ascii=`' '`   | 丢弃                  | 走聊天 FSM (输入空格字符)           | → S_BOOT (重连)                  |
-| `KEY_BACKSPACE/LEFT/RIGHT/ENTER` | 丢弃          | 走聊天 FSM                          | 丢弃                             |
-| `KEY_ESC`                | 丢弃                  | 发 GOODBYE → S_DISCONNECTED        | 丢弃                             |
+**REHELLO 的角色**: HELLO 在 mid-chat 时回 USERNAME 不够 (对方不知道我已在 connected 态), 但又不能再回 HELLO (对方又给我 REHELLO, 死循环). REHELLO 是"终止索取链" — 收到 REHELLO 只回 USERNAME, 永不再发 REHELLO/HELLO.
 
-(2) 聊天 FSM (内层, 仅在 S_CONNECTED 下运行)
+### 6.4 按键事件反应表
 
-这部分维持现有实现 (cursor 编辑, store 写入, render 仲裁等), 见 `rtl/backend/be_top.sv`. 关键状态:
+| io 事件                            | S_BOOT / S_HANDSHAKE | S_CONNECTED (S_IDLE)        | S_DISCONNECTED      |
+| ---------------------------------- | -------------------- | --------------------------- | ------------------- |
+| `KEY_CHAR` (非空格)                | 丢弃                  | 光标处插入 (S_RENDER_INSERT) | 丢弃                |
+| `KEY_CHAR` ascii=`' '`             | 丢弃                  | 当字符插入                   | → S_TX_HELLO (重连) |
+| `KEY_LEFT` / `KEY_RIGHT`           | 丢弃                  | 光标移动 (S_RENDER_MOVE)     | 丢弃                |
+| `KEY_BACKSPACE`                    | 丢弃                  | 光标左删 (S_RENDER_DELETE)   | 丢弃                |
+| `KEY_ENTER` (line_len > 0)         | 丢弃                  | 三段流水 (LOCAL → COMM → CLR)| 丢弃                |
+| `KEY_ESC`                          | 丢弃                  | 发 GOODBYE → DISCONNECTED   | 丢弃                |
+| `KEY_UP` / `KEY_DOWN`              | 丢弃                  | 滚动历史 (RENDER_SCROLL_*)   | 丢弃                |
+
+### 6.5 数据结构
+
+```text
+// 连接
+conn_state_q                      // 由当前 FSM 状态隐含, 对外提供 conn_state_obs
+peer_name_q   [0..MAX_NAME_LEN-1]
+peer_name_len_q
+peer_name_valid_q
+
+// 输入行
+line_buf      [0..MAX_LINE_LEN-1]
+len_q, cursor_pos_q                // cursor_pos ∈ [0, len_q]
+
+// 消息存储 (rtl/backend/be_message_store.sv)
+message_store[i] = {valid, msg_id, side, status, len, payload}
+wr_ptr_q                           // 循环写指针
+next_msg_id_q                      // 单调分配的本地 msg_id
+```
+
+消息存储支持原子写 (`wr_en`), 状态-only 更新 (`upd_en` 改 PENDING → SUCCESS/FAIL), 单周期全清 (`clear_en`, 切换对端时), 以及组合 lookup (按 msg_id 找最低有效行). 切换对端时 wr_ptr / next_msg_id 一并复位.
+
+### 6.6 三段 Enter 提交
+
+```mermaid
+sequenceDiagram
+    participant BE as be_top
+    participant ST as message_store
+    participant FE as fe_top
+    participant CM as comm_top
+
+    Note over BE: S_IDLE 接到 KEY_ENTER (len > 0)
+    BE->>ST: wr_en (msg_id, LOCAL, PENDING, payload)
+    BE->>FE: APPEND_LOCAL_PENDING (S_ENTER_RENDER_LOCAL)
+    FE-->>BE: render_ready
+    BE->>CM: be_tx (FRAME_DATA, msg_id) (S_ENTER_SEND_COMM)
+    CM-->>BE: be_tx_ready
+    BE->>FE: UPDATE_INPUT_LINE len=0 (S_ENTER_RENDER_INPUT_CLEAR)
+    FE-->>BE: render_ready
+    Note over BE: 回到 S_IDLE
+    CM->>BE: 一段时间后 cm_status (SUCCESS/FAIL)
+    BE->>ST: upd_en (msg_id, status)
+    BE->>FE: UPDATE_STATUS (S_STATUS_RENDER)
+```
+
+---
+
+## 7. Frontend
+
+`fe_top` 是双时钟域设计:
+
+- **chat 域 (`clk`, 100 MHz)**: `fe_render_decoder` 把 backend 的渲染命令翻译成 text_ram 写入.
+- **像素域 (`clk_pix`, 40 MHz)**: `fe_video_timing` 产生 (h/v counter, hsync, vsync, de); `fe_scan` 拿坐标 → 读 text_ram → 查 `fe_glyph_rom` → 输出 RGB. `fe_text_ram` 是双时钟 BRAM, 写口在 chat 域, 读口在像素域.
+
+```mermaid
+flowchart LR
+    subgraph CHAT [chat clock]
+        BE[backend<br/>be_render_*] --> DEC[fe_render_decoder]
+        DEC -- wr_en/row/col/code --> RAM[fe_text_ram]
+    end
+    subgraph PIX [pixel clock]
+        VT[fe_video_timing] --> SCAN[fe_scan]
+        RAM2[(fe_text_ram<br/>读口 A)] --> SCAN
+        GROM[fe_glyph_rom] --> SCAN
+        SCAN --> RGB[(video_red/green/blue<br/>hsync/vsync/de)]
+    end
+    DEC -. CDC sync_2ff .-> SCAN
+    RAM --- RAM2
+```
+
+CDC: `conn_state`, `input_cursor`, `hist_wr_row`, `scroll_offset` 都是慢速控制量, 每 bit 过 `sync_2ff` 进像素域.
+
+### 7.1 text_ram 布局 (`fe_pkg.sv`)
+
+```text
+text_ram = 128 行 × 128 列 (一个 cell = 8 bit ASCII / sprite code)
+
+row 0                      titlebar:  "Chat with: <peer_name>"
+row 1                      分隔 (空)
+rows 2..65 (64 行)         history 环形缓冲 (一行 = 一条消息)
+                              col 0..5     前缀 "peer: " / "me:   "
+                              col 6..MAX   消息内容
+                              col 71       状态 sprite (PENDING/SUCCESS/FAIL)
+row 66                     分隔
+row 67                     输入条:  "> <line_buf>"
+```
+
+屏幕上可见 33 行历史 (`N_HIST_VISIBLE`), 64 行环里的窗口位置由 `hist_wr_row` (写指针) + `scroll_offset` 决定. `RENDER_SCROLL_UP/DOWN` 在 fe 侧 clamp.
+
+### 7.2 渲染命令解码器 FSM
 
 ```mermaid
 stateDiagram-v2
-    [*] --> IDLE
+    [*] --> S_IDLE
+    S_IDLE --> S_HIST_CLEAR: REDRAW_ALL
+    S_IDLE --> S_TITLEBAR: CONN_STATE (CONNECTED)
+    S_IDLE --> S_HIST_WRITE: APPEND_LOCAL_PENDING / APPEND_REMOTE
+    S_IDLE --> S_UPDATE_STATUS: UPDATE_STATUS
+    S_IDLE --> S_INPUT_REDRAW: UPDATE_INPUT_LINE / CLEAR_SCREEN
+    S_IDLE --> S_INPUT_EDIT: INSERT_AT_CURSOR / DELETE_AT_CURSOR / MOVE_CURSOR
+    S_IDLE --> S_IDLE: SCROLL_UP/DOWN (只调 scroll_offset, 不写 RAM)
 
-    IDLE --> RENDER_MOVE: io == LEFT/RIGHT
-    IDLE --> RENDER_INSERT: io == CHAR (line_len < MAX)
-    IDLE --> RENDER_DELETE: io == BACKSPACE (cursor > 0)
-    IDLE --> ENTER_RENDER_LOCAL: io == ENTER (line_len > 0)
-    IDLE --> RX_RENDER: cm_rx (DATA)
-    IDLE --> STATUS_RENDER: cm_status
-
-    RENDER_MOVE --> IDLE
-    RENDER_INSERT --> IDLE
-    RENDER_DELETE --> IDLE
-
-    ENTER_RENDER_LOCAL --> ENTER_SEND_COMM
-    ENTER_SEND_COMM --> ENTER_RENDER_INPUT_CLEAR
-    ENTER_RENDER_INPUT_CLEAR --> IDLE
-
-    RX_RENDER --> IDLE
-    STATUS_RENDER --> IDLE
+    S_HIST_CLEAR --> S_IDLE: 全部 history 行清空完
+    S_TITLEBAR --> S_IDLE: titlebar 写完
+    S_HIST_WRITE --> S_IDLE: 整条消息 + sprite 写完
+    S_UPDATE_STATUS --> S_IDLE: sprite 写完
+    S_INPUT_REDRAW --> S_IDLE: 整个 input 行写完
+    S_INPUT_EDIT --> S_IDLE: 受影响列段写完
 ```
 
-事件仲裁优先级在 IDLE 下: `cm_status > cm_rx > io_key` (与现有实现一致). 边界保护: line buffer 满时丢 CHAR; cursor 在 0 时 LEFT 不动也不渲染; cursor==len 时 RIGHT 同样.
+`be_render_ready` 仅在 `S_IDLE` 拉高, 多周期写入状态下 backend 自动等待.
 
-(3) 需要维护的数据结构
+decoder 内部维护一份 `input_line_q[]` 镜像, 这样输入行的 INSERT/DELETE 可以只重写受影响的列段, 不必每次发 UPDATE_INPUT_LINE 整行.
 
-(3.1) 连接相关
+REDRAW_ALL 不做实质工作 (text_ram 复位为空格), 只锁存 `conn_state_curr_q`; 非 CONNECTED 时 scan 侧不读 text_ram, 直接显示 splash 图层.
+
+### 7.3 像素 scan 流水线
+
+`fe_scan` 流程, 每像素一拍:
+
+1. 由 `(hdata, vdata)` 算出 `(screen_row, screen_col, gx, gy)`.
+2. 把 `screen_row` 映射成 text_ram 物理行:
+   - 0 → `TITLE_ROW`
+   - 2..34 → history 环窗口 (按 `hist_wr_row` 和 `scroll_offset`)
+   - 36 → `INPUT_ROW`
+   - 1, 35 → 空白
+3. 驱动 text_ram 读口; 下一拍拿到 `rd_code`.
+4. 喂 `fe_glyph_rom` (8×16 字符位图 + sprite), 拿到这一行 8 像素的位图.
+5. 选 `gx` 对应的 bit, 混色 (行/状态决定前景背景), 光标 cell 按 `BLINK_FRAMES` 取反.
+6. 非 CONNECTED 状态用 splash 图层覆盖 (BOOT/HANDSHAKE/DISCONNECTED 三种背景色 + 居中文字).
+
+视频时序 (`fe_video_timing`, 800×600 @ 60 Hz):
 
 ```text
-conn_state_q          // S_BOOT_REDRAW / S_BOOT / S_HANDSHAKE / S_CONNECTED / S_DISCONNECTED
-peer_name_q[0:MAX_NAME_LEN-1]  // 对端用户名 (ASCII)
-peer_name_len_q       // 对端用户名长度
-peer_name_valid_q     // 是否已收到过用户名 (用于首次连接 vs 切换的判定)
+H: 0..799 active, 800..839 FP, 840..967 SYNC, 968..1055 BP   pixel clock = 40 MHz
+V: 0..599 active, 600..600 FP, 601..604 SYNC, 605..627 BP    HSPP=1, VSPP=1
 ```
 
-(3.2) 当前输入行缓冲
+### 7.4 四种屏幕
 
 ```text
-line_buf[0:MAX_LINE_LEN-1]
-line_len_q
-cursor_pos_q          // 0..line_len_q
+boot 屏 (conn_state=BOOT):             handshake 屏:
++--------------------------------+    +--------------------------------+
+|                                |    |                                |
+|       Chat (booting...)        |    |     Connecting to peer...      |
+|                                |    |                                |
++--------------------------------+    +--------------------------------+
+
+connected 屏 (主聊天):                 disconnected 屏:
++--------------------------------+    +--------------------------------+
+| Chat with: Bob                 |    |                                |
+|--------------------------------|    |        Disconnected.           |
+| me:   hello              [✓]   |    |   Press SPACE to reconnect.    |
+| peer: hi                       |    |                                |
+| me:   are you there?     [✗]   |    |                                |
+|--------------------------------|    |                                |
+| > current typing line _        |    |                                |
++--------------------------------+    +--------------------------------+
 ```
 
-支持: 普通字符在光标处插入, Backspace 在光标左侧删除, LEFT/RIGHT 移动光标, Enter 发送 (带空行守卫).
+splash 文字储存在 fe_scan 内的小 ROM (`SPLASH_COLS=32` × 2 行), `(HSIZE − 256) / 2` 居中, 垂直居中.
 
-(3.3) 聊天记录存储
+---
 
-```text
-message_store[i] = {
-    valid,
-    msg_id,
-    side,      // LOCAL / REMOTE / SYSTEM
-    status,    // PENDING / SUCCESS / FAIL
-    len,
-    payload
-}
-```
+## 8. 用户名 / 板子身份
 
-切换到新对端用户名时, 整片 store 被清空 (所有 entry valid=0).
-
-参数设置:
-
-```text
-MAX_MSG_NUM   = 64
-MAX_MSG_LEN   = 64
-MAX_NAME_LEN  = 16
-MSG_ID_WIDTH  = 8
-```
-
-(4) 边界与并发说明
-
-- HELLO 在 ARQ 层一直重传到对方应答, 所以 backend 不需要为 "对方还没启动" 做超时. 任何状态下收到 HELLO 都触发响应, 自然处理 "对方先启动 / 我先启动 / 对方重启" 三种 race.
-- ESC 在 S_CONNECTED 才有意义; 先发 GOODBYE (走 ARQ, 保证对方收到) 再切到 S_DISCONNECTED, 不等回执. 即使对方 GOODBYE 没及时收到, 下次任意一方发 HELLO 时, 双方状态会自然对齐.
-- ESC 之后 store 不立即清空; 重连时由 "比较+存用户名" 逻辑决定是否清空 (同一对端 → 保留历史; 新对端 → 清空).
-
-### 7. 外设相关
-
-1. 输入外设 (PS/2 键盘)
-
-2. 显示外设 (HDMI)
-
-### 8. 用户名配置
-
-每块 FPGA 的用户名编译时硬编码在顶层 `chat_top.sv` 内. SV 模块的 `parameter` 机制允许参数化 (类似 C 模板), 实例化时传值; 这里直接放在 `chat_top` 顶部作为 `localparam`, A 板和 B 板各自 build 不同 bitstream:
+每块 FPGA 的用户名编译期硬编码进 bitstream, 作为 `chat_top` (以及 `chat_top_board`) 的参数:
 
 ```systemverilog
-// rtl/chat_top.sv (示意, 后续编写)
-module chat_top (
-    input  logic clk,
-    input  logic rst_n,
-    inout  logic ps2_clk,
-    inout  logic ps2_data,
-    output logic uart_tx,
-    input  logic uart_rx,
-    /* HDMI pins ... */
-);
-    // 这块板子的身份, build 时按板修改
-    localparam int MY_NAME_LEN = 5;
-    localparam logic [7:0] MY_NAME [0:chat_pkg::MAX_NAME_LEN-1] =
-        '{"A","l","i","c","e", default: 8'h00};
-    /* ... 实例化 io_top / be_top / comm_top / fe_top 并把 MY_NAME / MY_NAME_LEN 透传给 be_top ... */
-endmodule
+parameter int MY_NAME_LEN = 5;
+// 小端打包: byte 0 在 [7:0]. 默认 "Alice" = 0x41 0x6c 0x69 0x63 0x65
+parameter logic [MAX_NAME_LEN*8-1:0] MY_NAME_PACKED =
+    128'h00000000_00000000_00000065_63696c41;
 ```
 
-后续若要支持运行时配置 (如读拨码开关 → ROM lookup), 可在 chat_top 里把 MY_NAME 换成寄存器, 接口不变.
+B 板按 "Bob" 重新打包并跑一次 `make bitstream` 即可. 后续若要支持运行时配置, 可以把 MY_NAME 换成寄存器, 接 ROM 或拨码开关, 接口不变.
+
+---
+
+## 9. 仿真与综合
+
+**Verilator 仿真**:
+
+```bash
+make                 # 跑所有 sim/tb 下的测试
+make test-be_top     # 单跑一个
+make font            # 重新生成 fe_font.hex
+```
+
+测试覆盖每个叶模块 + 集成 (io_be, comm_top_lb, chat_top, chat_top_pair). `chat_top_pair` 把两份 chat_top 的 UART 对接, 完整模拟两块板.
+
+**Vivado 综合**:
+
+```bash
+make bitstream       # 调用 vivado/build.tcl
+```
+
+目标板 `xc7a200tfbg484-2` (Genesys 2). 引脚约束在 `constraints/chat_top_board.xdc`. 综合产物: `vivado/build/chat.runs/impl_1/chat_top_board.bit`.
+
+板级顶层 `chat_top_board` 包两个 Xilinx IP: `ip_pll` (100 MHz → 40 MHz 像素时钟) 和 `ip_rgb2dvi` (RGB → TMDS 差分对). 这两个 IP 让 `chat_top_board` 不能用 Verilator elaborate, 所以仿真用 `chat_top` 直接对接 RGB / HSYNC / VSYNC / DE.
+
+复位: `btn_rst` 是 active-high momentary push-button. `chat_top` 内部用 `sync_2ff` 做 reset 同步, 按钮按下时整条同步链拉 0, 松开后两拍后产生干净的同步释放沿.

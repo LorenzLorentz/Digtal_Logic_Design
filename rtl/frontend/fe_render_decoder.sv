@@ -249,6 +249,12 @@ module fe_render_decoder
         .rd_data     (msg_bram_rd_data)
     );
 
+    // Maximum visible bubble inner width (in characters). Soft-wrap
+    // kicks in at this many bytes per visual row. Must fit on the
+    // smaller side: local bubble has bubble_left = BUBBLE_RIGHT_EDGE -
+    // W - 1, which must be >= 0 (W <= 96). 80 leaves visual margin.
+    localparam int MAX_BUBBLE_INNER_W = 80;
+
     // Byte counter shared by S_HIST_STORE and S_HIST_LOAD. STORE walks
     // 0..msg_total_len_q-1; LOAD walks 0..msg_total_len_q to absorb the
     // BRAM read pipeline's 1-cycle latency.
@@ -261,6 +267,11 @@ module fe_render_decoder
     // S_HIST_LOAD to populate ml_offset_q[] / ml_len_q[]).
     logic [LINE_CNT_W-1:0]      msg_parse_n_lines_q;
     logic [LINE_IDX_W-1:0]      msg_parse_line_start_q;
+    // Running maximum of all line lengths seen so far in the current
+    // message. Used as the bubble's inner width so every sub-line of
+    // a multi-line / soft-wrapped message shares the same border
+    // alignment ("single bubble" look).
+    msg_len_t                   msg_max_sub_len_q;
     /* verilator lint_off UNUSEDSIGNAL */
     logic [LINE_CNT_W-1:0]      msg_parse_last_idx;
     /* verilator lint_on UNUSEDSIGNAL */
@@ -342,18 +353,25 @@ module fe_render_decoder
     assign show_fail = (side_q == 2'(MSG_LOCAL)) && (status_q == 2'(MSG_FAIL));
     assign cur_sub_len = ml_len_q[cur_line_sel];
 
+    // Bubble inner width is the message-wide max sub-line length. Every
+    // sub-line of the same message uses the same width (shorter lines
+    // are padded with spaces inside the bubble), so the left and right
+    // borders line up vertically -- visually "one balloon" instead of
+    // a stack of independent bubbles per logical line. The width is
+    // also already capped at MAX_BUBBLE_INNER_W by the parser's
+    // soft-wrap, so the geometry never overflows the screen.
     always_comb begin
         if (side_q == 2'(MSG_REMOTE)) begin
             // Left-aligned: bubble starts at BUBBLE_MARGIN_L
             bubble_left   = FE_COL_W'(BUBBLE_MARGIN_L);
             payload_start = FE_COL_W'(BUBBLE_MARGIN_L + 1);
             bubble_right  = FE_COL_W'(BUBBLE_MARGIN_L + 1)
-                            + FE_COL_W'(cur_sub_len);
+                            + FE_COL_W'(msg_max_sub_len_q);
         end else begin
             // Right-aligned: bubble ends at BUBBLE_RIGHT_EDGE
             bubble_right  = FE_COL_W'(BUBBLE_RIGHT_EDGE);
             bubble_left   = FE_COL_W'(BUBBLE_RIGHT_EDGE)
-                            - FE_COL_W'(cur_sub_len) - FE_COL_W'(1);
+                            - FE_COL_W'(msg_max_sub_len_q) - FE_COL_W'(1);
             payload_start = bubble_left + FE_COL_W'(1);
         end
     end
@@ -685,6 +703,7 @@ module fe_render_decoder
             msg_target_slot_q      <= '0;
             msg_parse_n_lines_q    <= LINE_CNT_W'(1);
             msg_parse_line_start_q <= '0;
+            msg_max_sub_len_q      <= '0;
 
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
@@ -1055,22 +1074,48 @@ module fe_render_decoder
                 byte_walk_idx_q        <= '0;
                 msg_parse_n_lines_q    <= LINE_CNT_W'(1);
                 msg_parse_line_start_q <= '0;
+                msg_max_sub_len_q      <= '0;
                 ml_offset_q[0]         <= '0;
             end
             if (state_q == S_HIST_STORE) begin
-                automatic byte_t cur_byte;
-                automatic logic  is_nl;
+                automatic byte_t                  cur_byte;
+                automatic logic                   is_nl;
+                automatic logic                   is_last_byte;
+                automatic logic                   is_wrap;
+                automatic logic                   is_break;
+                automatic logic                   have_room;
+                automatic logic [LINE_IDX_W-1:0]  cur_line_pos;
+                automatic msg_len_t               new_line_len;
+
                 cur_byte = payload_q[{byte_walk_idx_short, 3'b000} +: 8];
+                cur_line_pos = LINE_IDX_W'(byte_walk_idx_short)
+                                - msg_parse_line_start_q;
+                have_room = (msg_parse_n_lines_q
+                             < LINE_CNT_W'(MAX_LINES));
                 is_nl = ({1'b0, byte_walk_idx_short}
                             < msg_total_len_q[MSG_BYTE_IDX_W:0])
                         && (cur_byte == 8'h0A)
-                        && (msg_parse_n_lines_q
-                            < LINE_CNT_W'(MAX_LINES));
+                        && have_room;
+                is_last_byte = (byte_walk_idx_q + 1
+                    >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]});
+                // Soft-wrap: close current visual line and open the
+                // next when we've filled MAX_BUBBLE_INNER_W content
+                // bytes of this line, unless the current byte is also
+                // a newline (the newline takes precedence and is not
+                // counted into the line content) or there's nothing
+                // after this byte to put on the new line.
+                is_wrap = (cur_line_pos
+                           == LINE_IDX_W'(MAX_BUBBLE_INNER_W - 1))
+                          && !is_nl
+                          && !is_last_byte
+                          && have_room;
+                is_break = is_nl || is_wrap;
+                new_line_len = is_nl
+                    ? msg_len_t'(cur_line_pos)
+                    : msg_len_t'(MAX_BUBBLE_INNER_W);
 
-                if (is_nl) begin
-                    ml_len_q[msg_parse_last_sel]
-                        <= msg_len_t'(byte_walk_idx_short)
-                           - msg_len_t'(msg_parse_line_start_q);
+                if (is_break) begin
+                    ml_len_q[msg_parse_last_sel] <= new_line_len;
                     ml_offset_q[msg_parse_line_sel]
                         <= LINE_IDX_W'(byte_walk_idx_short)
                            + LINE_IDX_W'(1);
@@ -1079,20 +1124,33 @@ module fe_render_decoder
                     msg_parse_line_start_q
                         <= LINE_IDX_W'(byte_walk_idx_short)
                            + LINE_IDX_W'(1);
+                    if (new_line_len > msg_max_sub_len_q)
+                        msg_max_sub_len_q <= new_line_len;
                 end
 
-                // Last byte of the message? Finalise this cycle.
-                if (byte_walk_idx_q + 1
-                    >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]}) begin
+                if (is_last_byte) begin
                     automatic logic [LINE_CNT_W-1:0] final_n_lines;
+                    automatic msg_len_t             final_line_len;
+                    automatic logic [LINE_SEL_W-1:0] final_last_sel;
                     final_n_lines = msg_parse_n_lines_q
-                                    + (is_nl ? LINE_CNT_W'(1)
-                                             : LINE_CNT_W'(0));
-                    ml_len_q[msg_parse_last_sel]
-                        <= msg_total_len_q
-                           - msg_len_t'(msg_parse_line_start_q);
+                                    + (is_break ? LINE_CNT_W'(1)
+                                                : LINE_CNT_W'(0));
+                    // If we broke this cycle the new (trailing) line
+                    // starts at byte_walk_idx_q + 1 == msg_total_len,
+                    // i.e. it's empty. Otherwise the still-open line's
+                    // content length is cur_line_pos + 1.
+                    final_line_len = is_break
+                        ? msg_len_t'(0)
+                        : msg_len_t'(cur_line_pos) + msg_len_t'(1);
+                    final_last_sel = is_break
+                        ? msg_parse_line_sel
+                        : msg_parse_last_sel;
+
+                    ml_len_q[final_last_sel] <= final_line_len;
                     n_lines_q  <= final_n_lines;
                     cur_line_q <= '0;
+                    if (!is_break && final_line_len > msg_max_sub_len_q)
+                        msg_max_sub_len_q <= final_line_len;
                     // Advance hist write pointer by the (final) line
                     // count. & N_HIST_STORED-1 for ring wrap.
                     hist_wr_row_q <= (hist_wr_row_q
@@ -1113,6 +1171,7 @@ module fe_render_decoder
                 byte_walk_idx_q        <= '0;
                 msg_parse_n_lines_q    <= LINE_CNT_W'(1);
                 msg_parse_line_start_q <= '0;
+                msg_max_sub_len_q      <= '0;
                 ml_offset_q[0]         <= '0;
             end
             if (state_q == S_HIST_LOAD) begin
@@ -1120,43 +1179,76 @@ module fe_render_decoder
                 automatic byte_t                    cap_byte;
                 automatic logic                     have_cap;
                 automatic logic                     is_nl;
+                automatic logic                     is_last_cap;
+                automatic logic                     is_wrap;
+                automatic logic                     is_break;
+                automatic logic                     have_room;
+                automatic logic [LINE_IDX_W-1:0]    cap_line_pos;
+                automatic msg_len_t                 new_line_len;
+
                 have_cap = (byte_walk_idx_q != '0);
                 cap_idx  = byte_walk_idx_short - 1'b1;
                 cap_byte = msg_bram_rd_data;
+                cap_line_pos = LINE_IDX_W'(cap_idx)
+                                - msg_parse_line_start_q;
+                have_room = (msg_parse_n_lines_q
+                             < LINE_CNT_W'(MAX_LINES));
                 is_nl = have_cap
                         && ({1'b0, cap_idx} < msg_total_len_q[MSG_BYTE_IDX_W:0])
                         && (cap_byte == 8'h0A)
-                        && (msg_parse_n_lines_q
-                            < LINE_CNT_W'(MAX_LINES));
+                        && have_room;
+                is_last_cap = have_cap
+                              && (byte_walk_idx_q
+                                  >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]});
+                is_wrap = have_cap
+                          && (cap_line_pos
+                              == LINE_IDX_W'(MAX_BUBBLE_INNER_W - 1))
+                          && !is_nl
+                          && !is_last_cap
+                          && have_room;
+                is_break = is_nl || is_wrap;
+                new_line_len = is_nl
+                    ? msg_len_t'(cap_line_pos)
+                    : msg_len_t'(MAX_BUBBLE_INNER_W);
 
                 if (have_cap) begin
                     payload_q[{cap_idx, 3'b000} +: 8] <= cap_byte;
                 end
 
-                if (is_nl) begin
-                    ml_len_q[msg_parse_last_sel]
-                        <= msg_len_t'(cap_idx)
-                           - msg_len_t'(msg_parse_line_start_q);
+                if (is_break) begin
+                    ml_len_q[msg_parse_last_sel] <= new_line_len;
                     ml_offset_q[msg_parse_line_sel]
                         <= LINE_IDX_W'(cap_idx) + LINE_IDX_W'(1);
                     msg_parse_n_lines_q
                         <= msg_parse_n_lines_q + LINE_CNT_W'(1);
                     msg_parse_line_start_q
                         <= LINE_IDX_W'(cap_idx) + LINE_IDX_W'(1);
+                    if (new_line_len > msg_max_sub_len_q)
+                        msg_max_sub_len_q <= new_line_len;
                 end
 
                 if (byte_walk_idx_q
                     >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]}) begin
                     // All bytes captured. Commit last line.
                     automatic logic [LINE_CNT_W-1:0] final_n_lines;
+                    automatic msg_len_t             final_line_len;
+                    automatic logic [LINE_SEL_W-1:0] final_last_sel;
                     final_n_lines = msg_parse_n_lines_q
-                                    + (is_nl ? LINE_CNT_W'(1)
-                                             : LINE_CNT_W'(0));
-                    ml_len_q[msg_parse_last_sel]
-                        <= msg_total_len_q
-                           - msg_len_t'(msg_parse_line_start_q);
+                                    + (is_break ? LINE_CNT_W'(1)
+                                                : LINE_CNT_W'(0));
+                    final_line_len = is_break
+                        ? msg_len_t'(0)
+                        : (msg_total_len_q
+                           - msg_len_t'(msg_parse_line_start_q));
+                    final_last_sel = is_break
+                        ? msg_parse_line_sel
+                        : msg_parse_last_sel;
+
+                    ml_len_q[final_last_sel] <= final_line_len;
                     n_lines_q  <= final_n_lines;
                     cur_line_q <= '0;
+                    if (!is_break && final_line_len > msg_max_sub_len_q)
+                        msg_max_sub_len_q <= final_line_len;
                 end else begin
                     byte_walk_idx_q <= byte_walk_idx_q + 1'b1;
                 end
