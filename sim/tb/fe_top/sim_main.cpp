@@ -923,6 +923,98 @@ static void test_input_newline_renders_multirow() {
     CHECK_EQ(read_cell(INPUT_ROW_START+2,  5), ' ',  "row2 col5 blank");
 }
 
+// Helper: type a sequence of bytes (including 0x0A for newline) via
+// individual RENDER_INSERT_AT_CURSOR commands.
+static void type_chars(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        RenderCmd ic;
+        ic.cmd        = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii      = (uint8_t)s[i];
+        send_cmd(ic);
+    }
+}
+
+// LEFT/RIGHT (RENDER_MOVE_CURSOR with the new 1-D cursor_pos) cross
+// the 0x0A boundary in either direction. The renderer re-parses on
+// every MOVE_CURSOR and updates the 2-D (row, col) observers.
+static void test_cursor_crosses_newline() {
+    printf("== test_cursor_crosses_newline\n");
+    reset();
+    bring_up();
+    const char buf[] = {'a','b', 0x0A, 'c','d'};
+    type_chars(buf, 5);
+    // After typing: input_cursor=5 (past 'd'), row=1 col=2.
+    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "post-type row");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 2, "post-type col");
+
+    // RENDER_MOVE_CURSOR cursor_pos=3 -> at start of line 1 (right after
+    // the newline). 3 - (newline_idx+1) = 3 - 3 = 0.
+    RenderCmd mv;
+    mv.cmd = RENDER_MOVE_CURSOR;
+    mv.cursor_pos = 3;
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor_pos=3 row=1");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor_pos=3 col=0");
+
+    // cursor_pos=2 lands on the line containing the newline (line 0).
+    // Cursor sits between 'b' (offset 1) and '\n' (offset 2); col=2.
+    mv.cursor_pos = 2;
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor_pos=2 row=0");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 2, "cursor_pos=2 col=2");
+
+    // cursor_pos=0 -> very start of input.
+    mv.cursor_pos = 0;
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor_pos=0 row=0");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor_pos=0 col=0");
+}
+
+// Auto-follow: typing past N_INPUT_VISIBLE rows scrolls the input
+// window to keep the cursor visible; moving the cursor back up
+// scrolls back; explicit INPUT_SCROLL is overridden by the next
+// cursor change.
+static void test_cursor_auto_follow_scroll() {
+    printf("== test_cursor_auto_follow_scroll\n");
+    reset();
+    bring_up();
+    const int N_INPUT_VISIBLE = 5;
+
+    // Fill 7 lines so the cursor lands on row 6, two past the bottom
+    // of the visible window.
+    std::vector<char> buf;
+    for (int i = 0; i < 7; i++) {
+        buf.push_back((char)('a' + i));
+        if (i != 6) buf.push_back((char)0x0A);
+    }
+    type_chars(buf.data(), buf.size());
+
+    CHECK_EQ((int)dut->input_cursor_row_obs, 6, "cursor on row 6");
+    // Window must have scrolled to keep row 6 visible -> offset = 2.
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 6 - N_INPUT_VISIBLE + 1,
+             "auto-follow scrolls to row6");
+
+    // Move cursor back to row 0 (cursor_pos=0). Window snaps back to 0.
+    RenderCmd mv;
+    mv.cmd = RENDER_MOVE_CURSOR;
+    mv.cursor_pos = 0;
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor returned to row0");
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 0,
+             "auto-follow snaps offset back to 0");
+
+    // Manually scroll up via Shift+Up equivalent, then move cursor:
+    // the cursor move overrides the manual scroll back to follow.
+    RenderCmd su; su.cmd = RENDER_INPUT_SCROLL_UP;
+    send_cmd(su); send_cmd(su);  // offset = 2 explicitly
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 2, "manual scroll to 2");
+    mv.cursor_pos = (uint16_t)buf.size();  // cursor back to row 6
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 6 - N_INPUT_VISIBLE + 1,
+             "manual scroll overridden by auto-follow");
+}
+
 // RENDER_INPUT_SCROLL_UP / DOWN nudge the input window without
 // repainting the input region; clamps at [0, INPUT_SCROLL_MAX].
 static void test_input_scroll_clamps() {
@@ -1073,6 +1165,8 @@ int main(int argc, char** argv) {
     test_input_newline_renders_multirow();
     test_input_commit_clears_all_rows();
     test_input_scroll_clamps();
+    test_cursor_crosses_newline();
+    test_cursor_auto_follow_scroll();
 
     tfp->close();
     delete tfp;

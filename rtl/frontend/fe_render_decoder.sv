@@ -838,6 +838,25 @@ module fe_render_decoder
                 input_n_lines_q    <= LINE_CNT_W'(n_lines);
                 input_cursor_row_q <= cursor_row;
                 input_cursor_col_q <= cursor_col;
+
+                // -------------------------------------------------------
+                // Auto-follow: if the cursor lands outside the currently
+                // visible input window [scroll, scroll + N_INPUT_VISIBLE),
+                // nudge input_scroll_offset_q so the cursor row is in
+                // view. Triggered only on cursor/buffer changes (which
+                // route through this state); explicit
+                // RENDER_INPUT_SCROLL_* commands keep their setting.
+                // -------------------------------------------------------
+                if (LINE_CNT_W'(cursor_row)
+                    < LINE_CNT_W'(input_scroll_offset_q)) begin
+                    input_scroll_offset_q <= INPUT_SCROLL_W'(cursor_row);
+                end else if (LINE_CNT_W'(cursor_row)
+                             >= LINE_CNT_W'(input_scroll_offset_q)
+                              + LINE_CNT_W'(N_INPUT_VISIBLE)) begin
+                    input_scroll_offset_q <=
+                        INPUT_SCROLL_W'(LINE_CNT_W'(cursor_row)
+                                        - LINE_CNT_W'(N_INPUT_VISIBLE - 1));
+                end
             end
         end
     end
