@@ -359,8 +359,10 @@ static void inject_status(uint8_t msg_id, uint8_t code, int timeout = 200) {
 // Drain one render of any kind, ignoring its content. Useful to advance
 // the FSM past a side-effect render that the current test doesn't care
 // about (e.g. the INSERT_AT_CURSOR fired by every CHAR, or the trailing
-// UPDATE_INPUT_LINE after a commit).
-static void drain_render(int timeout = 10) {
+// UPDATE_INPUT_LINE after a commit). Timeout is generous so the
+// multi-cycle line_buf shift (S_LINE_INSERT/_DELETE walks up to
+// MAX_LINE_LEN cycles) has room to finish before emitting the render.
+static void drain_render(int timeout = MAX_LINE_LEN + 10) {
     RenderEvent e;
     if (!wait_render(e, timeout)) {
         ++g_failures;

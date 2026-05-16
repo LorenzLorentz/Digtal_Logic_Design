@@ -180,7 +180,13 @@ module be_top
         S_RENDER_SCROLL_UP         = 5'd18,
         S_RENDER_SCROLL_DOWN       = 5'd19,
         S_RENDER_INPUT_SCROLL_UP   = 5'd20,
-        S_RENDER_INPUT_SCROLL_DOWN = 5'd21
+        S_RENDER_INPUT_SCROLL_DOWN = 5'd21,
+        // Multi-cycle byte-by-byte shift for KEY_CHAR insert /
+        // KEY_BACKSPACE delete. Replaces the old in-S_IDLE parallel
+        // shift over MAX_LINE_LEN, which Vivado was unrolling into a
+        // 128-input mux per byte.
+        S_LINE_INSERT              = 5'd22,
+        S_LINE_DELETE              = 5'd23
     } state_e;
 
     state_e state_q, state_d;
@@ -195,6 +201,14 @@ module be_top
 
     // last ASCII byte just inserted -- drives be_render_ascii during INSERT
     byte_t                              last_event_ascii_q;
+
+    // S_LINE_INSERT/_DELETE byte-walk counter. Counts down (insert)
+    // from len_q toward cursor_pos_q, or up (delete) from
+    // cursor_pos_q - 1 toward len_q - 1.
+    logic [LEN_WIDTH-1:0]               shift_idx_q;
+    // Narrow index used to address line_buf (LINE_IDX_W bits suffice).
+    logic [LINE_IDX_W-1:0]              shift_addr;
+    assign shift_addr = shift_idx_q[LINE_IDX_W-1:0];
 
     // Allocation pointers (advance on every commit / on every rx accept).
     // Both reset to 0 on store_clear (peer changed).
@@ -344,13 +358,19 @@ module be_top
                     end
                 end else if (accept_io) begin
                     unique case (key_type_e'(io_key_type))
+                        // KEY_CHAR / KEY_BACKSPACE no longer shift
+                        // line_buf in-place during this cycle -- they
+                        // hand off to S_LINE_INSERT / S_LINE_DELETE,
+                        // which walk the buffer one byte per cycle.
+                        // The subsequent S_RENDER_INSERT / _DELETE
+                        // emit the BE->FE render command unchanged.
                         KEY_CHAR: begin
                             state_d = (len_q < LEN_WIDTH'(MAX_LINE_LEN))
-                                      ? S_RENDER_INSERT : S_IDLE;
+                                      ? S_LINE_INSERT : S_IDLE;
                         end
                         KEY_BACKSPACE: begin
                             state_d = (cursor_pos_q != 0)
-                                      ? S_RENDER_DELETE : S_IDLE;
+                                      ? S_LINE_DELETE : S_IDLE;
                         end
                         KEY_LEFT: begin
                             state_d = (cursor_pos_q != 0)
@@ -380,6 +400,19 @@ module be_top
                 end
             end
 
+            S_LINE_INSERT: begin
+                // Stay until shift_idx_q reaches cursor_pos_q (the
+                // cycle that writes the new ascii); on that cycle the
+                // sequential block flips state_d to S_RENDER_INSERT.
+                if (shift_idx_q == cursor_pos_q) state_d = S_RENDER_INSERT;
+            end
+            S_LINE_DELETE: begin
+                // Symmetric: walks shift_idx_q UP from cursor_pos_q-1
+                // to len_q-1 (or stops immediately when there's nothing
+                // to shift, i.e. cursor at the end of the buffer).
+                if (shift_idx_q >= len_q - LEN_WIDTH'(1))
+                    state_d = S_RENDER_DELETE;
+            end
             S_RENDER_MOVE_CURSOR:       if (be_render_ready) state_d = S_IDLE;
             S_RENDER_INSERT:            if (be_render_ready) state_d = S_IDLE;
             S_RENDER_DELETE:            if (be_render_ready) state_d = S_IDLE;
@@ -622,12 +655,60 @@ module be_top
             status_msg_id_q    <= '0;
             status_status_q    <= '0;
             last_event_ascii_q <= 8'd0;
+            shift_idx_q        <= '0;
             peer_name_len_q    <= '0;
             peer_name_q        <= '0;
             for (int i = 0; i < MAX_LINE_LEN; i++) line_buf[i]    <= 8'd0;
         end else begin
             state_q       <= state_d;
             enter_pulse_q <= 1'b0;
+
+            // -------------------------------------------------------------
+            // Pre-load shift_idx_q on entry to the multi-cycle shift
+            // states. KEY_CHAR/_BACKSPACE in S_IDLE just latches
+            // last_event_ascii_q; the actual line_buf walk starts here.
+            // -------------------------------------------------------------
+            if (state_q == S_IDLE && state_d == S_LINE_INSERT) begin
+                shift_idx_q <= len_q;
+            end
+            if (state_q == S_IDLE && state_d == S_LINE_DELETE) begin
+                shift_idx_q <= cursor_pos_q - LEN_WIDTH'(1);
+            end
+
+            // -------------------------------------------------------------
+            // S_LINE_INSERT: shift line_buf[cursor_pos_q..len_q] right by
+            // one and drop last_event_ascii_q into line_buf[cursor_pos_q].
+            // Walks shift_idx_q from len_q down to cursor_pos_q, doing one
+            // byte per cycle.
+            // -------------------------------------------------------------
+            if (state_q == S_LINE_INSERT) begin
+                if (shift_idx_q == cursor_pos_q) begin
+                    line_buf[shift_addr] <= last_event_ascii_q;
+                    len_q        <= len_q        + LEN_WIDTH'(1);
+                    cursor_pos_q <= cursor_pos_q + LEN_WIDTH'(1);
+                end else begin
+                    line_buf[shift_addr] <= line_buf[
+                        LINE_IDX_W'(shift_idx_q - LEN_WIDTH'(1))];
+                    shift_idx_q <= shift_idx_q - LEN_WIDTH'(1);
+                end
+            end
+
+            // -------------------------------------------------------------
+            // S_LINE_DELETE: shift line_buf[cursor_pos_q..len_q-1] left by
+            // one. Walks shift_idx_q UP from cursor_pos_q-1 to len_q-1.
+            // The "no shift needed" case (cursor at end of buffer)
+            // collapses to a single cycle that just decrements counters.
+            // -------------------------------------------------------------
+            if (state_q == S_LINE_DELETE) begin
+                if (shift_idx_q >= len_q - LEN_WIDTH'(1)) begin
+                    len_q        <= len_q        - LEN_WIDTH'(1);
+                    cursor_pos_q <= cursor_pos_q - LEN_WIDTH'(1);
+                end else begin
+                    line_buf[shift_addr] <= line_buf[
+                        LINE_IDX_W'(shift_idx_q + LEN_WIDTH'(1))];
+                    shift_idx_q <= shift_idx_q + LEN_WIDTH'(1);
+                end
+            end
 
             // -------------------------------------------------------------
             // Username latch + ptr resets (idle states that accept username)
@@ -663,43 +744,19 @@ module be_top
                     unique case (key_type_e'(io_key_type))
 
                         KEY_CHAR: begin
+                            // Just latch the ASCII byte for the
+                            // sequential walk in S_LINE_INSERT. shift
+                            // counter init happens via entering_new_state
+                            // below; len_q / cursor_pos_q update on
+                            // the LAST cycle of S_LINE_INSERT.
                             if (len_q < LEN_WIDTH'(MAX_LINE_LEN)) begin
-                                // Parallel insert at cursor_pos_q. The
-                                // (i > 0) guard keeps Vivado's static
-                                // index analysis off the line_buf[-1]
-                                // pattern (the runtime condition above
-                                // already rules it out).
-                                for (int i = 0; i < MAX_LINE_LEN; i++) begin
-                                    if (i == int'(cursor_pos_q)) begin
-                                        line_buf[i] <= io_key_ascii;
-                                    end else if ((i > 0)
-                                              && (i > int'(cursor_pos_q))
-                                              && (i <= int'(len_q))) begin
-                                        line_buf[i] <= line_buf[i-1];
-                                    end
-                                end
-                                len_q              <= len_q + LEN_WIDTH'(1);
-                                cursor_pos_q       <= cursor_pos_q + LEN_WIDTH'(1);
                                 last_event_ascii_q <= io_key_ascii;
                             end
                         end
 
                         KEY_BACKSPACE: begin
-                            if (cursor_pos_q != 0) begin
-                                // Parallel delete at cursor_pos_q - 1.
-                                // (i + 1 < MAX_LINE_LEN) keeps Vivado's
-                                // static analyzer off the line_buf[N+1]
-                                // pattern at the top of the buffer.
-                                for (int i = 0; i < MAX_LINE_LEN; i++) begin
-                                    if ((i + 1 < MAX_LINE_LEN)
-                                     && (i >= int'(cursor_pos_q) - 1)
-                                     && (i + 1 < int'(len_q))) begin
-                                        line_buf[i] <= line_buf[i+1];
-                                    end
-                                end
-                                len_q        <= len_q - LEN_WIDTH'(1);
-                                cursor_pos_q <= cursor_pos_q - LEN_WIDTH'(1);
-                            end
+                            // Same idea -- the actual shift is the
+                            // job of S_LINE_DELETE.
                         end
 
                         KEY_LEFT: begin

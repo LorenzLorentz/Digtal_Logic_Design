@@ -98,14 +98,19 @@ module fe_render_decoder
         S_IDLE          = 4'd0,
         S_HIST_CLEAR    = 4'd1,
         S_TITLEBAR      = 4'd2,
-        // Input edit pipeline: PARSE re-scans input_line_q for newlines
-        // (one cycle), then REDRAW sweeps every cell of the multi-row
-        // input window. INSERT/DELETE/UPDATE_INPUT_LINE/MOVE_CURSOR all
-        // funnel through this.
-        S_INPUT_PARSE   = 4'd3,
-        S_INPUT_REDRAW  = 4'd4,
-        S_HIST_WRITE    = 4'd5,
-        S_UPDATE_STATUS = 4'd6
+        // Input edit pipeline:
+        //   INSERT  -> S_INPUT_INSERT  -> S_INPUT_PARSE -> S_INPUT_REDRAW
+        //   DELETE  -> S_INPUT_DELETE  -> S_INPUT_PARSE -> S_INPUT_REDRAW
+        //   MOVE_CURSOR / UPDATE_INPUT_LINE -> S_INPUT_PARSE -> _REDRAW
+        // The two shift states walk input_line_q one byte per cycle so
+        // Vivado doesn't have to unroll a MAX_LINE_LEN-wide parallel
+        // shift. PARSE walks the buffer one byte per cycle too.
+        S_INPUT_INSERT  = 4'd3,
+        S_INPUT_DELETE  = 4'd4,
+        S_INPUT_PARSE   = 4'd5,
+        S_INPUT_REDRAW  = 4'd6,
+        S_HIST_WRITE    = 4'd7,
+        S_UPDATE_STATUS = 4'd8
     } state_e;
 
     state_e state_q, state_d;
@@ -174,6 +179,31 @@ module fe_render_decoder
     logic [INPUT_LINE_W-1:0]          input_cursor_row_q;
     msg_len_t                         input_cursor_col_q;
     logic [INPUT_SCROLL_W-1:0]        input_scroll_offset_q;
+
+    // Multi-cycle INSERT/DELETE walk counter + the post-edit ascii.
+    // (BE side has the analogous shift_idx_q.)
+    logic [LEN_WIDTH-1:0]             input_shift_idx_q;
+    byte_t                            input_shift_ascii_q;
+    msg_len_t                         input_shift_cursor_q;  // be_render_cursor_pos (post-edit)
+
+    // Multi-cycle parse accumulators (replaces the old single-cycle
+    // 128-iteration for-loop in S_INPUT_PARSE).
+    logic [LINE_IDX_W-1:0]            parse_idx_q;       // byte cursor
+    logic [LINE_CNT_W-1:0]            parse_n_lines_q;   // lines seen so far
+    logic [LINE_IDX_W-1:0]            parse_line_start_q;
+    logic [INPUT_LINE_W-1:0]          parse_cursor_row_q;
+    msg_len_t                         parse_cursor_col_q;
+    // Narrow aliases for indexing input_ml_*_q[].
+    // parse_line_sel    = parse_n_lines_q       (the next line index)
+    // parse_last_sel    = parse_n_lines_q - 1   (current "open" line)
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [LINE_CNT_W-1:0]            parse_last_idx;
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic [INPUT_LINE_W-1:0]          parse_line_sel;
+    logic [INPUT_LINE_W-1:0]          parse_last_sel;
+    assign parse_last_idx = parse_n_lines_q - LINE_CNT_W'(1);
+    assign parse_line_sel = parse_n_lines_q[INPUT_LINE_W-1:0];
+    assign parse_last_sel = parse_last_idx[INPUT_LINE_W-1:0];
 
     logic [HIST_W-1:0]                hist_wr_row_q;
     logic [SCROLL_W-1:0]              scroll_offset_q;
@@ -417,13 +447,16 @@ module fe_render_decoder
                             state_d = msg_id_valid_q[be_render_msg_id]
                                       ? S_UPDATE_STATUS : S_IDLE;
 
-                        // Any input-related update funnels through the
-                        // parse-then-redraw pipeline so newline boundaries
-                        // and cursor row/col are recomputed and the
-                        // entire input region is refreshed in one go.
+                        // Input edit pipeline. INSERT / DELETE first
+                        // walk input_line_q one byte per cycle in
+                        // S_INPUT_INSERT / _DELETE; everyone funnels
+                        // through S_INPUT_PARSE (also multi-cycle) and
+                        // ends in the multi-row S_INPUT_REDRAW.
+                        RENDER_INSERT_AT_CURSOR:
+                            state_d = S_INPUT_INSERT;
+                        RENDER_DELETE_AT_CURSOR:
+                            state_d = S_INPUT_DELETE;
                         RENDER_UPDATE_INPUT_LINE,
-                        RENDER_INSERT_AT_CURSOR,
-                        RENDER_DELETE_AT_CURSOR,
                         RENDER_MOVE_CURSOR:
                             state_d = S_INPUT_PARSE;
 
@@ -442,9 +475,31 @@ module fe_render_decoder
                     state_d = chain_input_q ? S_INPUT_PARSE : S_IDLE;
             end
 
-            // S_INPUT_PARSE is a single-cycle parse-of-input_line_q step
-            // that always falls through to the full multi-row redraw.
-            S_INPUT_PARSE: state_d = S_INPUT_REDRAW;
+            // Multi-cycle input shift: stay until shift_idx_q lands at
+            // the insert / delete position, then fall through to PARSE.
+            // INSERT walks DOWN from input_len_q (pre-insert) to
+            // input_shift_cursor_q - 1 (the insert slot).
+            // DELETE walks UP from input_shift_cursor_q to input_len_q - 1
+            // (the last shifted slot).
+            S_INPUT_INSERT: begin
+                if (input_shift_idx_q == input_shift_cursor_q
+                                         - LEN_WIDTH'(1))
+                    state_d = S_INPUT_PARSE;
+            end
+            S_INPUT_DELETE: begin
+                if (input_shift_idx_q >= input_len_q - LEN_WIDTH'(1))
+                    state_d = S_INPUT_PARSE;
+            end
+
+            // S_INPUT_PARSE now walks input_line_q one byte per cycle.
+            // Exits when we've scanned past input_len_q or hit the
+            // buffer limit. The exit logic is in the sequential block
+            // (it has to look at parse_idx_q vs input_len_q anyway).
+            S_INPUT_PARSE: begin
+                if ((LEN_WIDTH'(parse_idx_q) >= input_len_q)
+                 || (parse_idx_q >= LINE_IDX_W'(MAX_LINE_LEN - 1)))
+                    state_d = S_INPUT_REDRAW;
+            end
 
             S_INPUT_REDRAW: begin
                 if (at_last_col) begin
@@ -523,6 +578,15 @@ module fe_render_decoder
             input_cursor_row_q    <= '0;
             input_cursor_col_q    <= '0;
             input_scroll_offset_q <= '0;
+
+            input_shift_idx_q     <= '0;
+            input_shift_ascii_q   <= 8'h20;
+            input_shift_cursor_q  <= '0;
+            parse_idx_q           <= '0;
+            parse_n_lines_q       <= LINE_CNT_W'(1);
+            parse_line_start_q    <= '0;
+            parse_cursor_row_q    <= '0;
+            parse_cursor_col_q    <= '0;
 
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
@@ -745,44 +809,22 @@ module fe_render_decoder
                     end
 
                     RENDER_INSERT_AT_CURSOR: begin
-                        // be_render_cursor_pos is POST-edit; insert pos
-                        // is cursor_pos - 1. Parallel shift right
-                        // matches be_top KEY_CHAR pattern. The (i > 0)
-                        // guard pins Vivado's static analysis off
-                        // input_line_q[-1].
-                        for (int i = 0; i < MAX_LINE_LEN; i++) begin
-                            if (i == int'(be_render_cursor_pos) - 1) begin
-                                input_line_q[i] <= be_render_ascii;
-                            end else if ((i > 0)
-                                      && (i > int'(be_render_cursor_pos) - 1)
-                                      && (i <= int'(input_len_q))) begin
-                                input_line_q[i] <= input_line_q[i-1];
-                            end
-                        end
-                        input_len_q    <= input_len_q + LEN_WIDTH'(1);
-                        input_cursor_q <= be_render_cursor_pos;
+                        // Latch the ASCII + post-edit cursor; the actual
+                        // line_buf shift runs in S_INPUT_INSERT one byte
+                        // per cycle. cursor_q advances now so PARSE sees
+                        // the new cursor address. input_len_q is updated
+                        // at the END of S_INPUT_INSERT (mirrors be_top's
+                        // KEY_CHAR pattern).
+                        input_shift_ascii_q  <= be_render_ascii;
+                        input_shift_cursor_q <= be_render_cursor_pos;
+                        input_cursor_q       <= be_render_cursor_pos;
                     end
 
                     RENDER_DELETE_AT_CURSOR: begin
-                        // be_render_cursor_pos is POST-edit; delete pos
-                        // == cursor_pos. Parallel shift left matches
-                        // be_top KEY_BACKSPACE pattern. (i + 1 <
-                        // MAX_LINE_LEN) pins Vivado off input_line_q[N+1]
-                        // at the top of the buffer.
-                        for (int i = 0; i < MAX_LINE_LEN; i++) begin
-                            if ((i + 1 < MAX_LINE_LEN)
-                             && (i >= int'(be_render_cursor_pos))
-                             && (i + 1 < int'(input_len_q))) begin
-                                input_line_q[i] <= input_line_q[i+1];
-                            end
-                        end
-                        // Clear the now-invalid old tail cell so the
-                        // input_cell lookup writes a space there.
-                        if (input_len_q > 0)
-                            input_line_q[LINE_IDX_W'(input_len_q - LEN_WIDTH'(1))] <= 8'h20;
-
-                        input_len_q    <= input_len_q - LEN_WIDTH'(1);
-                        input_cursor_q <= be_render_cursor_pos;
+                        // Same idea, S_INPUT_DELETE does the shift +
+                        // input_len_q decrement.
+                        input_shift_cursor_q <= be_render_cursor_pos;
+                        input_cursor_q       <= be_render_cursor_pos;
                     end
 
                     RENDER_MOVE_CURSOR: begin
@@ -822,62 +864,136 @@ module fe_render_decoder
                 chain_input_q <= 1'b0;
 
             // -----------------------------------------------------------
-            // S_INPUT_PARSE: with input_line_q / input_len_q / input_cursor_q
-            // now reflecting the post-accept state, walk the buffer to find
-            // newline boundaries, line lengths, and the 2-D cursor address.
-            // Same MAX_INPUT_LINES cap behaviour as the bubble parser.
+            // S_INPUT_INSERT: walk input_line_q one byte per cycle.
+            // shift_idx_q starts at input_len_q (the old, pre-insert
+            // length, == post-insert top index) and counts DOWN to
+            // (input_shift_cursor_q - 1), the insert position. On the
+            // exit cycle we drop input_shift_ascii_q and bump
+            // input_len_q. (Mirrors be_top S_LINE_INSERT.)
             // -----------------------------------------------------------
-            if (state_q == S_INPUT_PARSE) begin
-                automatic int                      n_lines, line_start, cur_pos;
-                automatic logic [INPUT_LINE_W-1:0] cursor_row;
-                automatic msg_len_t                cursor_col;
-
-                n_lines    = 1;
-                line_start = 0;
-                input_ml_offset_q[0] <= '0;
-                cur_pos    = int'(input_cursor_q);
-                cursor_row = '0;
-                cursor_col = msg_len_t'(cur_pos);
-
-                for (int i = 0; i < MAX_LINE_LEN; i++) begin
-                    if (i < int'(input_len_q)
-                        && input_line_q[i] == 8'h0A
-                        && n_lines < MAX_INPUT_LINES) begin
-                        input_ml_len_q[n_lines - 1]
-                            <= msg_len_t'(i - line_start);
-                        input_ml_offset_q[n_lines]
-                            <= LINE_IDX_W'(i + 1);
-                        if (cur_pos > i) begin
-                            cursor_row = INPUT_LINE_W'(n_lines);
-                            cursor_col = msg_len_t'(cur_pos - (i + 1));
-                        end
-                        n_lines    = n_lines + 1;
-                        line_start = i + 1;
-                    end
+            if (state_q == S_IDLE && state_d == S_INPUT_INSERT)
+                input_shift_idx_q <= input_len_q;
+            if (state_q == S_INPUT_INSERT) begin
+                if (input_shift_idx_q == input_shift_cursor_q
+                                         - LEN_WIDTH'(1)) begin
+                    input_line_q[input_shift_idx_q[LINE_IDX_W-1:0]]
+                        <= input_shift_ascii_q;
+                    input_len_q <= input_len_q + LEN_WIDTH'(1);
+                end else begin
+                    input_line_q[input_shift_idx_q[LINE_IDX_W-1:0]]
+                        <= input_line_q[LINE_IDX_W'(
+                            input_shift_idx_q - LEN_WIDTH'(1))];
+                    input_shift_idx_q <= input_shift_idx_q - LEN_WIDTH'(1);
                 end
-                input_ml_len_q[n_lines - 1]
-                    <= msg_len_t'(int'(input_len_q) - line_start);
-                input_n_lines_q    <= LINE_CNT_W'(n_lines);
-                input_cursor_row_q <= cursor_row;
-                input_cursor_col_q <= cursor_col;
+            end
 
-                // -------------------------------------------------------
-                // Auto-follow: if the cursor lands outside the currently
-                // visible input window [scroll, scroll + N_INPUT_VISIBLE),
-                // nudge input_scroll_offset_q so the cursor row is in
-                // view. Triggered only on cursor/buffer changes (which
-                // route through this state); explicit
-                // RENDER_INPUT_SCROLL_* commands keep their setting.
-                // -------------------------------------------------------
-                if (LINE_CNT_W'(cursor_row)
-                    < LINE_CNT_W'(input_scroll_offset_q)) begin
-                    input_scroll_offset_q <= INPUT_SCROLL_W'(cursor_row);
-                end else if (LINE_CNT_W'(cursor_row)
-                             >= LINE_CNT_W'(input_scroll_offset_q)
-                              + LINE_CNT_W'(N_INPUT_VISIBLE)) begin
-                    input_scroll_offset_q <=
-                        INPUT_SCROLL_W'(LINE_CNT_W'(cursor_row)
-                                        - LINE_CNT_W'(N_INPUT_VISIBLE - 1));
+            // -----------------------------------------------------------
+            // S_INPUT_DELETE: walk input_line_q[cursor..len-1] left by
+            // one and clear the now-invalid tail cell. shift_idx_q
+            // starts at input_shift_cursor_q (the post-edit cursor ==
+            // insert position) and counts UP. On the exit cycle (when
+            // shift_idx_q == old input_len_q - 1, the topmost cell that
+            // needed shifting) we decrement input_len_q and blank the
+            // now-invalid tail.
+            // -----------------------------------------------------------
+            if (state_q == S_IDLE && state_d == S_INPUT_DELETE)
+                input_shift_idx_q <= input_shift_cursor_q;
+            if (state_q == S_INPUT_DELETE) begin
+                if (input_shift_idx_q >= input_len_q - LEN_WIDTH'(1)) begin
+                    // No more shifts left -- finish up.
+                    input_len_q <= input_len_q - LEN_WIDTH'(1);
+                    if (input_len_q != '0)
+                        input_line_q[LINE_IDX_W'(input_len_q - LEN_WIDTH'(1))]
+                            <= 8'h20;
+                end else begin
+                    input_line_q[input_shift_idx_q[LINE_IDX_W-1:0]]
+                        <= input_line_q[LINE_IDX_W'(
+                            input_shift_idx_q + LEN_WIDTH'(1))];
+                    input_shift_idx_q <= input_shift_idx_q + LEN_WIDTH'(1);
+                end
+            end
+
+            // -----------------------------------------------------------
+            // S_INPUT_PARSE (multi-cycle): walk input_line_q one byte
+            // per cycle looking for 0x0A. Accumulates into
+            // input_ml_offset_q[] / input_ml_len_q[] / input_n_lines_q
+            // and resolves input_cursor_q into the 2-D (row, col).
+            // -----------------------------------------------------------
+            // Entry to S_INPUT_PARSE from S_IDLE (MOVE_CURSOR /
+            // UPDATE_INPUT_LINE accept). input_cursor_q is being
+            // non-blocking-updated to be_render_cursor_pos on this same
+            // cycle, so we have to use be_render_cursor_pos directly
+            // (not input_cursor_q which still reads old value).
+            if (state_q == S_IDLE && state_d == S_INPUT_PARSE) begin
+                parse_idx_q          <= '0;
+                parse_n_lines_q      <= LINE_CNT_W'(1);
+                parse_line_start_q   <= '0;
+                input_ml_offset_q[0] <= '0;
+                parse_cursor_row_q   <= '0;
+                parse_cursor_col_q   <= be_render_cursor_pos;
+            end
+            // Entry from S_INPUT_INSERT / _DELETE: input_cursor_q has
+            // already settled to the post-edit cursor, so it's safe to
+            // sample here.
+            if ((state_q == S_INPUT_INSERT || state_q == S_INPUT_DELETE)
+                 && state_d == S_INPUT_PARSE) begin
+                parse_idx_q          <= '0;
+                parse_n_lines_q      <= LINE_CNT_W'(1);
+                parse_line_start_q   <= '0;
+                input_ml_offset_q[0] <= '0;
+                parse_cursor_row_q   <= '0;
+                parse_cursor_col_q   <= input_cursor_q;
+            end
+            if (state_q == S_INPUT_PARSE) begin
+                automatic byte_t cur_byte;
+                automatic logic  is_nl;
+                cur_byte = input_line_q[parse_idx_q];
+                is_nl = (LEN_WIDTH'(parse_idx_q) < input_len_q)
+                        && (cur_byte == 8'h0A)
+                        && (parse_n_lines_q < LINE_CNT_W'(MAX_INPUT_LINES));
+
+                if (is_nl) begin
+                    input_ml_len_q[parse_last_sel]
+                        <= msg_len_t'(parse_idx_q)
+                           - msg_len_t'(parse_line_start_q);
+                    input_ml_offset_q[parse_line_sel]
+                        <= parse_idx_q + LINE_IDX_W'(1);
+                    if (input_cursor_q > msg_len_t'(parse_idx_q)) begin
+                        parse_cursor_row_q <= parse_line_sel;
+                        parse_cursor_col_q <= input_cursor_q
+                            - (msg_len_t'(parse_idx_q) + msg_len_t'(1));
+                    end
+                    parse_n_lines_q    <= parse_n_lines_q + LINE_CNT_W'(1);
+                    parse_line_start_q <= parse_idx_q + LINE_IDX_W'(1);
+                end
+
+                // Finalise when we've scanned through input_len_q (or
+                // hit the MAX_LINE_LEN cap). State transition already
+                // happens in the next-state logic; here we just commit
+                // the final line length, n_lines, cursor and run
+                // auto-follow.
+                if ((LEN_WIDTH'(parse_idx_q) >= input_len_q)
+                 || (parse_idx_q >= LINE_IDX_W'(MAX_LINE_LEN - 1))) begin
+                    input_ml_len_q[parse_last_sel]
+                        <= input_len_q - msg_len_t'(parse_line_start_q);
+                    input_n_lines_q    <= parse_n_lines_q;
+                    input_cursor_row_q <= parse_cursor_row_q;
+                    input_cursor_col_q <= parse_cursor_col_q;
+
+                    // Auto-follow scroll (unchanged semantics).
+                    if (LINE_CNT_W'(parse_cursor_row_q)
+                        < LINE_CNT_W'(input_scroll_offset_q)) begin
+                        input_scroll_offset_q <= INPUT_SCROLL_W'(
+                            parse_cursor_row_q);
+                    end else if (LINE_CNT_W'(parse_cursor_row_q)
+                                 >= LINE_CNT_W'(input_scroll_offset_q)
+                                  + LINE_CNT_W'(N_INPUT_VISIBLE)) begin
+                        input_scroll_offset_q <= INPUT_SCROLL_W'(
+                            LINE_CNT_W'(parse_cursor_row_q)
+                            - LINE_CNT_W'(N_INPUT_VISIBLE - 1));
+                    end
+                end else begin
+                    parse_idx_q <= parse_idx_q + LINE_IDX_W'(1);
                 end
             end
         end
