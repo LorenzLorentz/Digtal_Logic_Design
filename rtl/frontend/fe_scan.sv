@@ -60,20 +60,12 @@ module fe_scan
 
     // ---- attributes from decoder ----
     input  logic [1:0]             conn_state,
-    /* verilator lint_off UNUSEDSIGNAL */
-    // input_cursor is the legacy 1-D cursor index. Kept for backward
-    // compatibility with the existing observer port; cursor highlight
-    // now uses (input_cursor_row, input_cursor_col) instead.
-    input  msg_len_t               input_cursor,
-    /* verilator lint_on UNUSEDSIGNAL */
     input  logic [HIST_W-1:0]      hist_wr_row,         // ring head
     input  logic [SCROLL_W-1:0]    scroll_offset,       // history scroll
     input  logic [INPUT_LINE_W-1:0]   input_cursor_row,   // 2-D cursor (row)
-    /* verilator lint_off UNUSEDSIGNAL */
-    // Only the low FE_COL_W bits of input_cursor_col are needed (any
-    // column past FE_N_COLS-1 is off-screen anyway).
-    input  msg_len_t                  input_cursor_col,   // 2-D cursor (col)
-    /* verilator lint_on UNUSEDSIGNAL */
+    // Cursor col is narrowed to FE_COL_W -- any column past
+    // FE_N_COLS-1 is off-screen and would never match a scan cell.
+    input  logic [FE_COL_W-1:0]       input_cursor_col,   // 2-D cursor (col)
     input  logic [INPUT_SCROLL_W-1:0] input_scroll_offset,// input window top
 
     // ---- RGB / sync out ----
@@ -141,13 +133,13 @@ module fe_scan
     localparam int INPUT_SCREEN_START = HIST_SCREEN_END + 2;                             // = 32
     localparam int INPUT_SCREEN_END   = INPUT_SCREEN_START + N_INPUT_VISIBLE - 1;        // = 36
 
-    logic [FE_ROW_W-1:0] s0_text_ram_row;
-    logic [HIST_W-1:0]   hist_slot_offset;
-    logic [HIST_W-1:0]   hist_slot;
-    /* verilator lint_off UNUSEDSIGNAL */
-    // Only low FE_ROW_W bits used (window is at most N_INPUT_VISIBLE rows).
-    logic [HWIDTH-1:0]   input_row_in_window;
-    /* verilator lint_on UNUSEDSIGNAL */
+    localparam int INPUT_WIN_W = (N_INPUT_VISIBLE <= 1)
+                                   ? 1 : $clog2(N_INPUT_VISIBLE);
+
+    logic [FE_ROW_W-1:0]      s0_text_ram_row;
+    logic [HIST_W-1:0]        hist_slot_offset;
+    logic [HIST_W-1:0]        hist_slot;
+    logic [INPUT_WIN_W-1:0]   input_row_in_window;
 
     always_comb begin
         hist_slot_offset = HIST_W'(s0_screen_row - HWIDTH'(HIST_SCREEN_START));
@@ -157,7 +149,8 @@ module fe_scan
                     - HIST_W'(scroll_offset)
                     + hist_slot_offset;
 
-        input_row_in_window = s0_screen_row - HWIDTH'(INPUT_SCREEN_START);
+        input_row_in_window = INPUT_WIN_W'(s0_screen_row
+                                           - HWIDTH'(INPUT_SCREEN_START));
 
         if (s0_screen_row == HWIDTH'(0))
             s0_text_ram_row = FE_ROW_W'(TITLE_ROW);
@@ -329,9 +322,9 @@ module fe_scan
                           + FE_ROW_W'(input_cursor_row);
         if (input_cursor_row == '0)
             cursor_text_col = FE_COL_W'(INPUT_PREFIX_LEN)
-                              + FE_COL_W'(input_cursor_col);
+                              + input_cursor_col;
         else
-            cursor_text_col = FE_COL_W'(input_cursor_col);
+            cursor_text_col = input_cursor_col;
     end
 
     logic at_cursor_cell;

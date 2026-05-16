@@ -158,12 +158,14 @@ module fe_top
     // briefly look inconsistent during a transition, but visible
     // glitches are at most one frame and only on cells that are about
     // to be updated anyway, so they are not noticeable.
-    logic [1:0]              conn_state_pix;
-    msg_len_t                input_cursor_pix;
-    logic [HIST_W-1:0]       hist_wr_row_pix;
-    logic [SCROLL_W-1:0]     scroll_offset_pix;
-    logic [INPUT_LINE_W-1:0] input_cursor_row_pix;
-    msg_len_t                input_cursor_col_pix;
+    logic [1:0]                conn_state_pix;
+    logic [HIST_W-1:0]         hist_wr_row_pix;
+    logic [SCROLL_W-1:0]       scroll_offset_pix;
+    logic [INPUT_LINE_W-1:0]   input_cursor_row_pix;
+    // Cursor col only needs FE_COL_W bits on the scan side (off-screen
+    // cols never match anyway). Narrowing here keeps fe_scan from
+    // dragging in 9 unused MSBs.
+    logic [FE_COL_W-1:0]       input_cursor_col_pix;
     logic [INPUT_SCROLL_W-1:0] input_scroll_offset_pix;
 
     sync_2ff #(.RST_VAL(1'b0)) u_sync_cs0 (
@@ -176,13 +178,6 @@ module fe_top
     );
     genvar gi;
     generate
-        for (gi = 0; gi < LEN_WIDTH; gi++) begin : g_sync_cur
-            sync_2ff #(.RST_VAL(1'b0)) u_sync_cur (
-                .clk(clk_pix), .rst_n(rst_n),
-                .async_in(input_cursor_obs[gi]),
-                .sync_out(input_cursor_pix[gi])
-            );
-        end
         for (gi = 0; gi < HIST_W; gi++) begin : g_sync_hist
             sync_2ff #(.RST_VAL(1'b0)) u_sync_hist (
                 .clk(clk_pix), .rst_n(rst_n),
@@ -204,7 +199,7 @@ module fe_top
                 .sync_out(input_cursor_row_pix[gi])
             );
         end
-        for (gi = 0; gi < LEN_WIDTH; gi++) begin : g_sync_iccol
+        for (gi = 0; gi < FE_COL_W; gi++) begin : g_sync_iccol
             sync_2ff #(.RST_VAL(1'b0)) u_sync_iccol (
                 .clk(clk_pix), .rst_n(rst_n),
                 .async_in(input_cursor_col_obs[gi]),
@@ -235,7 +230,6 @@ module fe_top
         .glyph_gy      (glyph_gy),
         .glyph_row     (glyph_row),
         .conn_state         (conn_state_pix),
-        .input_cursor       (input_cursor_pix),
         .hist_wr_row        (hist_wr_row_pix),
         .scroll_offset      (scroll_offset_pix),
         .input_cursor_row   (input_cursor_row_pix),

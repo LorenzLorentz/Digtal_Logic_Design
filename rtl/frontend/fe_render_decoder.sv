@@ -111,6 +111,14 @@ module fe_render_decoder
     state_e state_q, state_d;
 
     // -----------------------------------------------------------------
+    // Width helpers (declared up-front so the multi-line state declarations
+    // below can use them without triggering Vivado's "identifier used
+    // before its declaration" warning).
+    // -----------------------------------------------------------------
+    localparam int NAME_IDX_W = $clog2(MAX_NAME_LEN);
+    localparam int LINE_IDX_W = $clog2(MAX_LINE_LEN);
+
+    // -----------------------------------------------------------------
     // Counters / latched-on-accept registers
     // -----------------------------------------------------------------
     logic [FE_COL_W-1:0]              col_cnt_q;
@@ -240,9 +248,7 @@ module fe_render_decoder
 
     // Compute cell value at the current col_cnt_q for each multi-cycle
     // state. Only one is selected by wr_code below based on state_q.
-
-    localparam int NAME_IDX_W = $clog2(MAX_NAME_LEN);
-    localparam int LINE_IDX_W = $clog2(MAX_LINE_LEN);
+    // (NAME_IDX_W / LINE_IDX_W localparams are declared near the top.)
 
     logic [FE_COL_W-1:0] title_name_idx;
     logic [FE_COL_W-1:0] input_idx;
@@ -650,8 +656,11 @@ module fe_render_decoder
                         // further 0x0A bytes) accumulate into the final
                         // line's length -- they will render with 0x0A
                         // glyphs (returned-arrow) in the bubble.
+                        // `automatic` so Vivado treats n_lines/line_start
+                        // as procedural vars, not registers (otherwise it
+                        // synthesises FFs and then trims them).
                         begin
-                            int n_lines, line_start;
+                            automatic int n_lines, line_start;
                             n_lines = 1;
                             ml_offset_q[0] <= '0;
                             line_start = 0;
@@ -692,7 +701,7 @@ module fe_render_decoder
                             // Re-parse multi-line boundaries. Same
                             // MAX_LINES cap as the APPEND path.
                             begin
-                                int n_lines, line_start;
+                                automatic int n_lines, line_start;
                                 n_lines = 1;
                                 ml_offset_q[0] <= '0;
                                 line_start = 0;
@@ -731,11 +740,14 @@ module fe_render_decoder
                     RENDER_INSERT_AT_CURSOR: begin
                         // be_render_cursor_pos is POST-edit; insert pos
                         // is cursor_pos - 1. Parallel shift right
-                        // matches be_top KEY_CHAR pattern.
+                        // matches be_top KEY_CHAR pattern. The (i > 0)
+                        // guard pins Vivado's static analysis off
+                        // input_line_q[-1].
                         for (int i = 0; i < MAX_LINE_LEN; i++) begin
                             if (i == int'(be_render_cursor_pos) - 1) begin
                                 input_line_q[i] <= be_render_ascii;
-                            end else if ((i > int'(be_render_cursor_pos) - 1)
+                            end else if ((i > 0)
+                                      && (i > int'(be_render_cursor_pos) - 1)
                                       && (i <= int'(input_len_q))) begin
                                 input_line_q[i] <= input_line_q[i-1];
                             end
@@ -747,9 +759,12 @@ module fe_render_decoder
                     RENDER_DELETE_AT_CURSOR: begin
                         // be_render_cursor_pos is POST-edit; delete pos
                         // == cursor_pos. Parallel shift left matches
-                        // be_top KEY_BACKSPACE pattern.
+                        // be_top KEY_BACKSPACE pattern. (i + 1 <
+                        // MAX_LINE_LEN) pins Vivado off input_line_q[N+1]
+                        // at the top of the buffer.
                         for (int i = 0; i < MAX_LINE_LEN; i++) begin
-                            if ((i >= int'(be_render_cursor_pos))
+                            if ((i + 1 < MAX_LINE_LEN)
+                             && (i >= int'(be_render_cursor_pos))
                              && (i + 1 < int'(input_len_q))) begin
                                 input_line_q[i] <= input_line_q[i+1];
                             end
@@ -806,9 +821,9 @@ module fe_render_decoder
             // Same MAX_INPUT_LINES cap behaviour as the bubble parser.
             // -----------------------------------------------------------
             if (state_q == S_INPUT_PARSE) begin
-                int n_lines, line_start, cur_pos;
-                logic [INPUT_LINE_W-1:0] cursor_row;
-                msg_len_t                cursor_col;
+                automatic int                      n_lines, line_start, cur_pos;
+                automatic logic [INPUT_LINE_W-1:0] cursor_row;
+                automatic msg_len_t                cursor_col;
 
                 n_lines    = 1;
                 line_start = 0;

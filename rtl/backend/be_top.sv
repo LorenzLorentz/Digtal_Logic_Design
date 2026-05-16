@@ -664,11 +664,16 @@ module be_top
 
                         KEY_CHAR: begin
                             if (len_q < LEN_WIDTH'(MAX_LINE_LEN)) begin
-                                // Parallel insert at cursor_pos_q.
+                                // Parallel insert at cursor_pos_q. The
+                                // (i > 0) guard keeps Vivado's static
+                                // index analysis off the line_buf[-1]
+                                // pattern (the runtime condition above
+                                // already rules it out).
                                 for (int i = 0; i < MAX_LINE_LEN; i++) begin
                                     if (i == int'(cursor_pos_q)) begin
                                         line_buf[i] <= io_key_ascii;
-                                    end else if ((i > int'(cursor_pos_q))
+                                    end else if ((i > 0)
+                                              && (i > int'(cursor_pos_q))
                                               && (i <= int'(len_q))) begin
                                         line_buf[i] <= line_buf[i-1];
                                     end
@@ -682,8 +687,12 @@ module be_top
                         KEY_BACKSPACE: begin
                             if (cursor_pos_q != 0) begin
                                 // Parallel delete at cursor_pos_q - 1.
+                                // (i + 1 < MAX_LINE_LEN) keeps Vivado's
+                                // static analyzer off the line_buf[N+1]
+                                // pattern at the top of the buffer.
                                 for (int i = 0; i < MAX_LINE_LEN; i++) begin
-                                    if ((i >= int'(cursor_pos_q) - 1)
+                                    if ((i + 1 < MAX_LINE_LEN)
+                                     && (i >= int'(cursor_pos_q) - 1)
                                      && (i + 1 < int'(len_q))) begin
                                         line_buf[i] <= line_buf[i+1];
                                     end
