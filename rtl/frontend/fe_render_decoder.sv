@@ -442,12 +442,35 @@ module fe_render_decoder
         // history row -- bubble layout (multi-line aware). Failed local
         // messages get an explicit X mark in the first visual row at
         // col bubble_left - 1.
+        //
+        // For single-line bubbles (n_lines_q == 1) use the existing
+        // single-cell SPRITE_BL/BR (or FBL/FBR for fail). For multi-
+        // line bubbles, swap in the stack-aware TOP/MID/BOT sprite so
+        // the cells visually form one tall (...) bracket spanning the
+        // whole message. Fail multi-line uses the same TOP/MID/BOT
+        // rounded sprites + the X mark to signal failure.
         if (show_fail && (cur_line_q == '0) && (col_cnt_q == fail_x_col))
             hist_cell = SPRITE_FAIL_X;
-        else if (col_cnt_q == bubble_left)
-            hist_cell = show_fail ? SPRITE_FBL : SPRITE_BL;
-        else if (col_cnt_q == bubble_right)
-            hist_cell = show_fail ? SPRITE_FBR : SPRITE_BR;
+        else if (col_cnt_q == bubble_left) begin
+            if (n_lines_q == LINE_CNT_W'(1))
+                hist_cell = show_fail ? SPRITE_FBL : SPRITE_BL;
+            else if (cur_line_q == '0)
+                hist_cell = SPRITE_BL_TOP;
+            else if (cur_line_q == n_lines_q - LINE_CNT_W'(1))
+                hist_cell = SPRITE_BL_BOT;
+            else
+                hist_cell = SPRITE_BL_MID;
+        end
+        else if (col_cnt_q == bubble_right) begin
+            if (n_lines_q == LINE_CNT_W'(1))
+                hist_cell = show_fail ? SPRITE_FBR : SPRITE_BR;
+            else if (cur_line_q == '0)
+                hist_cell = SPRITE_BR_TOP;
+            else if (cur_line_q == n_lines_q - LINE_CNT_W'(1))
+                hist_cell = SPRITE_BR_BOT;
+            else
+                hist_cell = SPRITE_BR_MID;
+        end
         else if (payload_in_range)
             hist_cell = payload_q[abs_idx[LINE_IDX_W-1:0]*8 +: 8];
         else

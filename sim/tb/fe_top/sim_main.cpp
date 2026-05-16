@@ -82,11 +82,17 @@ static constexpr int MAX_INPUT_LINES  = 16;
 static constexpr int BUBBLE_MARGIN_L   = 2;
 static constexpr int BUBBLE_RIGHT_EDGE = 97;
 
-static constexpr uint8_t SPRITE_BL     = 0xF3;  // normal left border (rounded)
-static constexpr uint8_t SPRITE_BR     = 0xF4;  // normal right border (rounded)
-static constexpr uint8_t SPRITE_FBL    = 0xF6;  // fail left border (square)
-static constexpr uint8_t SPRITE_FBR    = 0xF7;  // fail right border (square)
+static constexpr uint8_t SPRITE_BL     = 0xF3;  // normal left border (rounded, single-line)
+static constexpr uint8_t SPRITE_BR     = 0xF4;  // normal right border (rounded, single-line)
+static constexpr uint8_t SPRITE_FBL    = 0xF6;  // fail left border (square, single-line)
+static constexpr uint8_t SPRITE_FBR    = 0xF7;  // fail right border (square, single-line)
 static constexpr uint8_t SPRITE_FAIL_X = 0xF2;  // X mark for failed local msgs
+static constexpr uint8_t SPRITE_BL_TOP = 0xF8;  // multi-line top-of-bubble left
+static constexpr uint8_t SPRITE_BR_TOP = 0xF9;  // multi-line top-of-bubble right
+static constexpr uint8_t SPRITE_BL_BOT = 0xFA;  // multi-line bottom-of-bubble left
+static constexpr uint8_t SPRITE_BR_BOT = 0xFB;  // multi-line bottom-of-bubble right
+static constexpr uint8_t SPRITE_BL_MID = 0xFC;  // multi-line middle left
+static constexpr uint8_t SPRITE_BR_MID = 0xFD;  // multi-line middle right
 
 // Mirror of the RTL MAX_LINES localparam in fe_render_decoder.sv.
 static constexpr int MAX_LINES = 16;
@@ -750,22 +756,22 @@ static void test_multiline_local() {
     c.payload = msg; c.payload_n = 6;
     send_cmd(c);
 
-    // Bubble width = max sub-line length = 3 ("bye"). All rows share
-    // that width, so row 0's "hi" gets one trailing space of padding.
+    // Bubble width = max sub-line length = 3 ("bye"). 2-row multi-line:
+    // row 0 uses TOP sprites, row 1 uses BOT sprites (no MID).
     // bubble_left = 97 - 3 - 1 = 93; BR at 97 for every row.
     int row0 = HIST_ROW_START;
-    CHECK_EQ(read_cell(row0, 93), (uint8_t)SPRITE_BL, "row0 left border");
+    CHECK_EQ(read_cell(row0, 93), (uint8_t)SPRITE_BL_TOP, "row0 TOP-left border");
     CHECK_EQ(read_cell(row0, 94), 'h', "row0 'h'");
     CHECK_EQ(read_cell(row0, 95), 'i', "row0 'i'");
     CHECK_EQ(read_cell(row0, 96), ' ', "row0 padding");
-    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "row0 right border");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR_TOP, "row0 TOP-right border");
 
     int row1 = HIST_ROW_START + 1;
-    CHECK_EQ(read_cell(row1, 93), (uint8_t)SPRITE_BL, "row1 left border");
+    CHECK_EQ(read_cell(row1, 93), (uint8_t)SPRITE_BL_BOT, "row1 BOT-left border");
     CHECK_EQ(read_cell(row1, 94), 'b', "row1 'b'");
     CHECK_EQ(read_cell(row1, 95), 'y', "row1 'y'");
     CHECK_EQ(read_cell(row1, 96), 'e', "row1 'e'");
-    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR, "row1 right border");
+    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR_BOT, "row1 BOT-right border");
 
     // Row 2 should be space (unused)
     CHECK_EQ(read_cell(HIST_ROW_START + 2, 50), ' ', "row2 empty");
@@ -783,18 +789,19 @@ static void test_multiline_remote() {
     c.payload = msg; c.payload_n = 5;
     send_cmd(c);
 
-    // Fresh state, starts at ring slot 0
+    // Fresh state, starts at ring slot 0. 2-row multi-line bubble: TOP
+    // and BOT variants, no MID.
     int row0 = HIST_ROW_START;
-    CHECK_EQ(read_cell(row0, 2), (uint8_t)SPRITE_BL, "row0 left border");
+    CHECK_EQ(read_cell(row0, 2), (uint8_t)SPRITE_BL_TOP, "row0 TOP-left");
     CHECK_EQ(read_cell(row0, 3), 'a', "row0 'a'");
     CHECK_EQ(read_cell(row0, 4), 'b', "row0 'b'");
-    CHECK_EQ(read_cell(row0, 5), (uint8_t)SPRITE_BR, "row0 right border");
+    CHECK_EQ(read_cell(row0, 5), (uint8_t)SPRITE_BR_TOP, "row0 TOP-right");
 
     int row1 = HIST_ROW_START + 1;
-    CHECK_EQ(read_cell(row1, 2), (uint8_t)SPRITE_BL, "row1 left border");
+    CHECK_EQ(read_cell(row1, 2), (uint8_t)SPRITE_BL_BOT, "row1 BOT-left");
     CHECK_EQ(read_cell(row1, 3), 'c', "row1 'c'");
     CHECK_EQ(read_cell(row1, 4), 'd', "row1 'd'");
-    CHECK_EQ(read_cell(row1, 5), (uint8_t)SPRITE_BR, "row1 right border");
+    CHECK_EQ(read_cell(row1, 5), (uint8_t)SPRITE_BR_BOT, "row1 BOT-right");
 }
 
 // Status update on multi-line message rewrites all rows.
@@ -810,12 +817,14 @@ static void test_multiline_status_update() {
     c.payload = msg; c.payload_n = 4;
     send_cmd(c);
 
-    // Line 0 "xy" right-aligned: BL@94, x@95, y@96, BR@97
+    // Line 0 "xy" right-aligned: BL_TOP@94, x@95, y@96, BR_TOP@97
     int row0 = HIST_ROW_START;
-    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_BL, "pre-update row0 BL rounded");
-    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "pre-update row0 BR rounded");
+    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_BL_TOP, "pre-update row0 BL_TOP");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR_TOP, "pre-update row0 BR_TOP");
 
-    // Update status to FAIL -> square borders
+    // Update status to FAIL. Multi-line fail keeps the same TOP/BOT
+    // rounded sprites; the X mark (drawn at bubble_left - 1 on row 0)
+    // is the fail signal.
     RenderCmd u;
     u.cmd = RENDER_UPDATE_STATUS; u.msg_id = 0;
     u.status = MSG_FAIL;
@@ -824,15 +833,19 @@ static void test_multiline_status_update() {
     // Bubble width = max sub-line length = 2 ("xy"). All rows use that
     // width: row 0 "xy" fills it, row 1 "z" gets one trailing space.
     // bubble_left = 97 - 2 - 1 = 94; BR at 97 for every row.
-    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_FBL, "row0 fail left border");
+    // X mark at col bubble_left - 1 = 93 on row 0 only.
+    CHECK_EQ(read_cell(row0, 93), (uint8_t)SPRITE_FAIL_X,
+             "row0 X mark left of fail bubble");
+    CHECK_EQ(read_cell(row0, 94), (uint8_t)SPRITE_BL_TOP, "row0 BL_TOP after fail");
     CHECK_EQ(read_cell(row0, 95), 'x', "row0 x after fail");
     CHECK_EQ(read_cell(row0, 96), 'y', "row0 y after fail");
-    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_FBR, "row0 fail right border");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR_TOP, "row0 BR_TOP after fail");
     int row1 = HIST_ROW_START + 1;
-    CHECK_EQ(read_cell(row1, 94), (uint8_t)SPRITE_FBL, "row1 fail left border");
+    CHECK_EQ(read_cell(row1, 93), ' ',                    "row1 no X (only row0)");
+    CHECK_EQ(read_cell(row1, 94), (uint8_t)SPRITE_BL_BOT, "row1 BL_BOT after fail");
     CHECK_EQ(read_cell(row1, 95), 'z', "row1 z after fail");
     CHECK_EQ(read_cell(row1, 96), ' ', "row1 padding after fail");
-    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_FBR, "row1 fail right border");
+    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR_BOT, "row1 BR_BOT after fail");
 }
 
 // Multi-line message landing at the end of the history ring must wrap
@@ -874,15 +887,15 @@ static void test_multiline_wraps_ring() {
     c.payload = msg; c.payload_n = 3; c.len = 3;
     send_cmd(c);
 
-    // Line 0 "a" right-aligned at row 65: BL@95, 'a'@96, BR@97.
-    CHECK_EQ(read_cell(65, 95), (uint8_t)SPRITE_BL, "row65 BL");
-    CHECK_EQ(read_cell(65, 96), 'a',                "row65 'a'");
-    CHECK_EQ(read_cell(65, 97), (uint8_t)SPRITE_BR, "row65 BR");
+    // Line 0 "a" right-aligned at row 65: BL_TOP@95, 'a'@96, BR_TOP@97.
+    CHECK_EQ(read_cell(65, 95), (uint8_t)SPRITE_BL_TOP, "row65 BL_TOP");
+    CHECK_EQ(read_cell(65, 96), 'a',                    "row65 'a'");
+    CHECK_EQ(read_cell(65, 97), (uint8_t)SPRITE_BR_TOP, "row65 BR_TOP");
 
     // Line 1 "b" MUST wrap to row 2 (HIST_ROW_START + 0).
-    CHECK_EQ(read_cell(2, 95), (uint8_t)SPRITE_BL, "wrap row2 BL");
-    CHECK_EQ(read_cell(2, 96), 'b',                "wrap row2 'b'");
-    CHECK_EQ(read_cell(2, 97), (uint8_t)SPRITE_BR, "wrap row2 BR");
+    CHECK_EQ(read_cell(2, 95), (uint8_t)SPRITE_BL_BOT, "wrap row2 BL_BOT");
+    CHECK_EQ(read_cell(2, 96), 'b',                    "wrap row2 'b'");
+    CHECK_EQ(read_cell(2, 97), (uint8_t)SPRITE_BR_BOT, "wrap row2 BR_BOT");
 
     // Row 66 and 67 must remain untouched.
     CHECK_EQ(read_cell(66, 95), ' ', "row66 col95 untouched");
@@ -933,30 +946,33 @@ static void test_multiline_overflow() {
     // Bubble width = max sub-line length = 5 (the final merged line
     // "x\ny\nz"). Every row shares that width, so the single-char
     // rows get 4 columns of trailing padding before BR.
-    // Remote left-aligned: BL@2, content@3..7, BR@8.
+    // Multi-line: row 0 uses TOP, middle rows use MID, last row uses BOT.
+    // Remote left-aligned: bubble at cols 2..8.
     for (int i = 0; i < MAX_LINES - 1; i++) {
         int row = HIST_ROW_START + i;
         char lbl[40];
-        snprintf(lbl, sizeof(lbl), "row %d BL", i);
-        CHECK_EQ(read_cell(row, 2), (uint8_t)SPRITE_BL, lbl);
+        snprintf(lbl, sizeof(lbl), "row %d L-border", i);
+        uint8_t expL = (i == 0) ? SPRITE_BL_TOP : SPRITE_BL_MID;
+        CHECK_EQ(read_cell(row, 2), expL, lbl);
         snprintf(lbl, sizeof(lbl), "row %d char", i);
         CHECK_EQ(read_cell(row, 3), (uint8_t)('a' + i), lbl);
         snprintf(lbl, sizeof(lbl), "row %d padding", i);
         CHECK_EQ(read_cell(row, 5), ' ', lbl);
-        snprintf(lbl, sizeof(lbl), "row %d BR", i);
-        CHECK_EQ(read_cell(row, 8), (uint8_t)SPRITE_BR, lbl);
+        snprintf(lbl, sizeof(lbl), "row %d R-border", i);
+        uint8_t expR = (i == 0) ? SPRITE_BR_TOP : SPRITE_BR_MID;
+        CHECK_EQ(read_cell(row, 8), expR, lbl);
     }
 
     // Row MAX_LINES-1 absorbs "<a+M-1>\n<a+M>\n<a+M+1>" -- 5 bytes
-    // (full bubble width).
+    // (full bubble width). This is the BOT row of the bubble.
     int row_last = HIST_ROW_START + MAX_LINES - 1;
-    CHECK_EQ(read_cell(row_last, 2), (uint8_t)SPRITE_BL, "row_last BL");
+    CHECK_EQ(read_cell(row_last, 2), (uint8_t)SPRITE_BL_BOT, "row_last BL_BOT");
     CHECK_EQ(read_cell(row_last, 3), (uint8_t)('a' + MAX_LINES - 1), "row_last [0]");
     CHECK_EQ(read_cell(row_last, 4), 0x0A,                            "row_last [1]");
     CHECK_EQ(read_cell(row_last, 5), (uint8_t)('a' + MAX_LINES),     "row_last [2]");
     CHECK_EQ(read_cell(row_last, 6), 0x0A,                            "row_last [3]");
     CHECK_EQ(read_cell(row_last, 7), (uint8_t)('a' + MAX_LINES + 1), "row_last [4]");
-    CHECK_EQ(read_cell(row_last, 8), (uint8_t)SPRITE_BR, "row_last BR");
+    CHECK_EQ(read_cell(row_last, 8), (uint8_t)SPRITE_BR_BOT, "row_last BR_BOT");
 
     // Row MAX_LINES is unwritten (no overflow).
     int row_off = HIST_ROW_START + MAX_LINES;
@@ -987,21 +1003,22 @@ static void test_bubble_soft_wrap_long_line() {
     c.payload = msg.data(); c.payload_n = (size_t)L; c.len = (uint16_t)L;
     send_cmd(c);
 
-    // Bubble inner width = MAX_W = 80. Remote: BL@2, content@3..82,
-    // BR@83. row0 has bytes 0..79; row1 has bytes 80..99 then padding.
+    // Bubble inner width = MAX_W = 80. Remote: borders at col 2 (TOP/BOT)
+    // and col 83, content cols 3..82. 2-row multi-line: row 0 uses TOP,
+    // row 1 uses BOT.
     int row0 = HIST_ROW_START;
     int row1 = HIST_ROW_START + 1;
-    CHECK_EQ(read_cell(row0, 2),  (uint8_t)SPRITE_BL, "wrap row0 BL");
-    CHECK_EQ(read_cell(row0, 3),  msg[0],            "wrap row0 first byte");
-    CHECK_EQ(read_cell(row0, 82), msg[79],           "wrap row0 last byte");
-    CHECK_EQ(read_cell(row0, 83), (uint8_t)SPRITE_BR, "wrap row0 BR");
+    CHECK_EQ(read_cell(row0, 2),  (uint8_t)SPRITE_BL_TOP, "wrap row0 BL_TOP");
+    CHECK_EQ(read_cell(row0, 3),  msg[0],                 "wrap row0 first byte");
+    CHECK_EQ(read_cell(row0, 82), msg[79],                "wrap row0 last byte");
+    CHECK_EQ(read_cell(row0, 83), (uint8_t)SPRITE_BR_TOP, "wrap row0 BR_TOP");
 
-    CHECK_EQ(read_cell(row1, 2),  (uint8_t)SPRITE_BL, "wrap row1 BL");
-    CHECK_EQ(read_cell(row1, 3),  msg[80],           "wrap row1 first byte");
-    CHECK_EQ(read_cell(row1, 22), msg[99],           "wrap row1 last data byte");
-    CHECK_EQ(read_cell(row1, 23), ' ',               "wrap row1 first padding");
-    CHECK_EQ(read_cell(row1, 82), ' ',               "wrap row1 padding before BR");
-    CHECK_EQ(read_cell(row1, 83), (uint8_t)SPRITE_BR, "wrap row1 BR");
+    CHECK_EQ(read_cell(row1, 2),  (uint8_t)SPRITE_BL_BOT, "wrap row1 BL_BOT");
+    CHECK_EQ(read_cell(row1, 3),  msg[80],                "wrap row1 first byte");
+    CHECK_EQ(read_cell(row1, 22), msg[99],                "wrap row1 last data byte");
+    CHECK_EQ(read_cell(row1, 23), ' ',                    "wrap row1 first padding");
+    CHECK_EQ(read_cell(row1, 82), ' ',                    "wrap row1 padding before BR");
+    CHECK_EQ(read_cell(row1, 83), (uint8_t)SPRITE_BR_BOT, "wrap row1 BR_BOT");
 
     // hist_wr_row advanced by 2 visual rows.
     CHECK_EQ(dut->hist_wr_row_obs, 2, "wrap advances head by 2");
@@ -1023,27 +1040,27 @@ static void test_bubble_multiline_aligned() {
     send_cmd(c);
 
     // Local right-aligned: bubble_right=97, width=4 -> bubble_left=92.
-    // BL at col 92, BR at col 97 on every row of the message.
+    // 3-row bubble: row 0 = TOP, row 1 = MID, row 2 = BOT.
     int row0 = HIST_ROW_START;
     int row1 = HIST_ROW_START + 1;
     int row2 = HIST_ROW_START + 2;
-    CHECK_EQ(read_cell(row0, 92), (uint8_t)SPRITE_BL, "row0 BL");
-    CHECK_EQ(read_cell(row0, 93), 'a',                "row0 'a'");
-    CHECK_EQ(read_cell(row0, 94), 'b',                "row0 'b'");
-    CHECK_EQ(read_cell(row0, 95), ' ',                "row0 pad1");
-    CHECK_EQ(read_cell(row0, 96), ' ',                "row0 pad2");
-    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "row0 BR");
+    CHECK_EQ(read_cell(row0, 92), (uint8_t)SPRITE_BL_TOP, "row0 BL_TOP");
+    CHECK_EQ(read_cell(row0, 93), 'a',                    "row0 'a'");
+    CHECK_EQ(read_cell(row0, 94), 'b',                    "row0 'b'");
+    CHECK_EQ(read_cell(row0, 95), ' ',                    "row0 pad1");
+    CHECK_EQ(read_cell(row0, 96), ' ',                    "row0 pad2");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR_TOP, "row0 BR_TOP");
 
-    CHECK_EQ(read_cell(row1, 92), (uint8_t)SPRITE_BL, "row1 BL");
-    CHECK_EQ(read_cell(row1, 93), 'w',                "row1 'w'");
-    CHECK_EQ(read_cell(row1, 96), 'z',                "row1 'z'");
-    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR, "row1 BR");
+    CHECK_EQ(read_cell(row1, 92), (uint8_t)SPRITE_BL_MID, "row1 BL_MID");
+    CHECK_EQ(read_cell(row1, 93), 'w',                    "row1 'w'");
+    CHECK_EQ(read_cell(row1, 96), 'z',                    "row1 'z'");
+    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR_MID, "row1 BR_MID");
 
-    CHECK_EQ(read_cell(row2, 92), (uint8_t)SPRITE_BL, "row2 BL");
-    CHECK_EQ(read_cell(row2, 93), 'c',                "row2 'c'");
-    CHECK_EQ(read_cell(row2, 94), ' ',                "row2 pad1");
-    CHECK_EQ(read_cell(row2, 96), ' ',                "row2 pad3");
-    CHECK_EQ(read_cell(row2, 97), (uint8_t)SPRITE_BR, "row2 BR");
+    CHECK_EQ(read_cell(row2, 92), (uint8_t)SPRITE_BL_BOT, "row2 BL_BOT");
+    CHECK_EQ(read_cell(row2, 93), 'c',                    "row2 'c'");
+    CHECK_EQ(read_cell(row2, 94), ' ',                    "row2 pad1");
+    CHECK_EQ(read_cell(row2, 96), ' ',                    "row2 pad3");
+    CHECK_EQ(read_cell(row2, 97), (uint8_t)SPRITE_BR_BOT, "row2 BR_BOT");
 }
 
 // P3.1 input area: Shift+Enter inserts a 0x0A byte; the input region
@@ -1476,18 +1493,25 @@ static void test_long_multiline_payload() {
     c.payload = msg; c.payload_n = (size_t)TOTAL; c.len = (uint16_t)TOTAL;
     send_cmd(c);
 
-    // Each row N: remote bubble BL@2, payload[0]@3, ..., payload[49]@52, BR@53.
+    // Each row N: remote bubble border@2, payload@3..2+LINE_W, border@3+LINE_W.
+    // Multi-line: row 0 = TOP, rows 1..N-2 = MID, row N-1 = BOT.
     for (int ln = 0; ln < N_LINES; ln++) {
         int row = HIST_ROW_START + ln;
         char lbl[40];
-        snprintf(lbl, sizeof(lbl), "long row %d BL", ln);
-        CHECK_EQ(read_cell(row, 2),  (uint8_t)SPRITE_BL, lbl);
+        uint8_t expL = (ln == 0) ? SPRITE_BL_TOP
+                       : (ln == N_LINES - 1) ? SPRITE_BL_BOT
+                       : SPRITE_BL_MID;
+        uint8_t expR = (ln == 0) ? SPRITE_BR_TOP
+                       : (ln == N_LINES - 1) ? SPRITE_BR_BOT
+                       : SPRITE_BR_MID;
+        snprintf(lbl, sizeof(lbl), "long row %d L-border", ln);
+        CHECK_EQ(read_cell(row, 2),  expL, lbl);
         snprintf(lbl, sizeof(lbl), "long row %d first", ln);
         CHECK_EQ(read_cell(row, 3),  (uint8_t)('a' + ln), lbl);
         snprintf(lbl, sizeof(lbl), "long row %d last", ln);
         CHECK_EQ(read_cell(row, 2 + LINE_W), (uint8_t)('a' + ln), lbl);
-        snprintf(lbl, sizeof(lbl), "long row %d BR", ln);
-        CHECK_EQ(read_cell(row, 3 + LINE_W), (uint8_t)SPRITE_BR, lbl);
+        snprintf(lbl, sizeof(lbl), "long row %d R-border", ln);
+        CHECK_EQ(read_cell(row, 3 + LINE_W), expR, lbl);
     }
 
     // ring head advanced by 5

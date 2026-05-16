@@ -83,6 +83,18 @@ package fe_pkg;
     localparam byte_t SPRITE_FBL     = 8'hF6;  // fail left border (square)
     localparam byte_t SPRITE_FBR     = 8'hF7;  // fail right border (square)
 
+    // Multi-line bubble border sprites: top-of-cell arc + vertical
+    // exiting the bottom (SPRITE_*_TOP); pure vertical (SPRITE_*_MID);
+    // vertical entering from top + bottom arc (SPRITE_*_BOT). Stacking
+    // these in column-aligned cells across n_lines rows reproduces the
+    // tall (...) bracket -- visually one box, no extra rendered rows.
+    localparam byte_t SPRITE_BL_TOP  = 8'hF8;
+    localparam byte_t SPRITE_BR_TOP  = 8'hF9;
+    localparam byte_t SPRITE_BL_BOT  = 8'hFA;
+    localparam byte_t SPRITE_BR_BOT  = 8'hFB;
+    localparam byte_t SPRITE_BL_MID  = 8'hFC;
+    localparam byte_t SPRITE_BR_MID  = 8'hFD;
+
     // Standalone status icons. 0x0A is the "return arrow" glyph -- it
     // gets rendered at the end of input lines that are terminated by
     // a real 0x0A byte so the user can see where Shift+Enter landed.
