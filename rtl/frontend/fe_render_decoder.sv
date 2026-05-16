@@ -113,14 +113,25 @@ module fe_render_decoder
     logic [1:0]                       status_q;
     logic [MAX_MSG_LEN*8-1:0]         payload_q;
 
-    // Multi-line parsing state
-    localparam int MAX_LINES  = 8;
-    localparam int LINE_CNT_W = $clog2(MAX_LINES);
+    // Multi-line parsing state.
+    // LINE_CNT_W must hold the value MAX_LINES itself (not just MAX_LINES-1)
+    // so that n_lines_q can latch "saturated at MAX_LINES" after the parse
+    // loop without wrapping to 0. LINE_IDX_BITS sizes the array index port
+    // (always one bit narrower than LINE_CNT_W when MAX_LINES is a power of
+    // two, so we slice cur_line_q below for array reads).
+    localparam int MAX_LINES     = 8;
+    localparam int LINE_CNT_W    = $clog2(MAX_LINES + 1);
+    localparam int LINE_SEL_W    = (MAX_LINES <= 1) ? 1 : $clog2(MAX_LINES);
 
     logic [LINE_CNT_W-1:0]            cur_line_q;
     logic [LINE_CNT_W-1:0]            n_lines_q;
     logic [LINE_IDX_W-1:0]            ml_offset_q [MAX_LINES];
     msg_len_t                          ml_len_q    [MAX_LINES];
+
+    // cur_line_q is bounded by FSM to 0..MAX_LINES-1, so it is safe to
+    // address the ml_*_q arrays with its low LINE_SEL_W bits.
+    logic [LINE_SEL_W-1:0]            cur_line_sel;
+    assign cur_line_sel = cur_line_q[LINE_SEL_W-1:0];
 
     // -----------------------------------------------------------------
     // Persistent UI state
@@ -215,7 +226,7 @@ module fe_render_decoder
     msg_len_t          cur_sub_len;
 
     assign show_fail = (side_q == 2'(MSG_LOCAL)) && (status_q == 2'(MSG_FAIL));
-    assign cur_sub_len = ml_len_q[cur_line_q];
+    assign cur_sub_len = ml_len_q[cur_line_sel];
 
     always_comb begin
         if (side_q == 2'(MSG_REMOTE)) begin
@@ -243,7 +254,7 @@ module fe_render_decoder
         payload_idx    = LINE_IDX_W'(col_cnt_q - payload_start);
         payload_in_range = (col_cnt_q >= payload_start)
                            && (LEN_WIDTH'(col_cnt_q - payload_start) < cur_sub_len);
-        abs_idx = ml_offset_q[cur_line_q] + payload_idx;
+        abs_idx = ml_offset_q[cur_line_sel] + payload_idx;
 
         // titlebar
         if (col_cnt_q < FE_COL_W'(TITLE_PREFIX_LEN))
@@ -556,7 +567,13 @@ module fe_render_decoder
                         msg_id_side_q[be_render_msg_id]    <= be_render_side;
                         msg_id_payload_q[be_render_msg_id] <= be_render_payload;
                         msg_id_len_q[be_render_msg_id]     <= be_render_len;
-                        // Multi-line parsing
+                        // Multi-line parsing. Cap at MAX_LINES so we
+                        // never write ml_*_q[MAX_LINES..] (OOB) and never
+                        // truncate n_lines_q via narrow-cast wrap. Bytes
+                        // after the MAX_LINES-th newline (including any
+                        // further 0x0A bytes) accumulate into the final
+                        // line's length -- they will render with 0x0A
+                        // glyphs (returned-arrow) in the bubble.
                         begin
                             int n_lines, line_start;
                             n_lines = 1;
@@ -564,7 +581,8 @@ module fe_render_decoder
                             line_start = 0;
                             for (int i = 0; i < MAX_MSG_LEN; i++) begin
                                 if (i < int'(be_render_len)
-                                    && be_render_payload[i*8 +: 8] == 8'h0A) begin
+                                    && be_render_payload[i*8 +: 8] == 8'h0A
+                                    && n_lines < MAX_LINES) begin
                                     ml_len_q[n_lines - 1]
                                         <= msg_len_t'(i - line_start);
                                     ml_offset_q[n_lines]
@@ -590,7 +608,8 @@ module fe_render_decoder
                                                 msg_id_row_q[be_render_msg_id]);
                             side_q        <= msg_id_side_q[be_render_msg_id];
                             payload_q     <= msg_id_payload_q[be_render_msg_id];
-                            // Re-parse multi-line boundaries
+                            // Re-parse multi-line boundaries. Same
+                            // MAX_LINES cap as the APPEND path.
                             begin
                                 int n_lines, line_start;
                                 n_lines = 1;
@@ -599,7 +618,8 @@ module fe_render_decoder
                                 for (int i = 0; i < MAX_MSG_LEN; i++) begin
                                     if (i < int'(msg_id_len_q[be_render_msg_id])
                                         && msg_id_payload_q[be_render_msg_id][i*8 +: 8]
-                                           == 8'h0A) begin
+                                           == 8'h0A
+                                        && n_lines < MAX_LINES) begin
                                         ml_len_q[n_lines - 1]
                                             <= msg_len_t'(i - line_start);
                                         ml_offset_q[n_lines]
