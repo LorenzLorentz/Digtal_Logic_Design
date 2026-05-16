@@ -82,7 +82,13 @@ module fe_render_decoder
     // for fe_scan: ring head + scroll position so it can map screen
     // rows to text_ram rows without snooping internal state.
     output logic [HIST_W-1:0]          hist_wr_row_obs,
-    output logic [SCROLL_W-1:0]        scroll_offset_obs
+    output logic [SCROLL_W-1:0]        scroll_offset_obs,
+
+    // for fe_scan: 2-D cursor position within the multi-row input
+    // window, plus the current input scroll offset.
+    output logic [INPUT_LINE_W-1:0]    input_cursor_row_obs,
+    output msg_len_t                   input_cursor_col_obs,
+    output logic [INPUT_SCROLL_W-1:0]  input_scroll_offset_obs
 );
 
     // -----------------------------------------------------------------
@@ -92,10 +98,14 @@ module fe_render_decoder
         S_IDLE          = 4'd0,
         S_HIST_CLEAR    = 4'd1,
         S_TITLEBAR      = 4'd2,
-        S_INPUT_REDRAW  = 4'd3,
-        S_HIST_WRITE    = 4'd4,
-        S_UPDATE_STATUS = 4'd5,
-        S_INPUT_EDIT    = 4'd6
+        // Input edit pipeline: PARSE re-scans input_line_q for newlines
+        // (one cycle), then REDRAW sweeps every cell of the multi-row
+        // input window. INSERT/DELETE/UPDATE_INPUT_LINE/MOVE_CURSOR all
+        // funnel through this.
+        S_INPUT_PARSE   = 4'd3,
+        S_INPUT_REDRAW  = 4'd4,
+        S_HIST_WRITE    = 4'd5,
+        S_UPDATE_STATUS = 4'd6
     } state_e;
 
     state_e state_q, state_d;
@@ -103,11 +113,10 @@ module fe_render_decoder
     // -----------------------------------------------------------------
     // Counters / latched-on-accept registers
     // -----------------------------------------------------------------
-    logic [FE_COL_W-1:0]                 col_cnt_q;
+    logic [FE_COL_W-1:0]              col_cnt_q;
     logic [HIST_W-1:0]                row_cnt_q;
-    logic [FE_COL_W-1:0]                 pos_start_q;   // S_INPUT_EDIT start col
-    logic [FE_COL_W-1:0]                 pos_end_q;     // S_INPUT_EDIT last col (incl)
-    logic [FE_ROW_W-1:0]                 target_row_q;  // S_HIST_WRITE / S_UPDATE_STATUS
+    logic [INPUT_LINE_W-1:0]          input_row_cnt_q;  // S_INPUT_REDRAW
+    logic [FE_ROW_W-1:0]              target_row_q;    // S_HIST_WRITE / S_UPDATE_STATUS
 
     logic [1:0]                       side_q;
     logic [1:0]                       status_q;
@@ -146,6 +155,17 @@ module fe_render_decoder
     byte_t                            input_line_q [MAX_LINE_LEN];
     msg_len_t                         input_len_q;
     msg_len_t                         input_cursor_q;
+
+    // Input-side multi-line state. Parsed from input_line_q on every
+    // accept that modifies the buffer (INSERT / DELETE / UPDATE_INPUT_LINE)
+    // or the cursor (MOVE_CURSOR). Cursor row/col are 2D coordinates of
+    // input_cursor_q so the scan side can highlight the cursor cell.
+    logic [LINE_CNT_W-1:0]            input_n_lines_q;
+    logic [LINE_IDX_W-1:0]            input_ml_offset_q [MAX_INPUT_LINES];
+    msg_len_t                         input_ml_len_q    [MAX_INPUT_LINES];
+    logic [INPUT_LINE_W-1:0]          input_cursor_row_q;
+    msg_len_t                         input_cursor_col_q;
+    logic [INPUT_SCROLL_W-1:0]        input_scroll_offset_q;
 
     logic [HIST_W-1:0]                hist_wr_row_q;
     logic [SCROLL_W-1:0]              scroll_offset_q;
@@ -285,15 +305,28 @@ module fe_render_decoder
         else
             hist_cell = " ";
 
-        // input row. col_cnt_q only sweeps 0..FE_N_COLS-1=127, so even
-        // with MAX_LINE_LEN >= 128 only the first 128 bytes are visible
-        // on the single-row input bar -- multi-row input is P3.
-        if (col_cnt_q < FE_COL_W'(INPUT_PREFIX_LEN))
-            input_cell = input_prefix_byte(int'(col_cnt_q));
-        else if (LEN_WIDTH'(input_idx) < input_len_q)
-            input_cell = input_line_q[LINE_IDX_W'(input_idx)];
-        else
+        // input row. col_cnt_q only sweeps 0..FE_N_COLS-1=127. Row 0 of
+        // the input area carries the "> " prefix; rows 1..n_lines-1
+        // start at col 0. Rows past n_lines are blanked so a buffer
+        // that shrunk (e.g. Enter-commit) doesn't leave stale content.
+        if (LINE_CNT_W'(input_row_cnt_q) >= input_n_lines_q) begin
             input_cell = " ";
+        end else if (input_row_cnt_q == '0) begin
+            if (col_cnt_q < FE_COL_W'(INPUT_PREFIX_LEN))
+                input_cell = input_prefix_byte(int'(col_cnt_q));
+            else if (LEN_WIDTH'(input_idx) < input_ml_len_q[0])
+                input_cell = input_line_q[LINE_IDX_W'(input_idx)];
+            else
+                input_cell = " ";
+        end else begin
+            // Subsequent input lines: no prefix, content starts at col 0
+            if (LEN_WIDTH'(col_cnt_q) < input_ml_len_q[input_row_cnt_q])
+                input_cell = input_line_q[
+                    input_ml_offset_q[input_row_cnt_q]
+                    + LINE_IDX_W'(col_cnt_q)];
+            else
+                input_cell = " ";
+        end
     end
 
     // -----------------------------------------------------------------
@@ -317,7 +350,8 @@ module fe_render_decoder
             end
             S_INPUT_REDRAW: begin
                 wr_en   = 1'b1;
-                wr_row  = FE_ROW_W'(INPUT_ROW);
+                wr_row  = FE_ROW_W'(INPUT_ROW_START)
+                          + FE_ROW_W'(input_row_cnt_q);
                 wr_code = input_cell;
             end
             S_HIST_WRITE: begin
@@ -330,11 +364,8 @@ module fe_render_decoder
                 wr_row  = target_row_q;
                 wr_code = hist_cell;
             end
-            S_INPUT_EDIT: begin
-                wr_en   = 1'b1;
-                wr_row  = FE_ROW_W'(INPUT_ROW);
-                wr_code = input_cell;
-            end
+            // S_INPUT_PARSE writes no cells -- it just runs the
+            // newline-scan and falls through to S_INPUT_REDRAW.
             default: ;
         endcase
     end
@@ -357,7 +388,6 @@ module fe_render_decoder
                     unique case (render_cmd_e'(be_render_cmd))
                         RENDER_REDRAW_ALL,
                         RENDER_CLEAR_SCREEN,
-                        RENDER_MOVE_CURSOR,
                         RENDER_SCROLL_UP,
                         RENDER_SCROLL_DOWN:
                             // single-cycle: just latch, stay idle
@@ -379,12 +409,15 @@ module fe_render_decoder
                             state_d = msg_id_valid_q[be_render_msg_id]
                                       ? S_UPDATE_STATUS : S_IDLE;
 
-                        RENDER_UPDATE_INPUT_LINE:
-                            state_d = S_INPUT_REDRAW;
-
+                        // Any input-related update funnels through the
+                        // parse-then-redraw pipeline so newline boundaries
+                        // and cursor row/col are recomputed and the
+                        // entire input region is refreshed in one go.
+                        RENDER_UPDATE_INPUT_LINE,
                         RENDER_INSERT_AT_CURSOR,
-                        RENDER_DELETE_AT_CURSOR:
-                            state_d = S_INPUT_EDIT;
+                        RENDER_DELETE_AT_CURSOR,
+                        RENDER_MOVE_CURSOR:
+                            state_d = S_INPUT_PARSE;
 
                         default: state_d = S_IDLE;
                     endcase
@@ -398,10 +431,23 @@ module fe_render_decoder
 
             S_TITLEBAR: begin
                 if (at_last_col)
-                    state_d = chain_input_q ? S_INPUT_REDRAW : S_IDLE;
+                    state_d = chain_input_q ? S_INPUT_PARSE : S_IDLE;
             end
 
-            S_INPUT_REDRAW:  if (at_last_col)             state_d = S_IDLE;
+            // S_INPUT_PARSE is a single-cycle parse-of-input_line_q step
+            // that always falls through to the full multi-row redraw.
+            S_INPUT_PARSE: state_d = S_INPUT_REDRAW;
+
+            S_INPUT_REDRAW: begin
+                if (at_last_col) begin
+                    if (LINE_CNT_W'(input_row_cnt_q) + LINE_CNT_W'(1)
+                        < LINE_CNT_W'(MAX_INPUT_LINES))
+                        state_d = S_INPUT_REDRAW;
+                    else
+                        state_d = S_IDLE;
+                end
+            end
+
             S_HIST_WRITE: begin
                 if (at_last_col) begin
                     if (cur_line_q + 1 < n_lines_q)
@@ -418,7 +464,6 @@ module fe_render_decoder
                         state_d = S_IDLE;
                 end
             end
-            S_INPUT_EDIT:    if (col_cnt_q == pos_end_q)  state_d = S_IDLE;
 
             default: state_d = S_IDLE;
         endcase
@@ -435,8 +480,7 @@ module fe_render_decoder
             state_q           <= S_IDLE;
             col_cnt_q         <= '0;
             row_cnt_q         <= '0;
-            pos_start_q       <= '0;
-            pos_end_q         <= '0;
+            input_row_cnt_q   <= '0;
             target_row_q      <= '0;
             side_q            <= 2'(MSG_LOCAL);
             status_q          <= 2'(MSG_PENDING);
@@ -456,6 +500,14 @@ module fe_render_decoder
             input_cursor_q    <= '0;
             for (int i = 0; i < MAX_LINE_LEN; i++)
                 input_line_q[i] <= 8'h20;
+            input_n_lines_q       <= LINE_CNT_W'(1);
+            for (int i = 0; i < MAX_INPUT_LINES; i++) begin
+                input_ml_offset_q[i] <= '0;
+                input_ml_len_q[i]    <= '0;
+            end
+            input_cursor_row_q    <= '0;
+            input_cursor_col_q    <= '0;
+            input_scroll_offset_q <= '0;
 
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
@@ -478,11 +530,9 @@ module fe_render_decoder
             // Counter advancement (col_cnt_q / row_cnt_q)
             // -----------------------------------------------------------
             if (entering_new_state) begin
-                unique case (state_d)
-                    S_INPUT_EDIT: col_cnt_q <= pos_start_q;
-                    default:      col_cnt_q <= '0;
-                endcase
-                if (state_d == S_HIST_CLEAR) row_cnt_q <= '0;
+                col_cnt_q <= '0;
+                if (state_d == S_HIST_CLEAR)    row_cnt_q       <= '0;
+                if (state_d == S_INPUT_REDRAW)  input_row_cnt_q <= '0;
             end else begin
                 unique case (state_q)
                     S_HIST_CLEAR: begin
@@ -493,10 +543,22 @@ module fe_render_decoder
                             col_cnt_q <= col_cnt_q + 1'b1;
                         end
                     end
-                    S_TITLEBAR,
-                    S_INPUT_REDRAW: begin
+                    S_TITLEBAR: begin
                         if (col_cnt_q != FE_COL_W'(FE_N_COLS-1))
                             col_cnt_q <= col_cnt_q + 1'b1;
+                    end
+                    S_INPUT_REDRAW: begin
+                        if (col_cnt_q == FE_COL_W'(FE_N_COLS-1)) begin
+                            // Advance to the next input row (we'll stop
+                            // before MAX_INPUT_LINES via state_d).
+                            if (LINE_CNT_W'(input_row_cnt_q) + LINE_CNT_W'(1)
+                                < LINE_CNT_W'(MAX_INPUT_LINES)) begin
+                                col_cnt_q       <= '0;
+                                input_row_cnt_q <= input_row_cnt_q + 1'b1;
+                            end
+                        end else begin
+                            col_cnt_q <= col_cnt_q + 1'b1;
+                        end
                     end
                     S_HIST_WRITE,
                     S_UPDATE_STATUS: begin
@@ -517,10 +579,6 @@ module fe_render_decoder
                         end else begin
                             col_cnt_q <= col_cnt_q + 1'b1;
                         end
-                    end
-                    S_INPUT_EDIT: begin
-                        if (col_cnt_q != pos_end_q)
-                            col_cnt_q <= col_cnt_q + 1'b1;
                     end
                     default: ;
                 endcase
@@ -682,14 +740,6 @@ module fe_render_decoder
                         end
                         input_len_q    <= input_len_q + LEN_WIDTH'(1);
                         input_cursor_q <= be_render_cursor_pos;
-
-                        // Redraw cells from (insert_pos) through
-                        // (old_input_len_q), inclusive, in the input row.
-                        pos_start_q <= FE_COL_W'(INPUT_PREFIX_LEN)
-                                       + FE_COL_W'(be_render_cursor_pos)
-                                       - FE_COL_W'(1);
-                        pos_end_q   <= FE_COL_W'(INPUT_PREFIX_LEN)
-                                       + FE_COL_W'(input_len_q);
                     end
 
                     RENDER_DELETE_AT_CURSOR: begin
@@ -709,12 +759,6 @@ module fe_render_decoder
 
                         input_len_q    <= input_len_q - LEN_WIDTH'(1);
                         input_cursor_q <= be_render_cursor_pos;
-
-                        pos_start_q <= FE_COL_W'(INPUT_PREFIX_LEN)
-                                       + FE_COL_W'(be_render_cursor_pos);
-                        pos_end_q   <= FE_COL_W'(INPUT_PREFIX_LEN)
-                                       + FE_COL_W'(input_len_q)
-                                       - FE_COL_W'(1);
                     end
 
                     RENDER_MOVE_CURSOR: begin
@@ -740,21 +784,65 @@ module fe_render_decoder
             // -----------------------------------------------------------
             if (state_q == S_HIST_CLEAR && state_d == S_TITLEBAR)
                 chain_titlebar_q <= 1'b0;
-            if (state_q == S_TITLEBAR && state_d == S_INPUT_REDRAW)
+            if (state_q == S_TITLEBAR && state_d == S_INPUT_PARSE)
                 chain_input_q <= 1'b0;
+
+            // -----------------------------------------------------------
+            // S_INPUT_PARSE: with input_line_q / input_len_q / input_cursor_q
+            // now reflecting the post-accept state, walk the buffer to find
+            // newline boundaries, line lengths, and the 2-D cursor address.
+            // Same MAX_INPUT_LINES cap behaviour as the bubble parser.
+            // -----------------------------------------------------------
+            if (state_q == S_INPUT_PARSE) begin
+                int n_lines, line_start, cur_pos;
+                logic [INPUT_LINE_W-1:0] cursor_row;
+                msg_len_t                cursor_col;
+
+                n_lines    = 1;
+                line_start = 0;
+                input_ml_offset_q[0] <= '0;
+                cur_pos    = int'(input_cursor_q);
+                cursor_row = '0;
+                cursor_col = msg_len_t'(cur_pos);
+
+                for (int i = 0; i < MAX_LINE_LEN; i++) begin
+                    if (i < int'(input_len_q)
+                        && input_line_q[i] == 8'h0A
+                        && n_lines < MAX_INPUT_LINES) begin
+                        input_ml_len_q[n_lines - 1]
+                            <= msg_len_t'(i - line_start);
+                        input_ml_offset_q[n_lines]
+                            <= LINE_IDX_W'(i + 1);
+                        if (cur_pos > i) begin
+                            cursor_row = INPUT_LINE_W'(n_lines);
+                            cursor_col = msg_len_t'(cur_pos - (i + 1));
+                        end
+                        n_lines    = n_lines + 1;
+                        line_start = i + 1;
+                    end
+                end
+                input_ml_len_q[n_lines - 1]
+                    <= msg_len_t'(int'(input_len_q) - line_start);
+                input_n_lines_q    <= LINE_CNT_W'(n_lines);
+                input_cursor_row_q <= cursor_row;
+                input_cursor_col_q <= cursor_col;
+            end
         end
     end
 
     // -----------------------------------------------------------------
     // Observability
     // -----------------------------------------------------------------
-    assign conn_state_obs    = conn_state_curr_q;
-    assign input_len_obs     = input_len_q;
-    assign input_cursor_obs  = input_cursor_q;
-    assign peer_name_obs     = peer_name_q;
-    assign peer_name_len_obs = peer_name_len_q;
-    assign hist_wr_row_obs   = hist_wr_row_q;
-    assign scroll_offset_obs = scroll_offset_q;
+    assign conn_state_obs           = conn_state_curr_q;
+    assign input_len_obs            = input_len_q;
+    assign input_cursor_obs         = input_cursor_q;
+    assign peer_name_obs            = peer_name_q;
+    assign peer_name_len_obs        = peer_name_len_q;
+    assign hist_wr_row_obs          = hist_wr_row_q;
+    assign scroll_offset_obs        = scroll_offset_q;
+    assign input_cursor_row_obs     = input_cursor_row_q;
+    assign input_cursor_col_obs     = input_cursor_col_q;
+    assign input_scroll_offset_obs  = input_scroll_offset_q;
 
 endmodule
 

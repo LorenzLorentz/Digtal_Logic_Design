@@ -19,6 +19,7 @@
 
 module chat_top_pair
     import chat_pkg::*;
+    import fe_pkg::*;
 #(
     parameter int CLK_FREQ_HZ    = 160,
     parameter int BAUD           = 10,
@@ -205,8 +206,11 @@ module chat_top_pair
     msg_len_t                                    a_fe_peer_name_len;
     logic [7:0]                                  a_video_red, a_video_green, a_video_blue;
     logic                                        a_video_hsync, a_video_vsync, a_video_de;
-    logic [5:0]                                  a_fe_hist_wr_row;
-    logic [4:0]                                  a_fe_scroll_offset;
+    logic [HIST_W-1:0]                           a_fe_hist_wr_row;
+    logic [SCROLL_W-1:0]                         a_fe_scroll_offset;
+    logic [INPUT_LINE_W-1:0]                     a_fe_input_cursor_row;
+    msg_len_t                                    a_fe_input_cursor_col;
+    logic [INPUT_SCROLL_W-1:0]                   a_fe_input_scroll_offset;
     /* verilator lint_on UNUSEDSIGNAL */
     fe_top u_a_fe (
         .clk                     (clk),
@@ -240,7 +244,10 @@ module chat_top_pair
         .peer_name_obs           (a_fe_peer_name),
         .peer_name_len_obs       (a_fe_peer_name_len),
         .hist_wr_row_obs         (a_fe_hist_wr_row),
-        .scroll_offset_obs       (a_fe_scroll_offset)
+        .scroll_offset_obs       (a_fe_scroll_offset),
+        .input_cursor_row_obs    (a_fe_input_cursor_row),
+        .input_cursor_col_obs    (a_fe_input_cursor_col),
+        .input_scroll_offset_obs (a_fe_input_scroll_offset)
     );
 
     assign a_peer_name     = a_be_render_peer_name;
@@ -373,8 +380,11 @@ module chat_top_pair
     msg_len_t                                    b_fe_peer_name_len;
     logic [7:0]                                  b_video_red, b_video_green, b_video_blue;
     logic                                        b_video_hsync, b_video_vsync, b_video_de;
-    logic [5:0]                                  b_fe_hist_wr_row;
-    logic [4:0]                                  b_fe_scroll_offset;
+    logic [HIST_W-1:0]                           b_fe_hist_wr_row;
+    logic [SCROLL_W-1:0]                         b_fe_scroll_offset;
+    logic [INPUT_LINE_W-1:0]                     b_fe_input_cursor_row;
+    msg_len_t                                    b_fe_input_cursor_col;
+    logic [INPUT_SCROLL_W-1:0]                   b_fe_input_scroll_offset;
     /* verilator lint_on UNUSEDSIGNAL */
     fe_top u_b_fe (
         .clk                     (clk),
@@ -408,7 +418,10 @@ module chat_top_pair
         .peer_name_obs           (b_fe_peer_name),
         .peer_name_len_obs       (b_fe_peer_name_len),
         .hist_wr_row_obs         (b_fe_hist_wr_row),
-        .scroll_offset_obs       (b_fe_scroll_offset)
+        .scroll_offset_obs       (b_fe_scroll_offset),
+        .input_cursor_row_obs    (b_fe_input_cursor_row),
+        .input_cursor_col_obs    (b_fe_input_cursor_col),
+        .input_scroll_offset_obs (b_fe_input_scroll_offset)
     );
 
     assign b_peer_name     = b_be_render_peer_name;

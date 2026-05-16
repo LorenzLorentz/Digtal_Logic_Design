@@ -25,6 +25,7 @@
 
 module chat_top
     import chat_pkg::*;
+    import fe_pkg::*;
 #(
     // ---- Identity (override per board) ----
     parameter int MY_NAME_LEN = 5,
@@ -240,8 +241,11 @@ module chat_top
     msg_len_t                                    fe_input_cursor_obs;
     logic [MAX_NAME_LEN*8-1:0]                   fe_peer_name_obs;
     msg_len_t                                    fe_peer_name_len_obs;
-    logic [5:0]                                  fe_hist_wr_row_obs;
-    logic [4:0]                                  fe_scroll_offset_obs;
+    logic [HIST_W-1:0]                           fe_hist_wr_row_obs;
+    logic [SCROLL_W-1:0]                         fe_scroll_offset_obs;
+    logic [INPUT_LINE_W-1:0]                     fe_input_cursor_row_obs;
+    msg_len_t                                    fe_input_cursor_col_obs;
+    logic [INPUT_SCROLL_W-1:0]                   fe_input_scroll_offset_obs;
     /* verilator lint_on UNUSEDSIGNAL */
 
     fe_top u_fe (
@@ -276,7 +280,10 @@ module chat_top
         .peer_name_obs           (fe_peer_name_obs),
         .peer_name_len_obs       (fe_peer_name_len_obs),
         .hist_wr_row_obs         (fe_hist_wr_row_obs),
-        .scroll_offset_obs       (fe_scroll_offset_obs)
+        .scroll_offset_obs       (fe_scroll_offset_obs),
+        .input_cursor_row_obs    (fe_input_cursor_row_obs),
+        .input_cursor_col_obs    (fe_input_cursor_col_obs),
+        .input_scroll_offset_obs (fe_input_scroll_offset_obs)
     );
 
 endmodule

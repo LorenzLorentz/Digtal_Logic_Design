@@ -69,7 +69,10 @@ module fe_top
     output logic [MAX_NAME_LEN*8-1:0]  peer_name_obs,
     output msg_len_t                   peer_name_len_obs,
     output logic [HIST_W-1:0]          hist_wr_row_obs,
-    output logic [SCROLL_W-1:0]        scroll_offset_obs
+    output logic [SCROLL_W-1:0]        scroll_offset_obs,
+    output logic [INPUT_LINE_W-1:0]    input_cursor_row_obs,
+    output msg_len_t                   input_cursor_col_obs,
+    output logic [INPUT_SCROLL_W-1:0]  input_scroll_offset_obs
 );
 
     // -----------------------------------------------------------------
@@ -112,7 +115,10 @@ module fe_top
         .peer_name_obs          (peer_name_obs),
         .peer_name_len_obs      (peer_name_len_obs),
         .hist_wr_row_obs        (hist_wr_row_dec),
-        .scroll_offset_obs      (scroll_offset_dec)
+        .scroll_offset_obs      (scroll_offset_dec),
+        .input_cursor_row_obs   (input_cursor_row_obs),
+        .input_cursor_col_obs   (input_cursor_col_obs),
+        .input_scroll_offset_obs(input_scroll_offset_obs)
     );
 
     // -----------------------------------------------------------------
@@ -156,6 +162,9 @@ module fe_top
     msg_len_t                input_cursor_pix;
     logic [HIST_W-1:0]       hist_wr_row_pix;
     logic [SCROLL_W-1:0]     scroll_offset_pix;
+    logic [INPUT_LINE_W-1:0] input_cursor_row_pix;
+    msg_len_t                input_cursor_col_pix;
+    logic [INPUT_SCROLL_W-1:0] input_scroll_offset_pix;
 
     sync_2ff #(.RST_VAL(1'b0)) u_sync_cs0 (
         .clk(clk_pix), .rst_n(rst_n),
@@ -188,6 +197,27 @@ module fe_top
                 .sync_out(scroll_offset_pix[gi])
             );
         end
+        for (gi = 0; gi < INPUT_LINE_W; gi++) begin : g_sync_icrow
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_icrow (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(input_cursor_row_obs[gi]),
+                .sync_out(input_cursor_row_pix[gi])
+            );
+        end
+        for (gi = 0; gi < LEN_WIDTH; gi++) begin : g_sync_iccol
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_iccol (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(input_cursor_col_obs[gi]),
+                .sync_out(input_cursor_col_pix[gi])
+            );
+        end
+        for (gi = 0; gi < INPUT_SCROLL_W; gi++) begin : g_sync_iscr
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_iscr (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(input_scroll_offset_obs[gi]),
+                .sync_out(input_scroll_offset_pix[gi])
+            );
+        end
     endgenerate
 
     fe_scan u_scan (
@@ -204,10 +234,13 @@ module fe_top
         .glyph_code    (glyph_code),
         .glyph_gy      (glyph_gy),
         .glyph_row     (glyph_row),
-        .conn_state    (conn_state_pix),
-        .input_cursor  (input_cursor_pix),
-        .hist_wr_row   (hist_wr_row_pix),
-        .scroll_offset (scroll_offset_pix),
+        .conn_state         (conn_state_pix),
+        .input_cursor       (input_cursor_pix),
+        .hist_wr_row        (hist_wr_row_pix),
+        .scroll_offset      (scroll_offset_pix),
+        .input_cursor_row   (input_cursor_row_pix),
+        .input_cursor_col   (input_cursor_col_pix),
+        .input_scroll_offset(input_scroll_offset_pix),
         .video_red     (video_red),
         .video_green   (video_green),
         .video_blue    (video_blue),

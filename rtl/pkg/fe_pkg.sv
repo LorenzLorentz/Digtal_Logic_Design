@@ -38,7 +38,12 @@ package fe_pkg;
     localparam int TITLE_ROW         = 0;     // titlebar
     localparam int HIST_ROW_START    = 2;     // first ring slot
     localparam int HIST_ROW_END      = 65;    // last ring slot (64 total)
-    localparam int INPUT_ROW         = 67;    // "> ..." input bar
+    // Input area is a multi-row buffer so Shift+Enter newlines render on
+    // their own physical row. MAX_INPUT_LINES must match the multi-line
+    // cap used by the bubble parser (fe_render_decoder MAX_LINES).
+    localparam int MAX_INPUT_LINES   = 16;
+    localparam int INPUT_ROW_START   = 67;
+    localparam int INPUT_ROW_END     = INPUT_ROW_START + MAX_INPUT_LINES - 1;
     // Column layout
     localparam int INPUT_PREFIX_LEN  = 2;     // "> "
 
@@ -50,13 +55,24 @@ package fe_pkg;
     // -----------------------------------------------------------------
     // History ring + visible window
     // -----------------------------------------------------------------
-    localparam int N_HIST_STORED  = HIST_ROW_END - HIST_ROW_START + 1;
-    localparam int N_HIST_VISIBLE = 33;
-    localparam int HIST_W         = (N_HIST_STORED <= 1)
-                                      ? 1 : $clog2(N_HIST_STORED);
-    localparam int SCROLL_MAX     = N_HIST_STORED - N_HIST_VISIBLE;
-    localparam int SCROLL_W       = (SCROLL_MAX <= 1)
-                                      ? 1 : $clog2(SCROLL_MAX + 1);
+    localparam int N_HIST_STORED   = HIST_ROW_END - HIST_ROW_START + 1;
+    localparam int N_HIST_VISIBLE  = 29;
+    localparam int N_INPUT_VISIBLE = 5;
+    localparam int HIST_W          = (N_HIST_STORED <= 1)
+                                       ? 1 : $clog2(N_HIST_STORED);
+    localparam int SCROLL_MAX      = N_HIST_STORED - N_HIST_VISIBLE;
+    localparam int SCROLL_W        = (SCROLL_MAX <= 1)
+                                       ? 1 : $clog2(SCROLL_MAX + 1);
+    // Input-side scroll: indexes which input line lands at screen row
+    // INPUT_SCREEN_START. Max value puts the bottom of the input buffer
+    // at the bottom of the visible input window.
+    localparam int INPUT_SCROLL_MAX = (MAX_INPUT_LINES > N_INPUT_VISIBLE)
+                                        ? (MAX_INPUT_LINES - N_INPUT_VISIBLE)
+                                        : 0;
+    localparam int INPUT_SCROLL_W   = (INPUT_SCROLL_MAX <= 1)
+                                        ? 1 : $clog2(INPUT_SCROLL_MAX + 1);
+    localparam int INPUT_LINE_W     = (MAX_INPUT_LINES <= 1)
+                                        ? 1 : $clog2(MAX_INPUT_LINES);
 
     // -----------------------------------------------------------------
     // Sprite codes (in 0xF0..0xFF -- the reserved sprite range)

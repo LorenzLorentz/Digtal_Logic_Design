@@ -72,7 +72,9 @@ enum : uint8_t { MSG_PENDING = 0, MSG_SUCCESS = 1, MSG_FAIL = 2 };
 // Layout constants must match fe_top defaults.
 static constexpr int TITLE_ROW        = 0;
 static constexpr int HIST_ROW_START   = 2;
-static constexpr int INPUT_ROW        = 67;
+static constexpr int INPUT_ROW        = 67;     // = INPUT_ROW_START
+static constexpr int INPUT_ROW_START  = 67;
+static constexpr int MAX_INPUT_LINES  = 16;
 
 // Bubble layout constants (must match fe_pkg.sv).
 static constexpr int BUBBLE_MARGIN_L   = 2;
@@ -540,9 +542,13 @@ static void test_scroll_up_down() {
     send_cmd(sd); send_cmd(sd); send_cmd(sd);
     CHECK_EQ(dut->scroll_offset_obs, 0, "scroll down clamps at 0");
 
-    // Scroll up past max -> clamps at SCROLL_MAX = 64-33 = 31.
-    for (int i = 0; i < 40; i++) send_cmd(su);
-    CHECK_EQ(dut->scroll_offset_obs, 31, "scroll up clamps at 31");
+    // Scroll up past max -> clamps at SCROLL_MAX = N_HIST_STORED - N_HIST_VISIBLE.
+    // (P3 layout: N_HIST_STORED=64, N_HIST_VISIBLE=29 -> SCROLL_MAX=35.)
+    const int N_HIST_STORED  = 64;
+    const int N_HIST_VISIBLE = 29;
+    const int SCROLL_MAX     = N_HIST_STORED - N_HIST_VISIBLE;
+    for (int i = 0; i < N_HIST_STORED + 4; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, SCROLL_MAX, "scroll up clamps at SCROLL_MAX");
 }
 
 static void test_peer_change_resets_scroll() {
@@ -874,6 +880,86 @@ static void test_multiline_overflow() {
     CHECK_EQ(dut->hist_wr_row_obs, MAX_LINES, "hist_wr_row advanced by MAX_LINES");
 }
 
+// P3.1 input area: Shift+Enter inserts a 0x0A byte; the input region
+// renders this as a real newline -- subsequent characters land on the
+// next text_ram row (INPUT_ROW_START+1), with no "> " prefix on rows
+// past the first. Rows past the last input line stay blank.
+static void test_input_newline_renders_multirow() {
+    printf("== test_input_newline_renders_multirow\n");
+    reset();
+    bring_up();
+
+    // Type "ab\ncd" one byte at a time via RENDER_INSERT_AT_CURSOR.
+    const uint8_t typed[] = {'a','b', 0x0A, 'c','d'};
+    for (int i = 0; i < 5; i++) {
+        RenderCmd ic;
+        ic.cmd        = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii      = typed[i];
+        send_cmd(ic);
+    }
+
+    CHECK_EQ((int)dut->input_len_obs,    5, "input_len after typing");
+    CHECK_EQ((int)dut->input_cursor_obs, 5, "input_cursor after typing");
+    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor row = 1 (second line)");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 2, "cursor col = 2 (after 'cd')");
+
+    // Row 0 of the input region: "> ab" then blanks.
+    CHECK_EQ(read_cell(INPUT_ROW_START,    0), '>',  "row0 col0 prompt");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    1), ' ',  "row0 col1 prompt space");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a',  "row0 col2 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    3), 'b',  "row0 col3 'b'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    4), ' ',  "row0 col4 blank past end");
+
+    // Row 1: "cd" starting at col 0 (no prefix).
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), 'c',  "row1 col0 'c'");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  1), 'd',  "row1 col1 'd'");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  2), ' ',  "row1 col2 blank");
+
+    // Row 2 is past n_lines = 2: every cell is blank.
+    CHECK_EQ(read_cell(INPUT_ROW_START+2,  0), ' ',  "row2 col0 blank");
+    CHECK_EQ(read_cell(INPUT_ROW_START+2,  5), ' ',  "row2 col5 blank");
+}
+
+// Enter-commit clears every visible input row, not just the first.
+static void test_input_commit_clears_all_rows() {
+    printf("== test_input_commit_clears_all_rows\n");
+    reset();
+    bring_up();
+
+    // Pre-fill multiple input rows.
+    const uint8_t typed[] = {'x','y', 0x0A, 'z', 0x0A, 'w'};
+    for (int i = 0; i < 6; i++) {
+        RenderCmd ic;
+        ic.cmd        = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii      = typed[i];
+        send_cmd(ic);
+    }
+    CHECK_EQ((int)dut->input_len_obs, 6, "pre-commit len");
+
+    // RENDER_UPDATE_INPUT_LINE with len=0 (Enter-commit).
+    RenderCmd c;
+    c.cmd        = RENDER_UPDATE_INPUT_LINE;
+    c.len        = 0;
+    c.cursor_pos = 0;
+    send_cmd(c);
+
+    CHECK_EQ((int)dut->input_len_obs,    0, "len cleared");
+    CHECK_EQ((int)dut->input_cursor_obs, 0, "cursor cleared");
+    CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor row cleared");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor col cleared");
+
+    // Row 0: just the "> " prompt then blanks.
+    CHECK_EQ(read_cell(INPUT_ROW_START,    0), '>',  "row0 prompt kept");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    1), ' ',  "row0 space kept");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    2), ' ',  "row0 content cleared");
+    // Rows 1 and 2 previously held 'z' and 'w' -- must be blank now.
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), ' ',  "row1 col0 cleared");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  5), ' ',  "row1 col5 cleared");
+    CHECK_EQ(read_cell(INPUT_ROW_START+2,  0), ' ',  "row2 col0 cleared");
+}
+
 // 256-byte remote payload with 4 newlines split into 5 lines of 50 chars
 // each. Validates that the MAX_MSG_LEN=640 widening + 2-byte wire LEN
 // flow through to the renderer without any 8-bit truncation.
@@ -951,6 +1037,8 @@ int main(int argc, char** argv) {
     test_multiline_wraps_ring();
     test_multiline_overflow();
     test_long_multiline_payload();
+    test_input_newline_renders_multirow();
+    test_input_commit_clears_all_rows();
 
     tfp->close();
     delete tfp;
