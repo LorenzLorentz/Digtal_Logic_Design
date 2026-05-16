@@ -255,6 +255,14 @@ module fe_render_decoder
     // W - 1, which must be >= 0 (W <= 96). 80 leaves visual margin.
     localparam int MAX_BUBBLE_INNER_W = 80;
 
+    // Input area soft-wrap width. Row 0 of the input area carries the
+    // "> " prefix (INPUT_PREFIX_LEN = 2), so it has FE_N_COLS -
+    // INPUT_PREFIX_LEN = 126 content columns. Subsequent input rows
+    // have no prefix and 128 content columns, but we use the same
+    // 126-byte cap on all rows so the soft-wrap logic is uniform
+    // (the trailing 2 cols on continuation rows just stay blank).
+    localparam int INPUT_SOFT_WRAP_W = FE_N_COLS - INPUT_PREFIX_LEN;
+
     // Byte counter shared by S_HIST_STORE and S_HIST_LOAD. STORE walks
     // 0..msg_total_len_q-1; LOAD walks 0..msg_total_len_q to absorb the
     // BRAM read pipeline's 1-cycle latency.
@@ -1009,16 +1017,42 @@ module fe_render_decoder
             end
             if (state_q == S_INPUT_PARSE) begin
                 automatic byte_t cur_byte;
+                automatic logic  cur_byte_valid;
+                automatic logic  have_room;
+                automatic logic  has_next_byte;
+                automatic logic [LINE_IDX_W-1:0] cur_line_pos;
                 automatic logic  is_nl;
-                cur_byte = input_line_q[parse_idx_q];
-                is_nl = (LEN_WIDTH'(parse_idx_q) < input_len_q)
-                        && (cur_byte == 8'h0A)
-                        && (parse_n_lines_q < LINE_CNT_W'(MAX_INPUT_LINES));
+                automatic logic  is_wrap;
+                automatic logic  is_break;
+                automatic msg_len_t new_line_len;
+                cur_byte       = input_line_q[parse_idx_q];
+                cur_byte_valid = (LEN_WIDTH'(parse_idx_q) < input_len_q);
+                have_room      = (parse_n_lines_q
+                                  < LINE_CNT_W'(MAX_INPUT_LINES));
+                has_next_byte  = ((LEN_WIDTH'(parse_idx_q) + LEN_WIDTH'(1))
+                                  < input_len_q);
+                cur_line_pos   = parse_idx_q - parse_line_start_q;
+                is_nl  = cur_byte_valid
+                         && (cur_byte == 8'h0A)
+                         && have_room;
+                // Soft-wrap: visual line is full, but there's at least
+                // one more byte to display and we still have an open
+                // input row slot. The wrap byte itself stays on the
+                // current visual line (it's the last content char);
+                // a newline takes precedence and consumes the byte.
+                is_wrap = cur_byte_valid
+                          && !is_nl
+                          && has_next_byte
+                          && have_room
+                          && (cur_line_pos
+                              == LINE_IDX_W'(INPUT_SOFT_WRAP_W - 1));
+                is_break = is_nl || is_wrap;
+                new_line_len = is_nl
+                    ? msg_len_t'(cur_line_pos)
+                    : msg_len_t'(INPUT_SOFT_WRAP_W);
 
-                if (is_nl) begin
-                    input_ml_len_q[parse_last_sel]
-                        <= msg_len_t'(parse_idx_q)
-                           - msg_len_t'(parse_line_start_q);
+                if (is_break) begin
+                    input_ml_len_q[parse_last_sel] <= new_line_len;
                     input_ml_offset_q[parse_line_sel]
                         <= parse_idx_q + LINE_IDX_W'(1);
                     if (input_cursor_q > msg_len_t'(parse_idx_q)) begin

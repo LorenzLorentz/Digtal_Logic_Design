@@ -1138,6 +1138,84 @@ static void test_input_scroll_clamps() {
              "scroll up clamps at INPUT_SCROLL_MAX");
 }
 
+// P5.1 input area soft-wrap: typing a long line with no 0x0A wraps
+// to the next visual row at INPUT_SOFT_WRAP_W = FE_N_COLS -
+// INPUT_PREFIX_LEN = 126 content bytes. Row 0 keeps the "> " prefix
+// (so visible cols 2..127 hold the first 126 typed bytes); row 1
+// starts at col 0 with no prefix and holds the overflow. Cursor at
+// end-of-buffer lands on the continuation row.
+static void test_input_soft_wrap_long_line() {
+    printf("== test_input_soft_wrap_long_line\n");
+    reset();
+    bring_up();
+
+    // Type 127 'a' bytes. INPUT_SOFT_WRAP_W = 126 -> visual row 0
+    // holds 126 'a's, visual row 1 holds 1 'a'.
+    const int L = 127;
+    for (int i = 0; i < L; i++) {
+        RenderCmd ic;
+        ic.cmd        = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii      = 'a';
+        send_cmd(ic);
+    }
+
+    CHECK_EQ((int)dut->input_len_obs, L, "input_len after typing");
+    // Cursor at end-of-buffer (pos=L) -> visual (row=1, col=L-126=1).
+    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor on continuation row");
+    CHECK_EQ((int)dut->input_cursor_col_obs, L - 126,
+             "cursor col = L - INPUT_SOFT_WRAP_W");
+
+    // Row 0 of the input region: "> " prefix at cols 0..1, then 126
+    // 'a's at cols 2..127.
+    CHECK_EQ(read_cell(INPUT_ROW_START,    0), '>',  "row0 col0 prompt");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    1), ' ',  "row0 col1 space");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a',  "row0 col2 first 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   127), 'a', "row0 col127 last 'a'");
+
+    // Row 1 of the input region: 1 'a' at col 0, blanks afterwards.
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), 'a',  "row1 col0 wrap 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  1), ' ',  "row1 col1 blank past end");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 127), ' ', "row1 col127 blank");
+
+    // Row 2 is past n_lines = 2: blank.
+    CHECK_EQ(read_cell(INPUT_ROW_START+2,  0), ' ',  "row2 col0 blank");
+}
+
+// P5.1 input area soft-wrap with mid-line cursor. After typing 127
+// chars, move the cursor to position 126 (just past byte 125, which
+// was the wrap byte). That puts the cursor at row 1 col 0.
+static void test_input_soft_wrap_cursor_pre_wrap() {
+    printf("== test_input_soft_wrap_cursor_pre_wrap\n");
+    reset();
+    bring_up();
+
+    const int L = 127;
+    for (int i = 0; i < L; i++) {
+        RenderCmd ic;
+        ic.cmd        = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii      = 'a';
+        send_cmd(ic);
+    }
+
+    // Cursor at pos=126 -> first character of continuation row.
+    RenderCmd mv;
+    mv.cmd        = RENDER_MOVE_CURSOR;
+    mv.cursor_pos = 126;
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor_pos=126 row=1");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor_pos=126 col=0");
+
+    // Cursor at pos=125 -> last cell of first visual row (col 125 in
+    // logical terms; rendered with prefix offset that's col 127 on
+    // screen, but the observer reports the logical col).
+    mv.cursor_pos = 125;
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor_pos=125 row=0");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 125, "cursor_pos=125 col=125");
+}
+
 // Enter-commit clears every visible input row, not just the first.
 static void test_input_commit_clears_all_rows() {
     printf("== test_input_commit_clears_all_rows\n");
@@ -1261,6 +1339,8 @@ int main(int argc, char** argv) {
     test_cursor_auto_follow_scroll();
     test_bubble_soft_wrap_long_line();
     test_bubble_multiline_aligned();
+    test_input_soft_wrap_long_line();
+    test_input_soft_wrap_cursor_pre_wrap();
 
     tfp->close();
     delete tfp;
