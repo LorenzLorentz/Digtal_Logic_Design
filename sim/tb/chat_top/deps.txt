@@ -18,6 +18,7 @@ rtl/comm/comm_top.sv
 rtl/backend/be_message_store.sv
 rtl/backend/be_top.sv
 rtl/frontend/fe_text_ram.sv
+rtl/frontend/fe_msg_payload_ram.sv
 rtl/frontend/fe_render_decoder.sv
 rtl/frontend/fe_video_timing.sv
 rtl/frontend/fe_glyph_rom.sv

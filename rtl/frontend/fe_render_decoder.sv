@@ -109,8 +109,13 @@ module fe_render_decoder
         S_INPUT_DELETE  = 4'd4,
         S_INPUT_PARSE   = 4'd5,
         S_INPUT_REDRAW  = 4'd6,
-        S_HIST_WRITE    = 4'd7,
-        S_UPDATE_STATUS = 4'd8
+        // History payload pipeline: STORE writes bytes into the
+        // payload BRAM one byte per cycle (also runs newline parse);
+        // LOAD reads them back into payload_q for UPDATE_STATUS.
+        S_HIST_STORE    = 4'd7,
+        S_HIST_LOAD     = 4'd8,
+        S_HIST_WRITE    = 4'd9,
+        S_UPDATE_STATUS = 4'd10
     } state_e;
 
     state_e state_q, state_d;
@@ -213,15 +218,57 @@ module fe_render_decoder
     logic                             msg_id_valid_q    [256];
 
     // Per-ring-slot metadata used by RENDER_UPDATE_STATUS to redraw the
-    // entire bubble row (border position depends on payload length, and
-    // the FAIL border swap needs the original payload). Indexed by ring
-    // slot rather than by msg_id so it stays at N_HIST_STORED entries
-    // even as MAX_MSG_LEN grows -- e.g. with MAX_MSG_LEN=640 and 64
-    // slots, this is ~41 KB instead of the 164 KB a 256-deep table
-    // would consume.
+    // entire bubble row. side and len are kept as register arrays
+    // (small: 2-bit and 16-bit per slot); the payload moved into BRAM
+    // (fe_msg_payload_ram) to free the LUTs.
     logic [1:0]                       slot_side_q     [N_HIST_STORED];
-    logic [MAX_MSG_LEN*8-1:0]         slot_payload_q  [N_HIST_STORED];
     msg_len_t                         slot_len_q      [N_HIST_STORED];
+
+    // -----------------------------------------------------------------
+    // Payload BRAM ports + multi-cycle STORE/LOAD walk state.
+    // -----------------------------------------------------------------
+    localparam int MSG_BYTE_IDX_W = $clog2(MAX_MSG_LEN);
+
+    logic                       msg_bram_wr_en;
+    logic [HIST_W-1:0]          msg_bram_wr_slot;
+    logic [MSG_BYTE_IDX_W-1:0]  msg_bram_wr_byte;
+    byte_t                      msg_bram_wr_data;
+    logic [HIST_W-1:0]          msg_bram_rd_slot;
+    logic [MSG_BYTE_IDX_W-1:0]  msg_bram_rd_byte;
+    byte_t                      msg_bram_rd_data;
+
+    fe_msg_payload_ram u_slot_payload_ram (
+        .wr_clk      (clk),
+        .wr_en       (msg_bram_wr_en),
+        .wr_slot     (msg_bram_wr_slot),
+        .wr_byte_idx (msg_bram_wr_byte),
+        .wr_data     (msg_bram_wr_data),
+        .rd_clk      (clk),
+        .rd_slot     (msg_bram_rd_slot),
+        .rd_byte_idx (msg_bram_rd_byte),
+        .rd_data     (msg_bram_rd_data)
+    );
+
+    // Byte counter shared by S_HIST_STORE and S_HIST_LOAD. STORE walks
+    // 0..msg_total_len_q-1; LOAD walks 0..msg_total_len_q to absorb the
+    // BRAM read pipeline's 1-cycle latency.
+    logic [MSG_BYTE_IDX_W:0]    byte_walk_idx_q;   // 1 extra bit for "== len" sentinel
+    msg_len_t                   msg_total_len_q;
+    logic [HIST_W-1:0]          msg_target_slot_q;
+
+    // Multi-cycle newline-parse accumulators (mirrors the input-parse
+    // accumulators added in Step B; used during S_HIST_STORE /
+    // S_HIST_LOAD to populate ml_offset_q[] / ml_len_q[]).
+    logic [LINE_CNT_W-1:0]      msg_parse_n_lines_q;
+    logic [LINE_IDX_W-1:0]      msg_parse_line_start_q;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [LINE_CNT_W-1:0]      msg_parse_last_idx;
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic [LINE_SEL_W-1:0]      msg_parse_line_sel;
+    logic [LINE_SEL_W-1:0]      msg_parse_last_sel;
+    assign msg_parse_last_idx = msg_parse_n_lines_q - LINE_CNT_W'(1);
+    assign msg_parse_line_sel = msg_parse_n_lines_q[LINE_SEL_W-1:0];
+    assign msg_parse_last_sel = msg_parse_last_idx[LINE_SEL_W-1:0];
 
     // chained transitions (set on CONN_STATE accept that needs a
     // multi-step redraw)
@@ -366,6 +413,29 @@ module fe_render_decoder
     end
 
     // -----------------------------------------------------------------
+    // Payload BRAM signal drivers (single port write / single port read)
+    // -----------------------------------------------------------------
+    logic [MSG_BYTE_IDX_W-1:0] byte_walk_idx_short;
+    assign byte_walk_idx_short = byte_walk_idx_q[MSG_BYTE_IDX_W-1:0];
+
+    always_comb begin
+        msg_bram_wr_en   = 1'b0;
+        msg_bram_wr_slot = '0;
+        msg_bram_wr_byte = '0;
+        msg_bram_wr_data = 8'h00;
+        msg_bram_rd_slot = msg_target_slot_q;
+        msg_bram_rd_byte = byte_walk_idx_short;
+
+        if (state_q == S_HIST_STORE) begin
+            msg_bram_wr_en   = 1'b1;
+            msg_bram_wr_slot = msg_target_slot_q;
+            msg_bram_wr_byte = byte_walk_idx_short;
+            msg_bram_wr_data = payload_q[
+                {byte_walk_idx_short, 3'b000} +: 8];
+        end
+    end
+
+    // -----------------------------------------------------------------
     // Output drivers (wr_en / wr_row / wr_col / wr_code)
     // -----------------------------------------------------------------
     always_comb begin
@@ -438,14 +508,19 @@ module fe_render_decoder
                                 state_d = S_IDLE;
                         end
 
+                        // History APPEND: write the payload to BRAM
+                        // (and run newline parse) in S_HIST_STORE, then
+                        // render the bubble in S_HIST_WRITE.
                         RENDER_APPEND_LOCAL_PENDING,
                         RENDER_APPEND_REMOTE:
-                            state_d = S_HIST_WRITE;
+                            state_d = S_HIST_STORE;
 
+                        // UPDATE_STATUS: BRAM-load the stored payload
+                        // back into payload_q (also re-parses newlines)
+                        // before rewriting the bubble row.
                         RENDER_UPDATE_STATUS:
-                            // Skip silently if msg_id not in our table.
                             state_d = msg_id_valid_q[be_render_msg_id]
-                                      ? S_UPDATE_STATUS : S_IDLE;
+                                      ? S_HIST_LOAD : S_IDLE;
 
                         // Input edit pipeline. INSERT / DELETE first
                         // walk input_line_q one byte per cycle in
@@ -509,6 +584,23 @@ module fe_render_decoder
                     else
                         state_d = S_IDLE;
                 end
+            end
+
+            S_HIST_STORE: begin
+                // STORE writes one byte per cycle while the parse
+                // tracks newlines on the same byte. Exit when we've
+                // written byte msg_total_len_q - 1 (last data byte).
+                if (byte_walk_idx_q + 1 >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]})
+                    state_d = S_HIST_WRITE;
+            end
+
+            S_HIST_LOAD: begin
+                // LOAD walks one extra cycle past msg_total_len_q to
+                // absorb the BRAM's 1-cycle read latency. Exit when
+                // byte_walk_idx_q == msg_total_len_q (we just captured
+                // byte msg_total_len_q - 1).
+                if (byte_walk_idx_q >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]})
+                    state_d = S_UPDATE_STATUS;
             end
 
             S_HIST_WRITE: begin
@@ -588,6 +680,12 @@ module fe_render_decoder
             parse_cursor_row_q    <= '0;
             parse_cursor_col_q    <= '0;
 
+            byte_walk_idx_q        <= '0;
+            msg_total_len_q        <= '0;
+            msg_target_slot_q      <= '0;
+            msg_parse_n_lines_q    <= LINE_CNT_W'(1);
+            msg_parse_line_start_q <= '0;
+
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
             for (int i = 0; i < 256; i++) begin
@@ -595,9 +693,8 @@ module fe_render_decoder
                 msg_id_valid_q[i] <= 1'b0;
             end
             for (int i = 0; i < N_HIST_STORED; i++) begin
-                slot_side_q[i]    <= 2'(MSG_LOCAL);
-                slot_payload_q[i] <= '0;
-                slot_len_q[i]     <= '0;
+                slot_side_q[i] <= 2'(MSG_LOCAL);
+                slot_len_q[i]  <= '0;
             end
 
             chain_titlebar_q  <= 1'b0;
@@ -710,6 +807,11 @@ module fe_render_decoder
 
                     RENDER_APPEND_LOCAL_PENDING,
                     RENDER_APPEND_REMOTE: begin
+                        // Latch metadata + working payload register.
+                        // The actual byte-by-byte BRAM store + newline
+                        // parse runs in S_HIST_STORE. hist_wr_row_q
+                        // advance happens at the END of S_HIST_STORE
+                        // once we know n_lines from the parse.
                         side_q        <= be_render_side;
                         status_q      <= be_render_status;
                         payload_q     <= be_render_payload;
@@ -718,83 +820,25 @@ module fe_render_decoder
                         msg_id_row_q[be_render_msg_id]   <= hist_wr_row_q;
                         msg_id_valid_q[be_render_msg_id] <= 1'b1;
                         slot_side_q[hist_wr_row_q]       <= be_render_side;
-                        slot_payload_q[hist_wr_row_q]    <= be_render_payload;
                         slot_len_q[hist_wr_row_q]        <= be_render_len;
-                        // Multi-line parsing. Cap at MAX_LINES so we
-                        // never write ml_*_q[MAX_LINES..] (OOB) and never
-                        // truncate n_lines_q via narrow-cast wrap. Bytes
-                        // after the MAX_LINES-th newline (including any
-                        // further 0x0A bytes) accumulate into the final
-                        // line's length -- they will render with 0x0A
-                        // glyphs (returned-arrow) in the bubble.
-                        // `automatic` so Vivado treats n_lines/line_start
-                        // as procedural vars, not registers (otherwise it
-                        // synthesises FFs and then trims them).
-                        begin
-                            automatic int n_lines, line_start;
-                            n_lines = 1;
-                            ml_offset_q[0] <= '0;
-                            line_start = 0;
-                            for (int i = 0; i < MAX_MSG_LEN; i++) begin
-                                if (i < int'(be_render_len)
-                                    && be_render_payload[i*8 +: 8] == 8'h0A
-                                    && n_lines < MAX_LINES) begin
-                                    ml_len_q[n_lines - 1]
-                                        <= msg_len_t'(i - line_start);
-                                    ml_offset_q[n_lines]
-                                        <= LINE_IDX_W'(i + 1);
-                                    n_lines = n_lines + 1;
-                                    line_start = i + 1;
-                                end
-                            end
-                            ml_len_q[n_lines - 1]
-                                <= msg_len_t'(int'(be_render_len) - line_start);
-                            n_lines_q  <= LINE_CNT_W'(n_lines);
-                            cur_line_q <= '0;
-                            hist_wr_row_q <= (hist_wr_row_q
-                                + HIST_W'(n_lines)) & HIST_W'(N_HIST_STORED - 1);
-                        end
+                        msg_total_len_q                  <= be_render_len;
+                        msg_target_slot_q                <= hist_wr_row_q;
                     end
 
                     RENDER_UPDATE_STATUS: begin
                         if (msg_id_valid_q[be_render_msg_id]) begin
                             // Snapshot the ring slot owning this msg_id
-                            // once; both target_row_q and slot_*_q reads
-                            // use it.
+                            // and latch its meta; payload load happens
+                            // in S_HIST_LOAD (BRAM walk + parse).
                             automatic logic [HIST_W-1:0] slot;
                             slot = msg_id_row_q[be_render_msg_id];
 
-                            status_q     <= be_render_status;
-                            target_row_q <= FE_ROW_W'(HIST_ROW_START)
-                                            + FE_ROW_W'(slot);
-                            side_q       <= slot_side_q[slot];
-                            payload_q    <= slot_payload_q[slot];
-                            // Re-parse multi-line boundaries. Same
-                            // MAX_LINES cap as the APPEND path.
-                            begin
-                                automatic int n_lines, line_start;
-                                n_lines = 1;
-                                ml_offset_q[0] <= '0;
-                                line_start = 0;
-                                for (int i = 0; i < MAX_MSG_LEN; i++) begin
-                                    if (i < int'(slot_len_q[slot])
-                                        && slot_payload_q[slot][i*8 +: 8]
-                                           == 8'h0A
-                                        && n_lines < MAX_LINES) begin
-                                        ml_len_q[n_lines - 1]
-                                            <= msg_len_t'(i - line_start);
-                                        ml_offset_q[n_lines]
-                                            <= LINE_IDX_W'(i + 1);
-                                        n_lines = n_lines + 1;
-                                        line_start = i + 1;
-                                    end
-                                end
-                                ml_len_q[n_lines - 1]
-                                    <= msg_len_t'(int'(slot_len_q[slot])
-                                                  - line_start);
-                                n_lines_q  <= LINE_CNT_W'(n_lines);
-                                cur_line_q <= '0;
-                            end
+                            status_q          <= be_render_status;
+                            target_row_q      <= FE_ROW_W'(HIST_ROW_START)
+                                                 + FE_ROW_W'(slot);
+                            side_q            <= slot_side_q[slot];
+                            msg_total_len_q   <= slot_len_q[slot];
+                            msg_target_slot_q <= slot;
                         end
                     end
 
@@ -994,6 +1038,127 @@ module fe_render_decoder
                     end
                 end else begin
                     parse_idx_q <= parse_idx_q + LINE_IDX_W'(1);
+                end
+            end
+
+            // -----------------------------------------------------------
+            // S_HIST_STORE: BRAM byte walk + concurrent newline parse.
+            // On the cycle we enter from S_IDLE, init the walk counter
+            // and parse accumulators. Each cycle in S_HIST_STORE writes
+            // payload_q[i*8 +: 8] into the BRAM (combinationally via
+            // msg_bram_*) AND tests that byte for 0x0A. The exit cycle
+            // (byte_walk_idx_q + 1 == msg_total_len_q) commits the
+            // final line length, ml_*_q, and the hist_wr_row_q advance.
+            // -----------------------------------------------------------
+            if (state_q == S_IDLE
+                && (state_d == S_HIST_STORE)) begin
+                byte_walk_idx_q        <= '0;
+                msg_parse_n_lines_q    <= LINE_CNT_W'(1);
+                msg_parse_line_start_q <= '0;
+                ml_offset_q[0]         <= '0;
+            end
+            if (state_q == S_HIST_STORE) begin
+                automatic byte_t cur_byte;
+                automatic logic  is_nl;
+                cur_byte = payload_q[{byte_walk_idx_short, 3'b000} +: 8];
+                is_nl = ({1'b0, byte_walk_idx_short}
+                            < msg_total_len_q[MSG_BYTE_IDX_W:0])
+                        && (cur_byte == 8'h0A)
+                        && (msg_parse_n_lines_q
+                            < LINE_CNT_W'(MAX_LINES));
+
+                if (is_nl) begin
+                    ml_len_q[msg_parse_last_sel]
+                        <= msg_len_t'(byte_walk_idx_short)
+                           - msg_len_t'(msg_parse_line_start_q);
+                    ml_offset_q[msg_parse_line_sel]
+                        <= LINE_IDX_W'(byte_walk_idx_short)
+                           + LINE_IDX_W'(1);
+                    msg_parse_n_lines_q
+                        <= msg_parse_n_lines_q + LINE_CNT_W'(1);
+                    msg_parse_line_start_q
+                        <= LINE_IDX_W'(byte_walk_idx_short)
+                           + LINE_IDX_W'(1);
+                end
+
+                // Last byte of the message? Finalise this cycle.
+                if (byte_walk_idx_q + 1
+                    >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]}) begin
+                    automatic logic [LINE_CNT_W-1:0] final_n_lines;
+                    final_n_lines = msg_parse_n_lines_q
+                                    + (is_nl ? LINE_CNT_W'(1)
+                                             : LINE_CNT_W'(0));
+                    ml_len_q[msg_parse_last_sel]
+                        <= msg_total_len_q
+                           - msg_len_t'(msg_parse_line_start_q);
+                    n_lines_q  <= final_n_lines;
+                    cur_line_q <= '0;
+                    // Advance hist write pointer by the (final) line
+                    // count. & N_HIST_STORED-1 for ring wrap.
+                    hist_wr_row_q <= (hist_wr_row_q
+                        + HIST_W'(final_n_lines))
+                        & HIST_W'(N_HIST_STORED - 1);
+                end else begin
+                    byte_walk_idx_q <= byte_walk_idx_q + 1'b1;
+                end
+            end
+
+            // -----------------------------------------------------------
+            // S_HIST_LOAD: walk BRAM addresses for the slot and capture
+            // bytes into payload_q. The BRAM has a 1-cycle read pipe,
+            // so byte_walk_idx_q drives the next address and we capture
+            // byte (byte_walk_idx_q - 1) here.
+            // -----------------------------------------------------------
+            if ((state_q == S_IDLE) && (state_d == S_HIST_LOAD)) begin
+                byte_walk_idx_q        <= '0;
+                msg_parse_n_lines_q    <= LINE_CNT_W'(1);
+                msg_parse_line_start_q <= '0;
+                ml_offset_q[0]         <= '0;
+            end
+            if (state_q == S_HIST_LOAD) begin
+                automatic logic [MSG_BYTE_IDX_W-1:0] cap_idx;
+                automatic byte_t                    cap_byte;
+                automatic logic                     have_cap;
+                automatic logic                     is_nl;
+                have_cap = (byte_walk_idx_q != '0);
+                cap_idx  = byte_walk_idx_short - 1'b1;
+                cap_byte = msg_bram_rd_data;
+                is_nl = have_cap
+                        && ({1'b0, cap_idx} < msg_total_len_q[MSG_BYTE_IDX_W:0])
+                        && (cap_byte == 8'h0A)
+                        && (msg_parse_n_lines_q
+                            < LINE_CNT_W'(MAX_LINES));
+
+                if (have_cap) begin
+                    payload_q[{cap_idx, 3'b000} +: 8] <= cap_byte;
+                end
+
+                if (is_nl) begin
+                    ml_len_q[msg_parse_last_sel]
+                        <= msg_len_t'(cap_idx)
+                           - msg_len_t'(msg_parse_line_start_q);
+                    ml_offset_q[msg_parse_line_sel]
+                        <= LINE_IDX_W'(cap_idx) + LINE_IDX_W'(1);
+                    msg_parse_n_lines_q
+                        <= msg_parse_n_lines_q + LINE_CNT_W'(1);
+                    msg_parse_line_start_q
+                        <= LINE_IDX_W'(cap_idx) + LINE_IDX_W'(1);
+                end
+
+                if (byte_walk_idx_q
+                    >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]}) begin
+                    // All bytes captured. Commit last line.
+                    automatic logic [LINE_CNT_W-1:0] final_n_lines;
+                    final_n_lines = msg_parse_n_lines_q
+                                    + (is_nl ? LINE_CNT_W'(1)
+                                             : LINE_CNT_W'(0));
+                    ml_len_q[msg_parse_last_sel]
+                        <= msg_total_len_q
+                           - msg_len_t'(msg_parse_line_start_q);
+                    n_lines_q  <= final_n_lines;
+                    cur_line_q <= '0;
+                end else begin
+                    byte_walk_idx_q <= byte_walk_idx_q + 1'b1;
                 end
             end
         end
