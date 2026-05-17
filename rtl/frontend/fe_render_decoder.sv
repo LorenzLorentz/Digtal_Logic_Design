@@ -688,7 +688,10 @@ module fe_render_decoder
                 // STORE writes one byte per cycle while the parse
                 // tracks newlines on the same byte. Exit when we've
                 // written byte msg_total_len_q - 1 (last data byte).
-                if (byte_walk_idx_q + 1 >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]})
+                // Use the full MSG_BYTE_IDX_W+1 bits of msg_total_len_q
+                // so MAX_MSG_LEN itself (== 1<<MSG_BYTE_IDX_W) doesn't
+                // truncate to 0 and exit before any byte is stored.
+                if (byte_walk_idx_q + 1 >= msg_total_len_q[MSG_BYTE_IDX_W:0])
                     state_d = S_HIST_WRITE;
             end
 
@@ -696,8 +699,9 @@ module fe_render_decoder
                 // LOAD walks one extra cycle past msg_total_len_q to
                 // absorb the BRAM's 1-cycle read latency. Exit when
                 // byte_walk_idx_q == msg_total_len_q (we just captured
-                // byte msg_total_len_q - 1).
-                if (byte_walk_idx_q >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]})
+                // byte msg_total_len_q - 1). Full width compare so
+                // value MAX_MSG_LEN doesn't truncate to 0.
+                if (byte_walk_idx_q >= msg_total_len_q[MSG_BYTE_IDX_W:0])
                     state_d = S_UPDATE_STATUS;
             end
 
@@ -986,15 +990,21 @@ module fe_render_decoder
                     end
 
                     RENDER_INPUT_SCROLL_UP: begin
+                        // Input rows render with text_ram row =
+                        // INPUT_ROW_START + input_scroll_offset + r
+                        // (see fe_scan), so a smaller offset shows the
+                        // EARLIER lines of the input buffer. "Up" =
+                        // see earlier content => decrement.
+                        if (input_scroll_offset_q != '0)
+                            input_scroll_offset_q <= input_scroll_offset_q - 1'b1;
+                    end
+
+                    RENDER_INPUT_SCROLL_DOWN: begin
+                        // "Down" = see later content => increment.
                         // Dynamic cap: can't scroll past the last typed
                         // input line.
                         if (input_scroll_offset_q < input_scroll_max)
                             input_scroll_offset_q <= input_scroll_offset_q + 1'b1;
-                    end
-
-                    RENDER_INPUT_SCROLL_DOWN: begin
-                        if (input_scroll_offset_q != '0)
-                            input_scroll_offset_q <= input_scroll_offset_q - 1'b1;
                     end
 
                     RENDER_SCROLL_DOWN: begin
@@ -1099,7 +1109,6 @@ module fe_render_decoder
                 automatic byte_t cur_byte;
                 automatic logic  cur_byte_valid;
                 automatic logic  have_room;
-                automatic logic  has_next_byte;
                 automatic logic [LINE_IDX_W-1:0] cur_line_pos;
                 automatic logic  is_nl;
                 automatic logic  is_wrap;
@@ -1109,20 +1118,17 @@ module fe_render_decoder
                 cur_byte_valid = (LEN_WIDTH'(parse_idx_q) < input_len_q);
                 have_room      = (parse_n_lines_q
                                   < LINE_CNT_W'(MAX_INPUT_LINES));
-                has_next_byte  = ((LEN_WIDTH'(parse_idx_q) + LEN_WIDTH'(1))
-                                  < input_len_q);
                 cur_line_pos   = parse_idx_q - parse_line_start_q;
                 is_nl  = cur_byte_valid
                          && (cur_byte == 8'h0A)
                          && have_room;
-                // Soft-wrap: visual line is full, but there's at least
-                // one more byte to display and we still have an open
-                // input row slot. The wrap byte itself stays on the
-                // current visual line (it's the last content char);
-                // a newline takes precedence and consumes the byte.
+                // Soft-wrap: the wrap byte itself stays on the current
+                // visual line (it's the last content char); a newline
+                // takes precedence and consumes the byte. We wrap even
+                // when this is the last byte typed so the cursor lands
+                // on a new empty row instead of off-screen at col 128.
                 is_wrap = cur_byte_valid
                           && !is_nl
-                          && has_next_byte
                           && have_room
                           && (cur_line_pos
                               == LINE_IDX_W'(INPUT_SOFT_WRAP_W - 1));
@@ -1237,7 +1243,7 @@ module fe_render_decoder
                         && (cur_byte == 8'h0A)
                         && have_room;
                 is_last_byte = (byte_walk_idx_q + 1
-                    >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]});
+                    >= msg_total_len_q[MSG_BYTE_IDX_W:0]);
                 // Soft-wrap: close current visual line and open the
                 // next when we've filled MAX_BUBBLE_INNER_W content
                 // bytes of this line, unless the current byte is also
@@ -1349,7 +1355,7 @@ module fe_render_decoder
                         && have_room;
                 is_last_cap = have_cap
                               && (byte_walk_idx_q
-                                  >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]});
+                                  >= msg_total_len_q[MSG_BYTE_IDX_W:0]);
                 is_wrap = have_cap
                           && (cap_line_pos
                               == LINE_IDX_W'(MAX_BUBBLE_INNER_W - 1))
@@ -1378,7 +1384,7 @@ module fe_render_decoder
                 end
 
                 if (byte_walk_idx_q
-                    >= {1'b0, msg_total_len_q[MSG_BYTE_IDX_W-1:0]}) begin
+                    >= msg_total_len_q[MSG_BYTE_IDX_W:0]) begin
                     // All bytes captured. Commit last line.
                     automatic logic [LINE_CNT_W-1:0] final_n_lines;
                     automatic msg_len_t             final_line_len;

@@ -1186,10 +1186,10 @@ static void test_cursor_auto_follow_scroll() {
     CHECK_EQ((int)dut->input_scroll_offset_obs, 0,
              "auto-follow snaps offset back to 0");
 
-    // Manually scroll up via Shift+Up equivalent, then move cursor:
-    // the cursor move overrides the manual scroll back to follow.
-    RenderCmd su; su.cmd = RENDER_INPUT_SCROLL_UP;
-    send_cmd(su); send_cmd(su);  // offset = 2 explicitly
+    // Manually scroll down (toward later/bottom lines) via Shift+Down,
+    // then move cursor: the cursor move overrides the manual scroll.
+    RenderCmd sd; sd.cmd = RENDER_INPUT_SCROLL_DOWN;
+    send_cmd(sd); send_cmd(sd);  // offset = 2 explicitly
     CHECK_EQ((int)dut->input_scroll_offset_obs, 2, "manual scroll to 2");
     mv.cursor_pos = (uint16_t)buf.size();  // cursor back to row 6
     send_cmd(mv);
@@ -1229,19 +1229,21 @@ static void test_input_scroll_clamps() {
     CHECK_EQ((int)dut->input_scroll_offset_obs, 4,
              "auto-follow snapped scroll to keep cursor visible");
 
-    // Scroll back down to 0 manually.
-    RenderCmd sd; sd.cmd = RENDER_INPUT_SCROLL_DOWN;
-    for (int i = 0; i < 6; i++) send_cmd(sd);
-    CHECK_EQ((int)dut->input_scroll_offset_obs, 0, "scroll down clamps at 0");
-
-    // Scroll up: cap is now 4 (9 lines - 5 visible).
+    // Shift+Up scrolls toward earlier (top) input lines, i.e. decrements
+    // offset (smaller offset shows lines closer to the start of buf).
     RenderCmd su; su.cmd = RENDER_INPUT_SCROLL_UP;
-    send_cmd(su); send_cmd(su); send_cmd(su);
-    CHECK_EQ((int)dut->input_scroll_offset_obs, 3, "scroll up 3 ticks");
+    for (int i = 0; i < 6; i++) send_cmd(su);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 0, "scroll up clamps at 0");
 
-    for (int i = 0; i < 10; i++) send_cmd(su);
+    // Shift+Down scrolls back toward later (bottom) input lines.
+    // Cap = 9 lines - N_INPUT_VISIBLE(5) = 4.
+    RenderCmd sd; sd.cmd = RENDER_INPUT_SCROLL_DOWN;
+    send_cmd(sd); send_cmd(sd); send_cmd(sd);
+    CHECK_EQ((int)dut->input_scroll_offset_obs, 3, "scroll down 3 ticks");
+
+    for (int i = 0; i < 10; i++) send_cmd(sd);
     CHECK_EQ((int)dut->input_scroll_offset_obs, 4,
-             "scroll up clamps at input_n_lines - N_INPUT_VISIBLE");
+             "scroll down clamps at input_n_lines - N_INPUT_VISIBLE");
 }
 
 // P5.1 input area soft-wrap: typing a long line with no 0x0A wraps
@@ -1395,6 +1397,102 @@ static void test_input_no_nl_glyph_on_soft_wrap() {
     CHECK_EQ(read_cell(INPUT_ROW_START,   127), 'a', "row0 col127 last wrap byte");
     CHECK_EQ(read_cell(INPUT_ROW_START+1, 0),   'a', "row1 col0 wrap continuation");
     CHECK_EQ(read_cell(INPUT_ROW_START+1, 1),   ' ', "row1 col1 no NL glyph after wrap");
+}
+
+// Regression: a remote bubble whose len == MAX_MSG_LEN (== 128) used
+// to truncate to 1 byte stored (msg_total_len_q[MSG_BYTE_IDX_W-1:0]
+// was 0 for len=128), so the bubble rendered as one cell instead of
+// the full multi-line wrap. Now the full payload is stored and the
+// bubble soft-wraps at MAX_BUBBLE_INNER_W (= 80).
+static void test_remote_max_len_message() {
+    printf("== test_remote_max_len_message\n");
+    reset();
+    bring_up();
+    const int L = 128;  // == MAX_MSG_LEN
+    std::vector<uint8_t> msg(L);
+    for (int i = 0; i < L; i++) msg[i] = (uint8_t)('A' + (i % 26));
+
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 77;
+    c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
+    c.payload = msg.data(); c.payload_n = (size_t)L; c.len = (uint16_t)L;
+    send_cmd(c);
+
+    // 128 bytes soft-wrap into 80 + 48. Remote left-aligned: bubble at
+    // cols 2 (TOP/BOT) and 83. Row 0 holds bytes 0..79, row 1 bytes 80..127.
+    int row0 = HIST_ROW_START;
+    int row1 = HIST_ROW_START + 1;
+    CHECK_EQ(read_cell(row0, 2),  (uint8_t)SPRITE_BL_TOP, "max-len row0 BL_TOP");
+    CHECK_EQ(read_cell(row0, 3),  msg[0],                 "max-len row0 first byte");
+    CHECK_EQ(read_cell(row0, 82), msg[79],                "max-len row0 last byte");
+    CHECK_EQ(read_cell(row0, 83), (uint8_t)SPRITE_BR_TOP, "max-len row0 BR_TOP");
+
+    CHECK_EQ(read_cell(row1, 2),  (uint8_t)SPRITE_BL_BOT, "max-len row1 BL_BOT");
+    CHECK_EQ(read_cell(row1, 3),  msg[80],                "max-len row1 first byte");
+    CHECK_EQ(read_cell(row1, 50), msg[127],               "max-len row1 last byte");
+    CHECK_EQ(read_cell(row1, 83), (uint8_t)SPRITE_BR_BOT, "max-len row1 BR_BOT");
+
+    CHECK_EQ(dut->hist_wr_row_obs, 2, "max-len advances head by 2");
+}
+
+// Regression: same MAX_MSG_LEN bug on the LOCAL append path. Without
+// the fix the bubble would collapse to one cell at bubble_right == 97.
+static void test_local_max_len_message() {
+    printf("== test_local_max_len_message\n");
+    reset();
+    bring_up();
+    const int L = 128;
+    std::vector<uint8_t> msg(L);
+    for (int i = 0; i < L; i++) msg[i] = (uint8_t)('a' + (i % 26));
+
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 78;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING;
+    c.payload = msg.data(); c.payload_n = (size_t)L; c.len = (uint16_t)L;
+    send_cmd(c);
+
+    // Local right-aligned: bubble_right=97, max sub-line len=80,
+    // bubble_left = 97 - 80 - 1 = 16. Row 0 = bytes 0..79, row 1 = 80..127.
+    int row0 = HIST_ROW_START;
+    int row1 = HIST_ROW_START + 1;
+    CHECK_EQ(read_cell(row0, 16), (uint8_t)SPRITE_BL_TOP, "max-len local row0 BL_TOP");
+    CHECK_EQ(read_cell(row0, 17), msg[0],                 "max-len local row0 first byte");
+    CHECK_EQ(read_cell(row0, 96), msg[79],                "max-len local row0 last byte");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR_TOP, "max-len local row0 BR_TOP");
+
+    CHECK_EQ(read_cell(row1, 16), (uint8_t)SPRITE_BL_BOT, "max-len local row1 BL_BOT");
+    CHECK_EQ(read_cell(row1, 17), msg[80],                "max-len local row1 first byte");
+    CHECK_EQ(read_cell(row1, 64), msg[127],               "max-len local row1 last byte");
+    CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR_BOT, "max-len local row1 BR_BOT");
+
+    CHECK_EQ(dut->hist_wr_row_obs, 2, "max-len local advances head by 2");
+}
+
+// Regression for issue 1.2: typing exactly INPUT_SOFT_WRAP_W (= 126)
+// chars used to leave the cursor at logical col 126, which on row 0
+// renders at screen col 128 -- off-screen. Now the line wraps at the
+// boundary so the cursor lands on a new empty row 1 at col 0.
+static void test_input_soft_wrap_at_boundary() {
+    printf("== test_input_soft_wrap_at_boundary\n");
+    reset();
+    bring_up();
+    const int L = 126;  // == INPUT_SOFT_WRAP_W
+    for (int i = 0; i < L; i++) {
+        RenderCmd ic;
+        ic.cmd        = RENDER_INSERT_AT_CURSOR;
+        ic.cursor_pos = (uint16_t)(i + 1);
+        ic.ascii      = 'a';
+        send_cmd(ic);
+    }
+
+    CHECK_EQ((int)dut->input_len_obs, L, "input_len after typing");
+    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor wraps to row 1");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor at row 1 col 0");
+
+    // Row 0 has the full 126 'a's; row 1 is empty (cursor sits at col 0).
+    CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a',  "row0 col2 first 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   127), 'a', "row0 col127 last 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), ' ',  "row1 col0 blank");
 }
 
 // P5.3 -- a failed local message gets an explicit X mark to the left
@@ -1565,6 +1663,9 @@ int main(int argc, char** argv) {
     test_input_nl_glyph_at_end_of_line();
     test_input_nl_glyph_empty_line();
     test_input_no_nl_glyph_on_soft_wrap();
+    test_remote_max_len_message();
+    test_local_max_len_message();
+    test_input_soft_wrap_at_boundary();
     test_local_fail_x_mark();
 
     tfp->close();
