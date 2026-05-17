@@ -169,11 +169,19 @@ module fe_scan
                               + FE_ROW_W'(input_scroll_offset)
                               + FE_ROW_W'(input_row_in_window);
         else
-            s0_text_ram_row = FE_ROW_W'(0);  // unused; de=0 here anyway
+            // Bottom 8 px strip (screen_row 37, vdata 592..599): de is
+            // actually 1 here. Map to TITLE_ROW so the bg mux paints it
+            // titlebar blue; the glyph is forced to a space below.
+            s0_text_ram_row = FE_ROW_W'(TITLE_ROW);
     end
 
     assign rd_row = s0_text_ram_row;
     assign rd_col = FE_COL_W'(s0_screen_col);
+
+    // True for the leftover 8 px past the last input row -- used to blank
+    // the glyph so this strip renders as a solid titlebar-blue band.
+    logic s0_in_bottom_strip;
+    assign s0_in_bottom_strip = (s0_screen_row > HWIDTH'(INPUT_SCREEN_END));
 
     // -----------------------------------------------------------------
     // Splash region detection (stage 0)
@@ -237,6 +245,7 @@ module fe_scan
     byte_t             s1_splash_char;
     logic [3:0]        s1_splash_gy;
     logic [2:0]        s1_splash_gx;
+    logic              s1_in_bottom_strip;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -251,6 +260,7 @@ module fe_scan
             s1_splash_char      <= 8'h20;
             s1_splash_gy        <= '0;
             s1_splash_gx        <= '0;
+            s1_in_bottom_strip  <= 1'b0;
         end else begin
             s1_gy               <= s0_gy;
             s1_gx               <= s0_gx;
@@ -263,6 +273,7 @@ module fe_scan
             s1_splash_char      <= s0_splash_char;
             s1_splash_gy        <= s0_splash_gy;
             s1_splash_gx        <= s0_splash_gx;
+            s1_in_bottom_strip  <= s0_in_bottom_strip;
         end
     end
 
@@ -273,9 +284,9 @@ module fe_scan
     logic in_connected;
     assign in_connected = (conn_state == 2'(CONN_CONNECTED));
 
-    assign glyph_code = in_connected ? rd_code
-                                     : (s1_splash_in_region ? s1_splash_char
-                                                            : 8'h20);
+    assign glyph_code = in_connected
+                          ? (s1_in_bottom_strip ? 8'h20 : rd_code)
+                          : (s1_splash_in_region ? s1_splash_char : 8'h20);
     assign glyph_gy   = in_connected ? s1_gy : s1_splash_gy;
 
     logic pixel_on;
