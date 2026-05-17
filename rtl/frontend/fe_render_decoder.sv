@@ -265,13 +265,19 @@ module fe_render_decoder
     // W - 1, which must be >= 0 (W <= 96). 80 leaves visual margin.
     localparam int MAX_BUBBLE_INNER_W = 80;
 
-    // Input area soft-wrap width. Row 0 of the input area carries the
-    // "> " prefix (INPUT_PREFIX_LEN = 2), so it has FE_N_COLS -
-    // INPUT_PREFIX_LEN = 126 content columns. Subsequent input rows
-    // have no prefix and 128 content columns, but we use the same
-    // 126-byte cap on all rows so the soft-wrap logic is uniform
-    // (the trailing 2 cols on continuation rows just stay blank).
-    localparam int INPUT_SOFT_WRAP_W = FE_N_COLS - INPUT_PREFIX_LEN;
+    // Input area soft-wrap width. text_ram is FE_N_COLS = 128 wide,
+    // but the pixel-side data_enable only covers HSIZE = 800 pixels
+    // (= 100 char cols), so cols 100..127 of text_ram are NEVER
+    // displayed. We further align the input's right edge with
+    // BUBBLE_RIGHT_EDGE (= 97) so what the user sees while typing
+    // matches the bubble that gets rendered on Enter.
+    //   Row 0 :  "> " at cols 0..1, content at cols 2..97 (96 chars).
+    //   Row 1+:  no prefix, content at cols 0..95 (also 96 chars, so
+    //            the wrap logic is uniform across rows).
+    // Hitting the 96th content byte wraps the cursor onto a new
+    // visual row at col 0, keeping it on-screen.
+    localparam int INPUT_SOFT_WRAP_W = BUBBLE_RIGHT_EDGE
+                                        - INPUT_PREFIX_LEN + 1;
 
     // Byte counter shared by S_HIST_STORE and S_HIST_LOAD. STORE walks
     // 0..msg_total_len_q-1; LOAD walks 0..msg_total_len_q to absorb the

@@ -1247,19 +1247,20 @@ static void test_input_scroll_clamps() {
 }
 
 // P5.1 input area soft-wrap: typing a long line with no 0x0A wraps
-// to the next visual row at INPUT_SOFT_WRAP_W = FE_N_COLS -
-// INPUT_PREFIX_LEN = 126 content bytes. Row 0 keeps the "> " prefix
-// (so visible cols 2..127 hold the first 126 typed bytes); row 1
-// starts at col 0 with no prefix and holds the overflow. Cursor at
-// end-of-buffer lands on the continuation row.
+// to the next visual row at INPUT_SOFT_WRAP_W (= 96 content bytes,
+// aligned with BUBBLE_RIGHT_EDGE so the input's right edge matches
+// what the bubble will look like on Enter). Row 0 keeps the "> "
+// prefix (cols 2..97 hold 96 typed bytes); continuation rows have
+// no prefix and start at col 0.
 static void test_input_soft_wrap_long_line() {
     printf("== test_input_soft_wrap_long_line\n");
     reset();
     bring_up();
 
-    // Type 127 'a' bytes. INPUT_SOFT_WRAP_W = 126 -> visual row 0
-    // holds 126 'a's, visual row 1 holds 1 'a'.
-    const int L = 127;
+    // Type 100 'a' bytes. INPUT_SOFT_WRAP_W = 96 -> visual row 0
+    // holds 96 'a's at cols 2..97, visual row 1 holds 4 'a's.
+    const int L = 100;
+    const int W = 96;
     for (int i = 0; i < L; i++) {
         RenderCmd ic;
         ic.cmd        = RENDER_INSERT_AT_CURSOR;
@@ -1269,36 +1270,39 @@ static void test_input_soft_wrap_long_line() {
     }
 
     CHECK_EQ((int)dut->input_len_obs, L, "input_len after typing");
-    // Cursor at end-of-buffer (pos=L) -> visual (row=1, col=L-126=1).
+    // Cursor at end-of-buffer (pos=L) -> visual (row=1, col=L-W=4).
     CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor on continuation row");
-    CHECK_EQ((int)dut->input_cursor_col_obs, L - 126,
+    CHECK_EQ((int)dut->input_cursor_col_obs, L - W,
              "cursor col = L - INPUT_SOFT_WRAP_W");
 
-    // Row 0 of the input region: "> " prefix at cols 0..1, then 126
-    // 'a's at cols 2..127.
+    // Row 0 of the input region: "> " prefix at cols 0..1, then 96
+    // 'a's at cols 2..97, blanks past col 97.
     CHECK_EQ(read_cell(INPUT_ROW_START,    0), '>',  "row0 col0 prompt");
     CHECK_EQ(read_cell(INPUT_ROW_START,    1), ' ',  "row0 col1 space");
     CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a',  "row0 col2 first 'a'");
-    CHECK_EQ(read_cell(INPUT_ROW_START,   127), 'a', "row0 col127 last 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   97), 'a',  "row0 col97 last 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   98), ' ',  "row0 col98 blank past wrap");
 
-    // Row 1 of the input region: 1 'a' at col 0, blanks afterwards.
+    // Row 1 of the input region: 4 'a's at cols 0..3, blanks afterwards.
     CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), 'a',  "row1 col0 wrap 'a'");
-    CHECK_EQ(read_cell(INPUT_ROW_START+1,  1), ' ',  "row1 col1 blank past end");
-    CHECK_EQ(read_cell(INPUT_ROW_START+1, 127), ' ', "row1 col127 blank");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  3), 'a',  "row1 col3 last 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  4), ' ',  "row1 col4 blank past end");
 
     // Row 2 is past n_lines = 2: blank.
     CHECK_EQ(read_cell(INPUT_ROW_START+2,  0), ' ',  "row2 col0 blank");
 }
 
-// P5.1 input area soft-wrap with mid-line cursor. After typing 127
-// chars, move the cursor to position 126 (just past byte 125, which
-// was the wrap byte). That puts the cursor at row 1 col 0.
+// P5.1 input area soft-wrap with mid-line cursor. After typing 100
+// chars (wraps at INPUT_SOFT_WRAP_W = 96), move the cursor to
+// position 96 (just past byte 95, which was the wrap byte). That
+// puts the cursor at row 1 col 0.
 static void test_input_soft_wrap_cursor_pre_wrap() {
     printf("== test_input_soft_wrap_cursor_pre_wrap\n");
     reset();
     bring_up();
 
-    const int L = 127;
+    const int L = 100;
+    const int W = 96;
     for (int i = 0; i < L; i++) {
         RenderCmd ic;
         ic.cmd        = RENDER_INSERT_AT_CURSOR;
@@ -1307,21 +1311,20 @@ static void test_input_soft_wrap_cursor_pre_wrap() {
         send_cmd(ic);
     }
 
-    // Cursor at pos=126 -> first character of continuation row.
+    // Cursor at pos=W -> first character of continuation row.
     RenderCmd mv;
     mv.cmd        = RENDER_MOVE_CURSOR;
-    mv.cursor_pos = 126;
+    mv.cursor_pos = (uint16_t)W;
     send_cmd(mv);
-    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor_pos=126 row=1");
-    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor_pos=126 col=0");
+    CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor_pos=W row=1");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor_pos=W col=0");
 
-    // Cursor at pos=125 -> last cell of first visual row (col 125 in
-    // logical terms; rendered with prefix offset that's col 127 on
-    // screen, but the observer reports the logical col).
-    mv.cursor_pos = 125;
+    // Cursor at pos=W-1 -> last cell of first visual row (logical col
+    // 95; rendered with prefix offset = screen col 97).
+    mv.cursor_pos = (uint16_t)(W - 1);
     send_cmd(mv);
-    CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor_pos=125 row=0");
-    CHECK_EQ((int)dut->input_cursor_col_obs, 125, "cursor_pos=125 col=125");
+    CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor_pos=W-1 row=0");
+    CHECK_EQ((int)dut->input_cursor_col_obs, W - 1, "cursor_pos=W-1 col=W-1");
 }
 
 // P5.3 -- NL glyph (return-arrow sprite at code 0x0A) is rendered at
@@ -1378,12 +1381,14 @@ static void test_input_nl_glyph_empty_line() {
 }
 
 // P5.3 -- a row closed by soft-wrap (not \n) gets NO ↵; only newline-
-// terminated rows do. Type 127 'a's so row 0 fills via soft-wrap.
+// terminated rows do. Type W+1 'a's so row 0 fills via soft-wrap and
+// row 1 has 1 byte.
 static void test_input_no_nl_glyph_on_soft_wrap() {
     printf("== test_input_no_nl_glyph_on_soft_wrap\n");
     reset();
     bring_up();
-    for (int i = 0; i < 127; i++) {
+    const int W = 96;
+    for (int i = 0; i < W + 1; i++) {
         RenderCmd ic;
         ic.cmd = RENDER_INSERT_AT_CURSOR;
         ic.cursor_pos = (uint16_t)(i + 1);
@@ -1391,12 +1396,12 @@ static void test_input_no_nl_glyph_on_soft_wrap() {
         send_cmd(ic);
     }
 
-    // Row 0 ends at col 127 (full width). No ↵; no extra cell to
-    // check (col 128 doesn't exist).  Row 1 col 0 has the wrap'd 'a',
-    // and the byte right after ('a' at col 1 area) is blank, NOT ↵.
-    CHECK_EQ(read_cell(INPUT_ROW_START,   127), 'a', "row0 col127 last wrap byte");
-    CHECK_EQ(read_cell(INPUT_ROW_START+1, 0),   'a', "row1 col0 wrap continuation");
-    CHECK_EQ(read_cell(INPUT_ROW_START+1, 1),   ' ', "row1 col1 no NL glyph after wrap");
+    // Row 0 ends at col 1+W=97. The cell right after (col 98) is blank,
+    // NOT a ↵ -- soft-wrapped rows don't get the newline glyph.
+    CHECK_EQ(read_cell(INPUT_ROW_START,   97), 'a', "row0 col97 last wrap byte");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   98), ' ', "row0 col98 no NL glyph after wrap");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 0),  'a', "row1 col0 wrap continuation");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 1),  ' ', "row1 col1 blank past content");
 }
 
 // Regression: a remote bubble whose len == MAX_MSG_LEN (== 128) used
@@ -1468,15 +1473,15 @@ static void test_local_max_len_message() {
     CHECK_EQ(dut->hist_wr_row_obs, 2, "max-len local advances head by 2");
 }
 
-// Regression for issue 1.2: typing exactly INPUT_SOFT_WRAP_W (= 126)
-// chars used to leave the cursor at logical col 126, which on row 0
-// renders at screen col 128 -- off-screen. Now the line wraps at the
-// boundary so the cursor lands on a new empty row 1 at col 0.
+// Regression for issue 1.2: typing exactly INPUT_SOFT_WRAP_W (= 96)
+// chars used to leave the cursor at logical col 96, which would
+// render off the visible screen. Now the line wraps at the boundary
+// so the cursor lands on a new empty row 1 at col 0.
 static void test_input_soft_wrap_at_boundary() {
     printf("== test_input_soft_wrap_at_boundary\n");
     reset();
     bring_up();
-    const int L = 126;  // == INPUT_SOFT_WRAP_W
+    const int L = 96;  // == INPUT_SOFT_WRAP_W
     for (int i = 0; i < L; i++) {
         RenderCmd ic;
         ic.cmd        = RENDER_INSERT_AT_CURSOR;
@@ -1489,10 +1494,11 @@ static void test_input_soft_wrap_at_boundary() {
     CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor wraps to row 1");
     CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor at row 1 col 0");
 
-    // Row 0 has the full 126 'a's; row 1 is empty (cursor sits at col 0).
-    CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a',  "row0 col2 first 'a'");
-    CHECK_EQ(read_cell(INPUT_ROW_START,   127), 'a', "row0 col127 last 'a'");
-    CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), ' ',  "row1 col0 blank");
+    // Row 0 has the full 96 'a's at cols 2..97; row 1 is empty.
+    CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a', "row0 col2 first 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   97), 'a', "row0 col97 last 'a'");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   98), ' ', "row0 col98 blank past wrap");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1,  0), ' ', "row1 col0 blank");
 }
 
 // P5.3 -- a failed local message gets an explicit X mark to the left
