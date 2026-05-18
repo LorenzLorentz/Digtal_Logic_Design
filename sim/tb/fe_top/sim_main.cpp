@@ -300,6 +300,14 @@ static void test_conn_state_connected() {
     }
     CHECK_EQ(read_cell(TITLE_ROW, 14), ' ',  "title col 14 is space");
     CHECK_EQ(read_cell(TITLE_ROW, 99), ' ',  "title tail is space");
+
+    uint8_t legend[24];
+    read_row(TITLE_ROW + 1, 0, 23, legend);
+    const char legend_expect[] = "Me: Alice | Peer: Bob";
+    for (int i = 0; i < 21; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "legend col %d", i);
+        CHECK_EQ(legend[i], (uint8_t)legend_expect[i], lbl);
+    }
 }
 
 // Remote message: left-aligned bubble starting at col BUBBLE_MARGIN_L.
@@ -331,6 +339,41 @@ static void test_append_remote() {
     CHECK_EQ(read_cell(HIST_ROW_START, 7), 'o',  "remote payload[4]");
     CHECK_EQ(read_cell(HIST_ROW_START, 8), SPRITE_BR, "remote right border");
     CHECK_EQ(read_cell(HIST_ROW_START, 9), ' ',  "remote col after bubble");
+}
+
+static void test_emoji_codes_render_in_bubble() {
+    printf("== test_emoji_codes_render_in_bubble\n");
+    reset();
+    bring_up();
+
+    const uint8_t msg[] = {
+        0xE0, ' ', 0xE1, ' ', 0xE2, ' ', 0xE3, ' ',
+        0xE4, ' ', 0xE5, ' ', 0xE6, ' ', 0xE7, ' ',
+        0xE8, ' ', 0xE9, ' ', 0xEA, ' ', 0xEB, ' ', 0xEC
+    };
+    RenderCmd c;
+    c.cmd        = RENDER_APPEND_REMOTE;
+    c.msg_id     = 11;
+    c.side       = MSG_REMOTE;
+    c.status     = MSG_SUCCESS;
+    c.len        = 25;
+    c.payload    = msg;
+    c.payload_n  = 25;
+    send_cmd(c);
+
+    CHECK_EQ(read_cell(HIST_ROW_START, 3), 0xE0, "happy emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 5), 0xE1, "sad emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 7), 0xE2, "heart emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 9), 0xE3, "ok emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 11), 0xE4, "laugh emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 13), 0xE5, "wink emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 15), 0xE6, "angry emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 17), 0xE7, "star emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 19), 0xE8, "fire emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 21), 0xE9, "yes emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 23), 0xEA, "no emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 25), 0xEB, "up emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 27), 0xEC, "down emoji code");
 }
 
 // Local message: right-aligned bubble ending at col BUBBLE_RIGHT_EDGE (97).
@@ -1087,12 +1130,13 @@ static void test_input_newline_renders_multirow() {
     CHECK_EQ((int)dut->input_cursor_row_obs, 1, "cursor row = 1 (second line)");
     CHECK_EQ((int)dut->input_cursor_col_obs, 2, "cursor col = 2 (after 'cd')");
 
-    // Row 0 of the input region: "> ab" then ↵ then blanks.
+    // Row 0 of the input region: "> ab" then blanks. The newline byte
+    // is a layout control and is not painted into the input box.
     CHECK_EQ(read_cell(INPUT_ROW_START,    0), '>',  "row0 col0 prompt");
     CHECK_EQ(read_cell(INPUT_ROW_START,    1), ' ',  "row0 col1 prompt space");
     CHECK_EQ(read_cell(INPUT_ROW_START,    2), 'a',  "row0 col2 'a'");
     CHECK_EQ(read_cell(INPUT_ROW_START,    3), 'b',  "row0 col3 'b'");
-    CHECK_EQ(read_cell(INPUT_ROW_START,    4), 0x0A, "row0 col4 NL glyph");
+    CHECK_EQ(read_cell(INPUT_ROW_START,    4), ' ',  "row0 col4 blank past line");
     CHECK_EQ(read_cell(INPUT_ROW_START,    5), ' ',  "row0 col5 blank past NL");
 
     // Row 1: "cd" starting at col 0 (no prefix). Last line, no ↵.
@@ -1151,6 +1195,72 @@ static void test_cursor_crosses_newline() {
     send_cmd(mv);
     CHECK_EQ((int)dut->input_cursor_row_obs, 0, "cursor_pos=0 row=0");
     CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor_pos=0 col=0");
+}
+
+static void test_delete_space_at_cursor() {
+    printf("== test_delete_space_at_cursor\n");
+    reset();
+    bring_up();
+
+    const char buf[] = "ewdhbgw  hidsd";
+    type_chars(buf, sizeof(buf) - 1);
+
+    RenderCmd mv;
+    mv.cmd = RENDER_MOVE_CURSOR;
+    mv.cursor_pos = 9;  // right after the second space
+    send_cmd(mv);
+
+    RenderCmd dc;
+    dc.cmd = RENDER_DELETE_AT_CURSOR;
+    dc.cursor_pos = 8;  // post-edit cursor after deleting one space
+    send_cmd(dc);
+
+    const char expect[] = "> ewdhbgw hidsd ";
+    for (int i = 0; i < (int)sizeof(expect) - 1; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "space-delete col %d", i);
+        CHECK_EQ(read_cell(INPUT_ROW_START, i), (uint8_t)expect[i], lbl);
+    }
+    CHECK_EQ((int)dut->input_len_obs, 13, "input_len after deleting one space");
+    CHECK_EQ((int)dut->input_cursor_obs, 8, "cursor after deleting one space");
+}
+
+static void test_delete_in_multiline_middle_row() {
+    printf("== test_delete_in_multiline_middle_row\n");
+    reset();
+    bring_up();
+
+    // Five visual lines: "aa\nbb\ncc\ndd\nee". Put the cursor after the
+    // first 'd' on row 3, then backspace. Only that 'd' should disappear.
+    const char buf[] = {'a','a',0x0A,'b','b',0x0A,'c','c',0x0A,
+                        'd','d',0x0A,'e','e'};
+    type_chars(buf, sizeof(buf));
+
+    RenderCmd mv;
+    mv.cmd = RENDER_MOVE_CURSOR;
+    mv.cursor_pos = 10;  // row 3, col 1 (after first 'd')
+    send_cmd(mv);
+    CHECK_EQ((int)dut->input_cursor_row_obs, 3, "cursor on fourth row before delete");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 1, "cursor after first d before delete");
+
+    RenderCmd dc;
+    dc.cmd = RENDER_DELETE_AT_CURSOR;
+    dc.cursor_pos = 9;
+    send_cmd(dc);
+
+    CHECK_EQ((int)dut->input_len_obs, 13, "input_len after multiline delete");
+    CHECK_EQ((int)dut->input_cursor_row_obs, 3, "cursor stays on fourth row");
+    CHECK_EQ((int)dut->input_cursor_col_obs, 0, "cursor at row start after delete");
+
+    CHECK_EQ(read_cell(INPUT_ROW_START,   2), 'a', "row0 a0");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   3), 'a', "row0 a1");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 0), 'b', "row1 b0");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 1), 'b', "row1 b1");
+    CHECK_EQ(read_cell(INPUT_ROW_START+2, 0), 'c', "row2 c0");
+    CHECK_EQ(read_cell(INPUT_ROW_START+2, 1), 'c', "row2 c1");
+    CHECK_EQ(read_cell(INPUT_ROW_START+3, 0), 'd', "row3 only remaining d");
+    CHECK_EQ(read_cell(INPUT_ROW_START+3, 1), ' ', "row3 col1 blank after delete");
+    CHECK_EQ(read_cell(INPUT_ROW_START+4, 0), 'e', "row4 e0");
+    CHECK_EQ(read_cell(INPUT_ROW_START+4, 1), 'e', "row4 e1");
 }
 
 // Auto-follow: typing past N_INPUT_VISIBLE rows scrolls the input
@@ -1327,12 +1437,10 @@ static void test_input_soft_wrap_cursor_pre_wrap() {
     CHECK_EQ((int)dut->input_cursor_col_obs, W - 1, "cursor_pos=W-1 col=W-1");
 }
 
-// P5.3 -- NL glyph (return-arrow sprite at code 0x0A) is rendered at
-// the column right after the last content byte of any input row that
-// ended with a real 0x0A (Shift+Enter). Subsequent rows show their
-// own ↵; only the last (still-open) row has no ↵.
-static void test_input_nl_glyph_at_end_of_line() {
-    printf("== test_input_nl_glyph_at_end_of_line\n");
+// Newline bytes in the input box should only split visual rows; they
+// should not render a visible return-arrow marker.
+static void test_input_newline_marker_hidden_at_end_of_line() {
+    printf("== test_input_newline_marker_hidden_at_end_of_line\n");
     reset();
     bring_up();
     // "ab\nc\nd"
@@ -1345,25 +1453,22 @@ static void test_input_nl_glyph_at_end_of_line() {
         send_cmd(ic);
     }
 
-    // Row 0: "> ab↵". ↵ at col 4 (after 'b' at col 3).
+    // Row 0: "> ab", blank at col 4 where the marker used to be.
     CHECK_EQ(read_cell(INPUT_ROW_START,   2), 'a',  "row0 'a'");
     CHECK_EQ(read_cell(INPUT_ROW_START,   3), 'b',  "row0 'b'");
-    CHECK_EQ(read_cell(INPUT_ROW_START,   4), 0x0A, "row0 NL glyph at col 4");
+    CHECK_EQ(read_cell(INPUT_ROW_START,   4), ' ',  "row0 no NL marker at col 4");
 
-    // Row 1: "c↵". ↵ at col 1.
+    // Row 1: "c", blank at col 1 where the marker used to be.
     CHECK_EQ(read_cell(INPUT_ROW_START+1, 0), 'c',  "row1 'c'");
-    CHECK_EQ(read_cell(INPUT_ROW_START+1, 1), 0x0A, "row1 NL glyph at col 1");
+    CHECK_EQ(read_cell(INPUT_ROW_START+1, 1), ' ',  "row1 no NL marker at col 1");
 
     // Row 2: "d", no ↵ (last open line).
     CHECK_EQ(read_cell(INPUT_ROW_START+2, 0), 'd',  "row2 'd'");
     CHECK_EQ(read_cell(INPUT_ROW_START+2, 1), ' ',  "row2 col1 no NL glyph");
 }
 
-// P5.3 -- typing just "\n" produces an empty row 0 that should still
-// show a ↵ at col 2 (right after the prefix), since the row was
-// closed by a real 0x0A.
-static void test_input_nl_glyph_empty_line() {
-    printf("== test_input_nl_glyph_empty_line\n");
+static void test_input_newline_marker_hidden_empty_line() {
+    printf("== test_input_newline_marker_hidden_empty_line\n");
     reset();
     bring_up();
     RenderCmd ic;
@@ -1372,8 +1477,8 @@ static void test_input_nl_glyph_empty_line() {
     ic.ascii = 0x0A;
     send_cmd(ic);
 
-    // Row 0: "> ↵". ↵ at col 2.
-    CHECK_EQ(read_cell(INPUT_ROW_START,   2), 0x0A, "row0 NL glyph at col 2");
+    // Row 0: "> " followed by blanks; the newline marker is hidden.
+    CHECK_EQ(read_cell(INPUT_ROW_START,   2), ' ',  "row0 no NL marker at col 2");
     CHECK_EQ(read_cell(INPUT_ROW_START,   3), ' ',  "row0 col3 blank");
 
     // Row 1: empty (no ↵).
@@ -1635,6 +1740,7 @@ int main(int argc, char** argv) {
     test_redraw_all();
     test_conn_state_connected();
     test_append_remote();
+    test_emoji_codes_render_in_bubble();
     test_append_local_pending();
     test_update_status_success();
     test_update_status_fail();
@@ -1661,13 +1767,15 @@ int main(int argc, char** argv) {
     test_input_commit_clears_all_rows();
     test_input_scroll_clamps();
     test_cursor_crosses_newline();
+    test_delete_space_at_cursor();
+    test_delete_in_multiline_middle_row();
     test_cursor_auto_follow_scroll();
     test_bubble_soft_wrap_long_line();
     test_bubble_multiline_aligned();
     test_input_soft_wrap_long_line();
     test_input_soft_wrap_cursor_pre_wrap();
-    test_input_nl_glyph_at_end_of_line();
-    test_input_nl_glyph_empty_line();
+    test_input_newline_marker_hidden_at_end_of_line();
+    test_input_newline_marker_hidden_empty_line();
     test_input_no_nl_glyph_on_soft_wrap();
     test_remote_max_len_message();
     test_local_max_len_message();

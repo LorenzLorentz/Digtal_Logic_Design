@@ -248,7 +248,10 @@ module chat_top
     logic [INPUT_SCROLL_W-1:0]                   fe_input_scroll_offset_obs;
     /* verilator lint_on UNUSEDSIGNAL */
 
-    fe_top u_fe (
+    fe_top #(
+        .LOCAL_NAME_LEN   (MY_NAME_LEN),
+        .LOCAL_NAME_PACKED(MY_NAME_PACKED)
+    ) u_fe (
         .clk                     (clk),
         .rst_n                   (rst_n),
         .clk_pix                 (clk_pix),

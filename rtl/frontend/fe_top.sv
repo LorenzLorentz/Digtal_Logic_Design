@@ -29,6 +29,11 @@
 module fe_top
     import chat_pkg::*;
     import fe_pkg::*;
+#(
+    parameter int LOCAL_NAME_LEN = 5,
+    parameter logic [MAX_NAME_LEN*8-1:0] LOCAL_NAME_PACKED =
+        128'h00000000_00000000_00000065_63696c41
+)
 (
     input  logic                       clk,        // chat-domain clock
     input  logic                       rst_n,
@@ -101,7 +106,10 @@ module fe_top
         .sync_out(rst_n_sync)
     );
 
-    fe_render_decoder u_decoder (
+    fe_render_decoder #(
+        .LOCAL_NAME_LEN   (LOCAL_NAME_LEN),
+        .LOCAL_NAME_PACKED(LOCAL_NAME_PACKED)
+    ) u_decoder (
         .clk                    (clk),
         .rst_n                  (rst_n_sync),
         .be_render_valid        (be_render_valid),

@@ -95,13 +95,24 @@ package fe_pkg;
     localparam byte_t SPRITE_BL_MID  = 8'hFC;
     localparam byte_t SPRITE_BR_MID  = 8'hFD;
 
-    // Standalone status icons. 0x0A is the "return arrow" glyph -- it
-    // gets rendered at the end of input lines that are terminated by
-    // a real 0x0A byte so the user can see where Shift+Enter landed.
-    // 0xF2 is the "X" mark, drawn to the left of failed local bubbles
-    // so the fail is unambiguous even if the rounded vs. square corner
-    // sprites are hard to tell apart at a glance.
-    localparam byte_t SPRITE_NL_GLYPH = 8'h0A;
+    // Emoji glyphs produced by backend token expansion.
+    localparam byte_t EMOJI_HAPPY = 8'hE0;
+    localparam byte_t EMOJI_SAD   = 8'hE1;
+    localparam byte_t EMOJI_HEART = 8'hE2;
+    localparam byte_t EMOJI_OK    = 8'hE3;
+    localparam byte_t EMOJI_LAUGH = 8'hE4;
+    localparam byte_t EMOJI_WINK  = 8'hE5;
+    localparam byte_t EMOJI_ANGRY = 8'hE6;
+    localparam byte_t EMOJI_STAR  = 8'hE7;
+    localparam byte_t EMOJI_FIRE  = 8'hE8;
+    localparam byte_t EMOJI_YES   = 8'hE9;
+    localparam byte_t EMOJI_NO    = 8'hEA;
+    localparam byte_t EMOJI_UP    = 8'hEB;
+    localparam byte_t EMOJI_DOWN  = 8'hEC;
+
+    // Standalone status icons. 0xF2 is the "X" mark, drawn to the left
+    // of failed local bubbles so the fail is unambiguous even if the
+    // rounded vs. square corner sprites are hard to tell apart at a glance.
     localparam byte_t SPRITE_FAIL_X   = 8'hF2;
 
     // -----------------------------------------------------------------

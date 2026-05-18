@@ -47,6 +47,11 @@
 module fe_render_decoder
     import chat_pkg::*;
     import fe_pkg::*;
+#(
+    parameter int LOCAL_NAME_LEN = 5,
+    parameter logic [MAX_NAME_LEN*8-1:0] LOCAL_NAME_PACKED =
+        128'h00000000_00000000_00000065_63696c41
+)
 (
     input  logic                       clk,
     input  logic                       rst_n,
@@ -181,10 +186,6 @@ module fe_render_decoder
     logic [LINE_CNT_W-1:0]            input_n_lines_q;
     logic [LINE_IDX_W-1:0]            input_ml_offset_q [MAX_INPUT_LINES];
     msg_len_t                         input_ml_len_q    [MAX_INPUT_LINES];
-    // True iff this visual row was closed by a real 0x0A byte (i.e.
-    // the user hit Shift+Enter, not soft-wrap). The renderer paints
-    // SPRITE_NL_GLYPH right after the content on these rows.
-    logic                             input_ml_ended_nl_q [MAX_INPUT_LINES];
     logic [INPUT_LINE_W-1:0]          input_cursor_row_q;
     msg_len_t                         input_cursor_col_q;
     logic [INPUT_SCROLL_W-1:0]        input_scroll_offset_q;
@@ -384,7 +385,7 @@ module fe_render_decoder
     logic [FE_COL_W-1:0] title_name_idx;
     logic [FE_COL_W-1:0] input_idx;
 
-    byte_t titlebar_cell, hist_cell, input_cell;
+    byte_t titlebar_cell, legend_cell, hist_cell, input_cell;
 
     // Bubble geometry for history rows
     logic              show_fail;
@@ -445,6 +446,46 @@ module fe_render_decoder
         else
             titlebar_cell = " ";
 
+        // legend row under the titlebar.
+        begin
+            automatic int unsigned local_start;
+            automatic int unsigned sep_start;
+            automatic int unsigned peer_start;
+            automatic int unsigned col_u;
+            automatic int unsigned idx_u;
+            local_start = 4;
+            sep_start   = local_start + LOCAL_NAME_LEN;
+            peer_start  = sep_start + 9;
+            col_u       = int'(col_cnt_q);
+            idx_u       = 0;
+
+            legend_cell = " ";
+            if (col_u == 0) legend_cell = "M";
+            else if (col_u == 1) legend_cell = "e";
+            else if (col_u == 2) legend_cell = ":";
+            else if (col_u == 3) legend_cell = " ";
+            else if ((col_u >= local_start)
+                  && (col_u < local_start + LOCAL_NAME_LEN)
+                  && (col_u - local_start < MAX_NAME_LEN)) begin
+                idx_u = col_u - local_start;
+                legend_cell = LOCAL_NAME_PACKED[idx_u*8 +: 8];
+            end else if (col_u == sep_start + 0) legend_cell = " ";
+            else if (col_u == sep_start + 1) legend_cell = "|";
+            else if (col_u == sep_start + 2) legend_cell = " ";
+            else if (col_u == sep_start + 3) legend_cell = "P";
+            else if (col_u == sep_start + 4) legend_cell = "e";
+            else if (col_u == sep_start + 5) legend_cell = "e";
+            else if (col_u == sep_start + 6) legend_cell = "r";
+            else if (col_u == sep_start + 7) legend_cell = ":";
+            else if (col_u == sep_start + 8) legend_cell = " ";
+            else if ((col_u >= peer_start)
+                  && (LEN_WIDTH'(col_u - peer_start) < peer_name_len_q)
+                  && (col_u - peer_start < MAX_NAME_LEN)) begin
+                idx_u = col_u - peer_start;
+                legend_cell = peer_name_q[idx_u*8 +: 8];
+            end
+        end
+
         // history row -- bubble layout (multi-line aware). Failed local
         // messages get an explicit X mark in the first visual row at
         // col bubble_left - 1.
@@ -486,9 +527,8 @@ module fe_render_decoder
         // the input area carries the "> " prefix; rows 1..n_lines-1
         // start at col 0. Rows past n_lines are blanked so a buffer
         // that shrunk (e.g. Enter-commit) doesn't leave stale content.
-        // A row that ended with a logical newline gets a return-arrow
-        // sprite at the column right after its content (so the user
-        // can see where Shift+Enter landed).
+        // Logical newline bytes are layout controls only; they are not
+        // painted into the input box.
         if (LINE_CNT_W'(input_row_cnt_q) >= input_n_lines_q) begin
             input_cell = " ";
         end else if (input_row_cnt_q == '0) begin
@@ -496,9 +536,6 @@ module fe_render_decoder
                 input_cell = input_prefix_byte(int'(col_cnt_q));
             else if (LEN_WIDTH'(input_idx) < input_ml_len_q[0])
                 input_cell = input_line_q[LINE_IDX_W'(input_idx)];
-            else if (input_ml_ended_nl_q[0]
-                     && (LEN_WIDTH'(input_idx) == input_ml_len_q[0]))
-                input_cell = SPRITE_NL_GLYPH;
             else
                 input_cell = " ";
         end else begin
@@ -507,10 +544,6 @@ module fe_render_decoder
                 input_cell = input_line_q[
                     input_ml_offset_q[input_row_cnt_q]
                     + LINE_IDX_W'(col_cnt_q)];
-            else if (input_ml_ended_nl_q[input_row_cnt_q]
-                     && (LEN_WIDTH'(col_cnt_q)
-                         == input_ml_len_q[input_row_cnt_q]))
-                input_cell = SPRITE_NL_GLYPH;
             else
                 input_cell = " ";
         end
@@ -555,8 +588,8 @@ module fe_render_decoder
             end
             S_TITLEBAR: begin
                 wr_en   = 1'b1;
-                wr_row  = FE_ROW_W'(TITLE_ROW);
-                wr_code = titlebar_cell;
+                wr_row  = FE_ROW_W'(TITLE_ROW) + FE_ROW_W'(row_cnt_q);
+                wr_code = (row_cnt_q == '0) ? titlebar_cell : legend_cell;
             end
             S_INPUT_REDRAW: begin
                 wr_en   = 1'b1;
@@ -650,7 +683,7 @@ module fe_render_decoder
             end
 
             S_TITLEBAR: begin
-                if (at_last_col)
+                if (at_last_col && (row_cnt_q != '0))
                     state_d = chain_input_q ? S_INPUT_PARSE : S_IDLE;
             end
 
@@ -774,7 +807,6 @@ module fe_render_decoder
             for (int i = 0; i < MAX_INPUT_LINES; i++) begin
                 input_ml_offset_q[i]  <= '0;
                 input_ml_len_q[i]     <= '0;
-                input_ml_ended_nl_q[i] <= 1'b0;
             end
             input_cursor_row_q    <= '0;
             input_cursor_col_q    <= '0;
@@ -819,6 +851,7 @@ module fe_render_decoder
             if (entering_new_state) begin
                 col_cnt_q <= '0;
                 if (state_d == S_HIST_CLEAR)    row_cnt_q       <= '0;
+                if (state_d == S_TITLEBAR)      row_cnt_q       <= '0;
                 if (state_d == S_INPUT_REDRAW)  input_row_cnt_q <= '0;
             end else begin
                 unique case (state_q)
@@ -831,8 +864,14 @@ module fe_render_decoder
                         end
                     end
                     S_TITLEBAR: begin
-                        if (col_cnt_q != FE_COL_W'(FE_N_COLS-1))
+                        if (col_cnt_q == FE_COL_W'(FE_N_COLS-1)) begin
+                            if (row_cnt_q == '0) begin
+                                col_cnt_q <= '0;
+                                row_cnt_q <= row_cnt_q + 1'b1;
+                            end
+                        end else begin
                             col_cnt_q <= col_cnt_q + 1'b1;
+                        end
                     end
                     S_INPUT_REDRAW: begin
                         if (col_cnt_q == FE_COL_W'(FE_N_COLS-1)) begin
@@ -1064,7 +1103,7 @@ module fe_render_decoder
             // now-invalid tail.
             // -----------------------------------------------------------
             if (state_q == S_IDLE && state_d == S_INPUT_DELETE)
-                input_shift_idx_q <= input_shift_cursor_q;
+                input_shift_idx_q <= be_render_cursor_pos;
             if (state_q == S_INPUT_DELETE) begin
                 if (input_shift_idx_q >= input_len_q - LEN_WIDTH'(1)) begin
                     // No more shifts left -- finish up.
@@ -1145,7 +1184,6 @@ module fe_render_decoder
 
                 if (is_break) begin
                     input_ml_len_q[parse_last_sel] <= new_line_len;
-                    input_ml_ended_nl_q[parse_last_sel] <= is_nl;
                     input_ml_offset_q[parse_line_sel]
                         <= parse_idx_q + LINE_IDX_W'(1);
                     if (input_cursor_q > msg_len_t'(parse_idx_q)) begin
@@ -1169,10 +1207,6 @@ module fe_render_decoder
 
                     input_ml_len_q[parse_last_sel]
                         <= input_len_q - msg_len_t'(parse_line_start_q);
-                    // The final, still-open visual line never ended in a
-                    // newline (we exited because we ran out of bytes,
-                    // not because we hit a break).
-                    input_ml_ended_nl_q[parse_last_sel] <= 1'b0;
                     input_n_lines_q    <= parse_n_lines_q;
                     input_cursor_row_q <= parse_cursor_row_q;
                     input_cursor_col_q <= parse_cursor_col_q;

@@ -218,6 +218,7 @@ module be_top
     // Latched fields needed AFTER S_IDLE leaves them stale.
     msg_id_t                            pending_msg_id_q;
     msg_len_t                           pending_len_q;
+    logic [MAX_MSG_LEN*8-1:0]           pending_payload_q;
 
     seq_t                               rx_seq_q;
     msg_len_t                           rx_len_q;
@@ -234,12 +235,145 @@ module be_top
     // Combinational helpers
     // -----------------------------------------------------------------
 
-    // line_buf packed little-endian: byte i at bits [i*8 +: 8].
-    logic [MAX_MSG_LEN*8-1:0] line_buf_packed;
+    // encoded_line_* is the committed/sent payload. It expands a small
+    // set of user-typed backslash tokens into private glyph codes that
+    // the frontend font renders as emoji.
+    logic [MAX_MSG_LEN*8-1:0] encoded_line_payload;
+    msg_len_t                 encoded_line_len;
+
     always_comb begin
-        line_buf_packed = '0;
-        for (int i = 0; i < MAX_LINE_LEN; i++)
-            line_buf_packed[i*8 +: 8] = line_buf[i];
+        int src;
+        int dst;
+
+        encoded_line_payload = '0;
+        encoded_line_len     = '0;
+        src = 0;
+        dst = 0;
+
+        for (int step = 0; step < MAX_LINE_LEN; step++) begin
+            if ((src < int'(len_q)) && (dst < MAX_MSG_LEN)) begin
+                if ((src + 5 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "h")
+                 && (line_buf[src + 2] == "a")
+                 && (line_buf[src + 3] == "p")
+                 && (line_buf[src + 4] == "p")
+                 && (line_buf[src + 5] == "y")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE0;
+                    src += 6;
+                    dst += 1;
+                end else if ((src + 5 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "l")
+                 && (line_buf[src + 2] == "a")
+                 && (line_buf[src + 3] == "u")
+                 && (line_buf[src + 4] == "g")
+                 && (line_buf[src + 5] == "h")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE4;
+                    src += 6;
+                    dst += 1;
+                end else if ((src + 4 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "w")
+                 && (line_buf[src + 2] == "i")
+                 && (line_buf[src + 3] == "n")
+                 && (line_buf[src + 4] == "k")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE5;
+                    src += 5;
+                    dst += 1;
+                end else if ((src + 5 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "a")
+                 && (line_buf[src + 2] == "n")
+                 && (line_buf[src + 3] == "g")
+                 && (line_buf[src + 4] == "r")
+                 && (line_buf[src + 5] == "y")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE6;
+                    src += 6;
+                    dst += 1;
+                end else if ((src + 4 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "s")
+                 && (line_buf[src + 2] == "t")
+                 && (line_buf[src + 3] == "a")
+                 && (line_buf[src + 4] == "r")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE7;
+                    src += 5;
+                    dst += 1;
+                end else if ((src + 4 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "f")
+                 && (line_buf[src + 2] == "i")
+                 && (line_buf[src + 3] == "r")
+                 && (line_buf[src + 4] == "e")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE8;
+                    src += 5;
+                    dst += 1;
+                end else if ((src + 3 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "y")
+                 && (line_buf[src + 2] == "e")
+                 && (line_buf[src + 3] == "s")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE9;
+                    src += 4;
+                    dst += 1;
+                end else if ((src + 2 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "n")
+                 && (line_buf[src + 2] == "o")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hEA;
+                    src += 3;
+                    dst += 1;
+                end else if ((src + 2 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "u")
+                 && (line_buf[src + 2] == "p")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hEB;
+                    src += 3;
+                    dst += 1;
+                end else if ((src + 4 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "d")
+                 && (line_buf[src + 2] == "o")
+                 && (line_buf[src + 3] == "w")
+                 && (line_buf[src + 4] == "n")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hEC;
+                    src += 5;
+                    dst += 1;
+                end else if ((src + 5 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "h")
+                 && (line_buf[src + 2] == "e")
+                 && (line_buf[src + 3] == "a")
+                 && (line_buf[src + 4] == "r")
+                 && (line_buf[src + 5] == "t")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE2;
+                    src += 6;
+                    dst += 1;
+                end else if ((src + 3 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "s")
+                 && (line_buf[src + 2] == "a")
+                 && (line_buf[src + 3] == "d")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE1;
+                    src += 4;
+                    dst += 1;
+                end else if ((src + 2 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "o")
+                 && (line_buf[src + 2] == "k")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hE3;
+                    src += 3;
+                    dst += 1;
+                end else begin
+                    encoded_line_payload[dst*8 +: 8] = line_buf[src];
+                    src += 1;
+                    dst += 1;
+                end
+            end
+        end
+
+        encoded_line_len = msg_len_t'(dst);
     end
 
     // MY_NAME zero-extended to MAX_MSG_LEN bytes for tx payload.
@@ -492,7 +626,7 @@ module be_top
                 be_tx_frame_type = 3'(FRAME_DATA);
                 be_tx_msg_id     = pending_msg_id_q;
                 be_tx_len        = pending_len_q;
-                be_tx_payload    = line_buf_packed;
+                be_tx_payload    = pending_payload_q;
             end
             default: ;
         endcase
@@ -540,7 +674,7 @@ module be_top
                 be_render_side    = 2'(MSG_LOCAL);
                 be_render_status  = 2'(MSG_PENDING);
                 be_render_len     = pending_len_q;
-                be_render_payload = line_buf_packed;
+                be_render_payload = pending_payload_q;
             end
             S_ENTER_RENDER_INPUT_CLEAR: begin
                 be_render_valid      = 1'b1;
@@ -649,6 +783,7 @@ module be_top
             next_msg_id_q      <= '0;
             pending_msg_id_q   <= '0;
             pending_len_q      <= '0;
+            pending_payload_q  <= '0;
             rx_seq_q           <= '0;
             rx_len_q           <= '0;
             rx_payload_q       <= '0;
@@ -772,7 +907,8 @@ module be_top
                         KEY_ENTER: begin
                             if (len_q != 0) begin
                                 pending_msg_id_q <= next_msg_id_q;
-                                pending_len_q    <= len_q;
+                                pending_len_q    <= encoded_line_len;
+                                pending_payload_q <= encoded_line_payload;
 
                                 len_q            <= '0;
                                 cursor_pos_q     <= '0;
@@ -836,8 +972,8 @@ module be_top
                 store_wr_msg_id  = next_msg_id_q;
                 store_wr_side    = 2'(MSG_LOCAL);
                 store_wr_status  = 2'(MSG_PENDING);
-                store_wr_len     = len_q;
-                store_wr_payload = line_buf_packed;
+                store_wr_len     = encoded_line_len;
+                store_wr_payload = encoded_line_payload;
             end
         end
     end

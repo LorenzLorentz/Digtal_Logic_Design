@@ -805,6 +805,51 @@ static void test_payload_packed_correctly() {
     CHECK_EQ(store_payload_byte(10), 0, "payload[10] zero past len");
 }
 
+static void test_emoji_tokens_encoded_on_commit() {
+    printf("== test_emoji_tokens_encoded_on_commit\n");
+    reset();
+    for (char c : std::string("\\happy \\sad \\heart \\ok \\laugh \\wink \\angry \\star \\fire \\yes \\no \\up \\down")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r1;
+    CHECK_EQ(wait_render(r1), true, "got local append render");
+    CHECK_EQ(r1.cmd, RENDER_APPEND_LOCAL_PENDING, "render append local");
+    CHECK_EQ(r1.len, 25, "encoded render len");
+    const uint8_t expected[] = {
+        0xE0, ' ', 0xE1, ' ', 0xE2, ' ', 0xE3, ' ',
+        0xE4, ' ', 0xE5, ' ', 0xE6, ' ', 0xE7, ' ',
+        0xE8, ' ', 0xE9, ' ', 0xEA, ' ', 0xEB, ' ', 0xEC
+    };
+    for (int i = 0; i < 25; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "render emoji payload[%d]", i);
+        CHECK_EQ(payload_get_byte(r1.payload, i), expected[i], lbl);
+    }
+
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx), true, "got DATA tx");
+    CHECK_EQ(tx.len, 25, "encoded tx len");
+    for (int i = 0; i < 25; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "tx emoji payload[%d]", i);
+        CHECK_EQ(payload_get_byte(tx.payload, i), expected[i], lbl);
+    }
+
+    RenderEvent clear;
+    CHECK_EQ(wait_render(clear), true, "got input clear render");
+    CHECK_EQ(clear.cmd, RENDER_UPDATE_INPUT_LINE, "clear render");
+
+    StoreRead s = read_store(0);
+    CHECK_EQ(s.valid, 1, "store valid");
+    CHECK_EQ(s.len, 25, "encoded store len");
+    for (int i = 0; i < 25; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "store emoji payload[%d]", i);
+        CHECK_EQ(store_payload_byte(i), expected[i], lbl);
+    }
+}
+
 // Full pipeline: APPEND_LOCAL_PENDING -> be_tx -> UPDATE_INPUT_LINE
 // (with cursor_pos=0 to match the cleared input).
 static void test_commit_full_pipeline_order() {
@@ -1710,6 +1755,7 @@ int main(int argc, char** argv) {
     test_commit_writes_record();
     test_two_commits_distinct_slots();
     test_payload_packed_correctly();
+    test_emoji_tokens_encoded_on_commit();
     test_commit_full_pipeline_order();
     test_commit_blocked_by_render_backpressure();
     test_commit_blocked_by_tx_backpressure();
