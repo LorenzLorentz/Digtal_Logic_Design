@@ -349,16 +349,17 @@ static void test_emoji_codes_render_in_bubble() {
     const uint8_t msg[] = {
         0xE0, ' ', 0xE1, ' ', 0xE2, ' ', 0xE3, ' ',
         0xE4, ' ', 0xE5, ' ', 0xE6, ' ', 0xE7, ' ',
-        0xE8, ' ', 0xE9, ' ', 0xEA, ' ', 0xEB, ' ', 0xEC
+        0xE8, ' ', 0xE9, ' ', 0xEA, ' ', 0xEB, ' ', 0xEC, ' ',
+        0xED, ' ', 0xEE
     };
     RenderCmd c;
     c.cmd        = RENDER_APPEND_REMOTE;
     c.msg_id     = 11;
     c.side       = MSG_REMOTE;
     c.status     = MSG_SUCCESS;
-    c.len        = 25;
+    c.len        = 29;
     c.payload    = msg;
-    c.payload_n  = 25;
+    c.payload_n  = 29;
     send_cmd(c);
 
     CHECK_EQ(read_cell(HIST_ROW_START, 3), 0xE0, "happy emoji code");
@@ -374,6 +375,8 @@ static void test_emoji_codes_render_in_bubble() {
     CHECK_EQ(read_cell(HIST_ROW_START, 23), 0xEA, "no emoji code");
     CHECK_EQ(read_cell(HIST_ROW_START, 25), 0xEB, "up emoji code");
     CHECK_EQ(read_cell(HIST_ROW_START, 27), 0xEC, "down emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 29), 0xED, "doge emoji code");
+    CHECK_EQ(read_cell(HIST_ROW_START, 31), 0xEE, "mairuo emoji code");
 }
 
 // Local message: right-aligned bubble ending at col BUBBLE_RIGHT_EDGE (97).

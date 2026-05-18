@@ -340,6 +340,26 @@ module be_top
                     encoded_line_payload[dst*8 +: 8] = 8'hEC;
                     src += 5;
                     dst += 1;
+                end else if ((src + 4 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "d")
+                 && (line_buf[src + 2] == "o")
+                 && (line_buf[src + 3] == "g")
+                 && (line_buf[src + 4] == "e")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hED;
+                    src += 5;
+                    dst += 1;
+                end else if ((src + 6 < int'(len_q))
+                 && (line_buf[src + 0] == 8'h5C)
+                 && (line_buf[src + 1] == "m")
+                 && (line_buf[src + 2] == "a")
+                 && (line_buf[src + 3] == "i")
+                 && (line_buf[src + 4] == "r")
+                 && (line_buf[src + 5] == "u")
+                 && (line_buf[src + 6] == "o")) begin
+                    encoded_line_payload[dst*8 +: 8] = 8'hEE;
+                    src += 7;
+                    dst += 1;
                 end else if ((src + 5 < int'(len_q))
                  && (line_buf[src + 0] == 8'h5C)
                  && (line_buf[src + 1] == "h")

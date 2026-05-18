@@ -109,6 +109,8 @@ package fe_pkg;
     localparam byte_t EMOJI_NO    = 8'hEA;
     localparam byte_t EMOJI_UP    = 8'hEB;
     localparam byte_t EMOJI_DOWN  = 8'hEC;
+    localparam byte_t EMOJI_DOGE  = 8'hED;
+    localparam byte_t EMOJI_MAIRUO = 8'hEE;
 
     // Standalone status icons. 0xF2 is the "X" mark, drawn to the left
     // of failed local bubbles so the fail is unambiguous even if the
