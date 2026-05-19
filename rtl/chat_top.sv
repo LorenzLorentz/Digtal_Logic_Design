@@ -36,7 +36,8 @@ module chat_top
     // ---- Link parameters ----
     parameter int CLK_FREQ_HZ    = CLK_FREQ_HZ_DEFAULT,    // 100 MHz
     parameter int BAUD           = UART_BAUD_DEFAULT,      // 115200 8N1
-    parameter int TIMEOUT_CYCLES = 2_000_000               // 20 ms ARQ timeout
+    parameter int TIMEOUT_CYCLES = 2_000_000,              // 20 ms ARQ timeout
+    parameter bit ENABLE_SRAM_ASSETS = 1'b0
 ) (
     input  logic clk,           // 100 MHz from board oscillator
     input  logic btn_rst,       // active-high momentary push-button
@@ -255,7 +256,8 @@ module chat_top
 
     fe_top #(
         .LOCAL_NAME_LEN   (MY_NAME_LEN),
-        .LOCAL_NAME_PACKED(MY_NAME_PACKED)
+        .LOCAL_NAME_PACKED(MY_NAME_PACKED),
+        .ENABLE_SRAM_ASSETS(ENABLE_SRAM_ASSETS)
     ) u_fe (
         .clk                     (clk),
         .rst_n                   (rst_n),

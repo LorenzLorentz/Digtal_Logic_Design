@@ -32,7 +32,8 @@ module fe_top
 #(
     parameter int LOCAL_NAME_LEN = 5,
     parameter logic [MAX_NAME_LEN*8-1:0] LOCAL_NAME_PACKED =
-        128'h00000000_00000000_00000065_63696c41
+        128'h00000000_00000000_00000065_63696c41,
+    parameter bit ENABLE_SRAM_ASSETS = 1'b0
 )
 (
     input  logic                       clk,        // chat-domain clock
@@ -240,7 +241,9 @@ module fe_top
         end
     endgenerate
 
-    fe_scan u_scan (
+    fe_scan #(
+        .ENABLE_SRAM_ASSETS(ENABLE_SRAM_ASSETS)
+    ) u_scan (
         .clk_pix       (clk_pix),
         .rst_n         (rst_n),
         .hdata         (hdata),

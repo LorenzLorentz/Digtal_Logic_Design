@@ -37,6 +37,9 @@
 module fe_scan
     import chat_pkg::*;
     import fe_pkg::*;
+#(
+    parameter bit ENABLE_SRAM_ASSETS = 1'b0
+)
 (
     input  logic                   clk_pix,
     input  logic                   rst_n,
@@ -184,9 +187,11 @@ module fe_scan
             s0_text_ram_row = FE_ROW_W'(TITLE_ROW);
     end
 
-    assign s0_avatar_remote_probe = s0_in_hist_window
+    assign s0_avatar_remote_probe = ENABLE_SRAM_ASSETS
+                                    && s0_in_hist_window
                                     && (hdata < HWIDTH'(ASSET_AVATAR_W_PX));
-    assign s0_avatar_local_probe  = s0_in_hist_window
+    assign s0_avatar_local_probe  = ENABLE_SRAM_ASSETS
+                                    && s0_in_hist_window
                                     && (hdata >= HWIDTH'(HSIZE - ASSET_AVATAR_W_PX))
                                     && (hdata <  HWIDTH'(HSIZE));
 
@@ -467,7 +472,8 @@ module fe_scan
     always_comb begin
         fg_r = COL_FG_R; fg_g = COL_FG_G; fg_b = COL_FG_B;
         bg_r = COL_BG_R; bg_g = COL_BG_G; bg_b = COL_BG_B;
-        use_sram_background = in_connected
+        use_sram_background = ENABLE_SRAM_ASSETS
+                              && in_connected
                               && s1_in_hist_window
                               && !s1_avatar_remote_probe
                               && !s1_avatar_local_probe;
@@ -534,7 +540,8 @@ module fe_scan
                                   || (rd_code == byte_t'(SPRITE_BR_TOP))
                                   || (rd_code == byte_t'(SPRITE_BR_MID))
                                   || (rd_code == byte_t'(SPRITE_BR_BOT)));
-    assign avatar_active = in_connected
+    assign avatar_active = ENABLE_SRAM_ASSETS
+                           && in_connected
                            && !s1_in_bottom_strip
                            && (remote_avatar_active || local_avatar_active);
 
