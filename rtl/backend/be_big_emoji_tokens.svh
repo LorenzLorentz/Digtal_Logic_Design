@@ -16,9 +16,8 @@ else if ((src + 11 < int'(len_q))
       && (line_buf[src + 9] == "k")
       && (line_buf[src + 10] == "e")
       && (line_buf[src + 11] == "n")) begin
-    encoded_line_payload[dst*8 +: 8] = 8'h80;  // \Heartbroken
-    src += 12;
-    dst += 1;
+    enc_emit_byte = 8'h80;  // \Heartbroken
+    enc_src_delta = 4'd12;
 end
 else if ((src + 7 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -29,9 +28,8 @@ else if ((src + 7 < int'(len_q))
       && (line_buf[src + 5] == "i")
       && (line_buf[src + 6] == "n")
       && (line_buf[src + 7] == "g")) begin
-    encoded_line_payload[dst*8 +: 8] = 8'h92;  // \Hissing
-    src += 8;
-    dst += 1;
+    enc_emit_byte = 8'h92;  // \Hissing
+    enc_src_delta = 4'd8;
 end
 else if ((src + 5 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -40,9 +38,8 @@ else if ((src + 5 < int'(len_q))
       && (line_buf[src + 3] == "r")
       && (line_buf[src + 4] == "u")
       && (line_buf[src + 5] == "g")) begin
-    encoded_line_payload[dst*8 +: 8] = 8'hA4;  // \Shrug
-    src += 6;
-    dst += 1;
+    enc_emit_byte = 8'hA4;  // \Shrug
+    enc_src_delta = 4'd6;
 end
 else if ((src + 5 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -51,9 +48,8 @@ else if ((src + 5 < int'(len_q))
       && (line_buf[src + 3] == "e")
       && (line_buf[src + 4] == "a")
       && (line_buf[src + 5] == "t")) begin
-    encoded_line_payload[dst*8 +: 8] = 8'hB6;  // \Sweat
-    src += 6;
-    dst += 1;
+    enc_emit_byte = 8'hB6;  // \Sweat
+    enc_src_delta = 4'd6;
 end
 else if ((src + 6 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -63,7 +59,6 @@ else if ((src + 6 < int'(len_q))
       && (line_buf[src + 4] == "c")
       && (line_buf[src + 5] == "a")
       && (line_buf[src + 6] == "i")) begin
-    encoded_line_payload[dst*8 +: 8] = 8'hC8;  // \Xiucai
-    src += 7;
-    dst += 1;
+    enc_emit_byte = 8'hC8;  // \Xiucai
+    enc_src_delta = 4'd7;
 end

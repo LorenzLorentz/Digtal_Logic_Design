@@ -186,7 +186,12 @@ module be_top
         // shift over MAX_LINE_LEN, which Vivado was unrolling into a
         // 128-input mux per byte.
         S_LINE_INSERT              = 5'd22,
-        S_LINE_DELETE              = 5'd23
+        S_LINE_DELETE              = 5'd23,
+        // Multi-cycle token-expansion encoder for KEY_ENTER commit.
+        // Replaces a 128-iter unrolled for-loop whose per-iteration
+        // 19-token priority chain + 1024-bit dynamic bit-slice write
+        // was blowing up Vivado RTL Opt Phase 2.
+        S_LINE_ENCODE              = 5'd24
     } state_e;
 
     state_e state_q, state_d;
@@ -209,6 +214,13 @@ module be_top
     // Narrow index used to address line_buf (LINE_IDX_W bits suffice).
     logic [LINE_IDX_W-1:0]              shift_addr;
     assign shift_addr = shift_idx_q[LINE_IDX_W-1:0];
+
+    // S_LINE_ENCODE source / destination pointers. enc_src_q walks
+    // line_buf forward consuming token bytes; enc_dst_q walks
+    // pending_payload_q forward emitting one anchor byte per token
+    // (or one literal byte per non-token char).
+    logic [LEN_WIDTH-1:0]               enc_src_q;
+    logic [LEN_WIDTH-1:0]               enc_dst_q;
 
     // Allocation pointers (advance on every commit / on every rx accept).
     // Both reset to 0 on store_clear (peer changed).
@@ -235,178 +247,170 @@ module be_top
     // Combinational helpers
     // -----------------------------------------------------------------
 
-    // encoded_line_* is the committed/sent payload. It expands a small
-    // set of user-typed backslash tokens into private glyph codes that
-    // the frontend font renders as emoji.
-    logic [MAX_MSG_LEN*8-1:0] encoded_line_payload;
-    msg_len_t                 encoded_line_len;
+    // Token encoder: one byte per cycle, single-step.
+    //
+    // Earlier this block was an unrolled `for (step ...; step <
+    // MAX_LINE_LEN; ...)` loop with a 19-token priority chain and a
+    // 1024-bit dynamic bit-slice write per iteration. Each iteration
+    // carried src/dst across the next, so Vivado had to elaborate a
+    // 128-stage serial combinational menu -- RTL Opt Phase 2 alone
+    // was ~3 min and peak memory ~12 GB.
+    //
+    // The new shape evaluates the SAME priority chain once per cycle
+    // against the current enc_src_q position, emits one byte into
+    // pending_payload_q[enc_dst_q*8 +: 8], and advances. Total commit
+    // latency grows by ~MAX_LINE_LEN cycles (~1.3 us @100 MHz), which
+    // is invisible next to UART throughput and PS/2 key cadence.
+    byte_t                enc_emit_byte;
+    logic [3:0]           enc_src_delta;
 
     always_comb begin
         int src;
-        int dst;
 
-        encoded_line_payload = '0;
-        encoded_line_len     = '0;
-        src = 0;
-        dst = 0;
+        enc_emit_byte = 8'h00;
+        enc_src_delta = 4'd0;
+        src = int'(enc_src_q);
 
-        for (int step = 0; step < MAX_LINE_LEN; step++) begin
-            if ((src < int'(len_q)) && (dst < MAX_MSG_LEN)) begin
-                if ((src + 5 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "h")
-                 && (line_buf[src + 2] == "a")
-                 && (line_buf[src + 3] == "p")
-                 && (line_buf[src + 4] == "p")
-                 && (line_buf[src + 5] == "y")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE0;
-                    src += 6;
-                    dst += 1;
-                end else if ((src + 5 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "l")
-                 && (line_buf[src + 2] == "a")
-                 && (line_buf[src + 3] == "u")
-                 && (line_buf[src + 4] == "g")
-                 && (line_buf[src + 5] == "h")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE4;
-                    src += 6;
-                    dst += 1;
-                end else if ((src + 4 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "w")
-                 && (line_buf[src + 2] == "i")
-                 && (line_buf[src + 3] == "n")
-                 && (line_buf[src + 4] == "k")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE5;
-                    src += 5;
-                    dst += 1;
-                end else if ((src + 5 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "a")
-                 && (line_buf[src + 2] == "n")
-                 && (line_buf[src + 3] == "g")
-                 && (line_buf[src + 4] == "r")
-                 && (line_buf[src + 5] == "y")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE6;
-                    src += 6;
-                    dst += 1;
-                end else if ((src + 4 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "s")
-                 && (line_buf[src + 2] == "t")
-                 && (line_buf[src + 3] == "a")
-                 && (line_buf[src + 4] == "r")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE7;
-                    src += 5;
-                    dst += 1;
-                end else if ((src + 4 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "f")
-                 && (line_buf[src + 2] == "i")
-                 && (line_buf[src + 3] == "r")
-                 && (line_buf[src + 4] == "e")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE8;
-                    src += 5;
-                    dst += 1;
-                end else if ((src + 3 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "y")
-                 && (line_buf[src + 2] == "e")
-                 && (line_buf[src + 3] == "s")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE9;
-                    src += 4;
-                    dst += 1;
-                end else if ((src + 2 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "n")
-                 && (line_buf[src + 2] == "o")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hEA;
-                    src += 3;
-                    dst += 1;
-                end else if ((src + 2 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "u")
-                 && (line_buf[src + 2] == "p")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hEB;
-                    src += 3;
-                    dst += 1;
-                end else if ((src + 4 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "d")
-                 && (line_buf[src + 2] == "o")
-                 && (line_buf[src + 3] == "w")
-                 && (line_buf[src + 4] == "n")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hEC;
-                    src += 5;
-                    dst += 1;
-                end else if ((src + 4 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "d")
-                 && (line_buf[src + 2] == "o")
-                 && (line_buf[src + 3] == "g")
-                 && (line_buf[src + 4] == "e")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hED;
-                    src += 5;
-                    dst += 1;
-                end else if ((src + 6 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "m")
-                 && (line_buf[src + 2] == "a")
-                 && (line_buf[src + 3] == "i")
-                 && (line_buf[src + 4] == "r")
-                 && (line_buf[src + 5] == "u")
-                 && (line_buf[src + 6] == "o")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hEE;
-                    src += 7;
-                    dst += 1;
-                end else if ((src + 5 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "h")
-                 && (line_buf[src + 2] == "e")
-                 && (line_buf[src + 3] == "a")
-                 && (line_buf[src + 4] == "r")
-                 && (line_buf[src + 5] == "t")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE2;
-                    src += 6;
-                    dst += 1;
-                end else if ((src + 3 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "s")
-                 && (line_buf[src + 2] == "a")
-                 && (line_buf[src + 3] == "d")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE1;
-                    src += 4;
-                    dst += 1;
-                end else if ((src + 2 < int'(len_q))
-                 && (line_buf[src + 0] == 8'h5C)
-                 && (line_buf[src + 1] == "o")
-                 && (line_buf[src + 2] == "k")) begin
-                    encoded_line_payload[dst*8 +: 8] = 8'hE3;
-                    src += 3;
-                    dst += 1;
-                end
-                // Big-emoji tokens (capital first letter) are appended
-                // here; each branch emits a single anchor byte. The
-                // frontend expands the anchor into a 3 x 6 tile bubble
-                // on render -- backend does no per-tile expansion.
-                // Path mirrors fe_glyph_rom: Vivado searches the source
-                // dir, Verilator searches cwd=repo-root.
-`ifdef SYNTHESIS
-                `include "be_big_emoji_tokens.svh"
-`else
-                `include "rtl/backend/be_big_emoji_tokens.svh"
-`endif
-                else begin
-                    encoded_line_payload[dst*8 +: 8] = line_buf[src];
-                    src += 1;
-                    dst += 1;
-                end
-            end
+        if ((src + 5 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "h")
+         && (line_buf[src + 2] == "a")
+         && (line_buf[src + 3] == "p")
+         && (line_buf[src + 4] == "p")
+         && (line_buf[src + 5] == "y")) begin
+            enc_emit_byte = 8'hE0;
+            enc_src_delta = 4'd6;
+        end else if ((src + 5 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "l")
+         && (line_buf[src + 2] == "a")
+         && (line_buf[src + 3] == "u")
+         && (line_buf[src + 4] == "g")
+         && (line_buf[src + 5] == "h")) begin
+            enc_emit_byte = 8'hE4;
+            enc_src_delta = 4'd6;
+        end else if ((src + 4 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "w")
+         && (line_buf[src + 2] == "i")
+         && (line_buf[src + 3] == "n")
+         && (line_buf[src + 4] == "k")) begin
+            enc_emit_byte = 8'hE5;
+            enc_src_delta = 4'd5;
+        end else if ((src + 5 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "a")
+         && (line_buf[src + 2] == "n")
+         && (line_buf[src + 3] == "g")
+         && (line_buf[src + 4] == "r")
+         && (line_buf[src + 5] == "y")) begin
+            enc_emit_byte = 8'hE6;
+            enc_src_delta = 4'd6;
+        end else if ((src + 4 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "s")
+         && (line_buf[src + 2] == "t")
+         && (line_buf[src + 3] == "a")
+         && (line_buf[src + 4] == "r")) begin
+            enc_emit_byte = 8'hE7;
+            enc_src_delta = 4'd5;
+        end else if ((src + 4 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "f")
+         && (line_buf[src + 2] == "i")
+         && (line_buf[src + 3] == "r")
+         && (line_buf[src + 4] == "e")) begin
+            enc_emit_byte = 8'hE8;
+            enc_src_delta = 4'd5;
+        end else if ((src + 3 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "y")
+         && (line_buf[src + 2] == "e")
+         && (line_buf[src + 3] == "s")) begin
+            enc_emit_byte = 8'hE9;
+            enc_src_delta = 4'd4;
+        end else if ((src + 2 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "n")
+         && (line_buf[src + 2] == "o")) begin
+            enc_emit_byte = 8'hEA;
+            enc_src_delta = 4'd3;
+        end else if ((src + 2 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "u")
+         && (line_buf[src + 2] == "p")) begin
+            enc_emit_byte = 8'hEB;
+            enc_src_delta = 4'd3;
+        end else if ((src + 4 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "d")
+         && (line_buf[src + 2] == "o")
+         && (line_buf[src + 3] == "w")
+         && (line_buf[src + 4] == "n")) begin
+            enc_emit_byte = 8'hEC;
+            enc_src_delta = 4'd5;
+        end else if ((src + 4 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "d")
+         && (line_buf[src + 2] == "o")
+         && (line_buf[src + 3] == "g")
+         && (line_buf[src + 4] == "e")) begin
+            enc_emit_byte = 8'hED;
+            enc_src_delta = 4'd5;
+        end else if ((src + 6 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "m")
+         && (line_buf[src + 2] == "a")
+         && (line_buf[src + 3] == "i")
+         && (line_buf[src + 4] == "r")
+         && (line_buf[src + 5] == "u")
+         && (line_buf[src + 6] == "o")) begin
+            enc_emit_byte = 8'hEE;
+            enc_src_delta = 4'd7;
+        end else if ((src + 5 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "h")
+         && (line_buf[src + 2] == "e")
+         && (line_buf[src + 3] == "a")
+         && (line_buf[src + 4] == "r")
+         && (line_buf[src + 5] == "t")) begin
+            enc_emit_byte = 8'hE2;
+            enc_src_delta = 4'd6;
+        end else if ((src + 3 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "s")
+         && (line_buf[src + 2] == "a")
+         && (line_buf[src + 3] == "d")) begin
+            enc_emit_byte = 8'hE1;
+            enc_src_delta = 4'd4;
+        end else if ((src + 2 < int'(len_q))
+         && (line_buf[src + 0] == 8'h5C)
+         && (line_buf[src + 1] == "o")
+         && (line_buf[src + 2] == "k")) begin
+            enc_emit_byte = 8'hE3;
+            enc_src_delta = 4'd3;
         end
-
-        encoded_line_len = msg_len_t'(dst);
+        // Big-emoji tokens (capital first letter) are appended via the
+        // generated include. Each branch emits a single anchor byte;
+        // the frontend expands the anchor into a 3 x 6 tile bubble on
+        // render. Path mirrors fe_glyph_rom: Vivado searches the
+        // source dir, Verilator searches cwd=repo-root.
+`ifdef SYNTHESIS
+        `include "be_big_emoji_tokens.svh"
+`else
+        `include "rtl/backend/be_big_emoji_tokens.svh"
+`endif
+        else begin
+            enc_emit_byte = line_buf[src];
+            enc_src_delta = 4'd1;
+        end
     end
+
+    // High in the LAST cycle of S_LINE_ENCODE: enc_src_q has caught up
+    // to len_q so nothing more to emit. Used to fire store_wr, advance
+    // wr_ptr_q / next_msg_id_q, and transition to S_ENTER_RENDER_LOCAL.
+    logic enc_done;
+    assign enc_done = (state_q == S_LINE_ENCODE) && (enc_src_q >= len_q);
 
     // MY_NAME zero-extended to MAX_MSG_LEN bytes for tx payload.
     logic [MAX_MSG_LEN*8-1:0] my_name_payload;
@@ -547,8 +551,11 @@ module be_top
                                       ? S_RENDER_MOVE_CURSOR : S_IDLE;
                         end
                         KEY_ENTER: begin
+                            // S_LINE_ENCODE is the multi-cycle token
+                            // expander; it transitions on to
+                            // S_ENTER_RENDER_LOCAL when done.
                             state_d = (len_q != 0)
-                                      ? S_ENTER_RENDER_LOCAL : S_IDLE;
+                                      ? S_LINE_ENCODE : S_IDLE;
                         end
                         KEY_ESC: begin
                             state_d = S_TX_GOODBYE;
@@ -578,6 +585,12 @@ module be_top
                 // to shift, i.e. cursor at the end of the buffer).
                 if (shift_idx_q >= len_q - LEN_WIDTH'(1))
                     state_d = S_RENDER_DELETE;
+            end
+            S_LINE_ENCODE: begin
+                // Stay here while bytes remain to encode; exit on the
+                // cycle that finds enc_src_q already caught up to len_q
+                // (that's the cycle store_wr fires, see below).
+                if (enc_src_q >= len_q) state_d = S_ENTER_RENDER_LOCAL;
             end
             S_RENDER_MOVE_CURSOR:       if (be_render_ready) state_d = S_IDLE;
             S_RENDER_INSERT:            if (be_render_ready) state_d = S_IDLE;
@@ -823,6 +836,8 @@ module be_top
             status_status_q    <= '0;
             last_event_ascii_q <= 8'd0;
             shift_idx_q        <= '0;
+            enc_src_q          <= '0;
+            enc_dst_q          <= '0;
             peer_name_len_q    <= '0;
             peer_name_q        <= '0;
             for (int i = 0; i < MAX_LINE_LEN; i++) line_buf[i]    <= 8'd0;
@@ -874,6 +889,29 @@ module be_top
                     line_buf[shift_addr] <= line_buf[
                         LINE_IDX_W'(shift_idx_q + LEN_WIDTH'(1))];
                     shift_idx_q <= shift_idx_q + LEN_WIDTH'(1);
+                end
+            end
+
+            // -------------------------------------------------------------
+            // S_LINE_ENCODE: one byte per cycle. While bytes remain
+            // (enc_src_q < len_q), drop the encoder's emitted byte into
+            // pending_payload_q[enc_dst_q] and advance both pointers.
+            // The final "done" cycle (enc_src_q >= len_q) latches the
+            // total length, clears the input line, and advances the
+            // store write-pointer + msg_id allocator. store_wr_en fires
+            // combinationally on the same cycle (see store_wr block).
+            // -------------------------------------------------------------
+            if (state_q == S_LINE_ENCODE) begin
+                if (enc_src_q < len_q) begin
+                    pending_payload_q[enc_dst_q*8 +: 8] <= enc_emit_byte;
+                    enc_src_q <= enc_src_q + LEN_WIDTH'(enc_src_delta);
+                    enc_dst_q <= enc_dst_q + LEN_WIDTH'(1);
+                end else begin
+                    pending_len_q <= enc_dst_q;
+                    len_q         <= '0;
+                    cursor_pos_q  <= '0;
+                    wr_ptr_q      <= wr_ptr_q + 1'b1;
+                    next_msg_id_q <= next_msg_id_q + 8'd1;
                 end
             end
 
@@ -938,15 +976,19 @@ module be_top
 
                         KEY_ENTER: begin
                             if (len_q != 0) begin
-                                pending_msg_id_q <= next_msg_id_q;
-                                pending_len_q    <= encoded_line_len;
-                                pending_payload_q <= encoded_line_payload;
-
-                                len_q            <= '0;
-                                cursor_pos_q     <= '0;
-                                enter_pulse_q    <= 1'b1;
-                                wr_ptr_q         <= wr_ptr_q + 1'b1;
-                                next_msg_id_q    <= next_msg_id_q + 8'd1;
+                                // Kick off the encoder. pending_payload_q
+                                // is cleared so bytes past the encoded
+                                // length stay 0 (test_payload_packed_
+                                // correctly relies on this). The actual
+                                // line clear, wr_ptr / msg_id advance,
+                                // and store_wr all happen in the
+                                // encoder's done cycle (state_q ==
+                                // S_LINE_ENCODE && enc_src_q >= len_q).
+                                pending_msg_id_q  <= next_msg_id_q;
+                                pending_payload_q <= '0;
+                                enc_src_q         <= '0;
+                                enc_dst_q         <= '0;
+                                enter_pulse_q     <= 1'b1;
                             end
                         end
 
@@ -997,16 +1039,19 @@ module be_top
                 store_wr_status  = 2'(MSG_SUCCESS);
                 store_wr_len     = rx_len_clamped;
                 store_wr_payload = cm_rx_payload;
-            end else if (accept_io
-                      && (key_type_e'(io_key_type) == KEY_ENTER)
-                      && (len_q != 0)) begin
-                store_wr_en      = 1'b1;
-                store_wr_msg_id  = next_msg_id_q;
-                store_wr_side    = 2'(MSG_LOCAL);
-                store_wr_status  = 2'(MSG_PENDING);
-                store_wr_len     = encoded_line_len;
-                store_wr_payload = encoded_line_payload;
             end
+        end else if (enc_done) begin
+            // Encoder finished: pending_payload_q holds the encoded
+            // bytes, enc_dst_q is the total length, pending_msg_id_q
+            // was latched on KEY_ENTER. wr_ptr_q is still the
+            // pre-increment value this cycle (NBA bumps it on the
+            // posedge), so store_wr_idx lands in the right slot.
+            store_wr_en      = 1'b1;
+            store_wr_msg_id  = pending_msg_id_q;
+            store_wr_side    = 2'(MSG_LOCAL);
+            store_wr_status  = 2'(MSG_PENDING);
+            store_wr_len     = enc_dst_q;
+            store_wr_payload = pending_payload_q;
         end
     end
 

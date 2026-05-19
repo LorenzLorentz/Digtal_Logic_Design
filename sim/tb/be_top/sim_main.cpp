@@ -376,7 +376,10 @@ static void drain_render(int timeout = MAX_LINE_LEN + 10) {
 // UPDATE_INPUT_LINE. Use after send_key(KEY_ENTER) when the test only
 // cares about the post-commit state (not the pipeline contents).
 static void drain_commit_pipeline() {
-    RenderEvent r1; wait_render(r1, 10);
+    // First render comes after the multi-cycle encoder finishes, so
+    // its timeout has to cover the full encoder walk (worst case
+    // ~MAX_LINE_LEN cycles for a buffer of pure literal bytes).
+    RenderEvent r1; wait_render(r1, MAX_LINE_LEN + 20);
     TxEvent t;      wait_tx(t, 10);
     RenderEvent r2; wait_render(r2, 10);
 }
