@@ -57,7 +57,12 @@ module chat_top
     output logic [7:0] video_blue,
     output logic       video_hsync,
     output logic       video_vsync,
-    output logic       video_de
+    output logic       video_de,
+
+    // Read-only SRAM asset bus used by the frontend for uploaded
+    // background / avatar images.
+    output logic [19:0] asset_sram_addr,
+    input  logic [31:0] asset_sram_data
 );
 
     // -----------------------------------------------------------------
@@ -274,6 +279,8 @@ module chat_top
         .video_hsync             (video_hsync),
         .video_vsync             (video_vsync),
         .video_de                (video_de),
+        .asset_sram_addr         (asset_sram_addr),
+        .asset_sram_data         (asset_sram_data),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (fe_rd_code),

@@ -56,6 +56,7 @@ static void reset() {
     dut->ps2_clk  = 1;             // idle high
     dut->ps2_data = 1;
     dut->uart_rxd = 1;
+    dut->asset_sram_data = 0;
     dut->clk      = 0;
     dut->clk_pix  = 0;
     for (int i = 0; i < 8; i++) tick();

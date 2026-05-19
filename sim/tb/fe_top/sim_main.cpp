@@ -123,6 +123,7 @@ static void reset() {
     dut->be_render_ascii = 0;
     dut->be_render_conn_state = 0;
     dut->be_render_peer_name_len = 0;
+    dut->asset_sram_data = 0;
     dut->rd_row = 0;
     dut->rd_col = 0;
     memset(&dut->be_render_payload,   0, sizeof(dut->be_render_payload));

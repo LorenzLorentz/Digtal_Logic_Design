@@ -58,6 +58,10 @@ module fe_scan
     output logic [3:0]             glyph_gy,
     input  logic [7:0]             glyph_row,
 
+    // ---- SRAM visual assets ----
+    output logic [19:0]            asset_sram_addr,
+    input  logic [31:0]            asset_sram_data,
+
     // ---- attributes from decoder ----
     input  logic [1:0]             conn_state,
     input  logic [HIST_W-1:0]      hist_wr_row,         // ring head
@@ -140,6 +144,9 @@ module fe_scan
     logic [HIST_W-1:0]        hist_slot_offset;
     logic [HIST_W-1:0]        hist_slot;
     logic [INPUT_WIN_W-1:0]   input_row_in_window;
+    logic                     s0_in_hist_window;
+    logic                     s0_avatar_remote_probe;
+    logic                     s0_avatar_local_probe;
 
     always_comb begin
         hist_slot_offset = HIST_W'(s0_screen_row - HWIDTH'(HIST_SCREEN_START));
@@ -152,12 +159,14 @@ module fe_scan
         input_row_in_window = INPUT_WIN_W'(s0_screen_row
                                            - HWIDTH'(INPUT_SCREEN_START));
 
+        s0_in_hist_window = (s0_screen_row >= HWIDTH'(HIST_SCREEN_START))
+                         && (s0_screen_row <= HWIDTH'(HIST_SCREEN_END));
+
         if (s0_screen_row == HWIDTH'(0))
             s0_text_ram_row = FE_ROW_W'(TITLE_ROW);
         else if (s0_screen_row == HWIDTH'(1))
             s0_text_ram_row = FE_ROW_W'(TITLE_ROW + 1);
-        else if ((s0_screen_row >= HWIDTH'(HIST_SCREEN_START))
-              && (s0_screen_row <= HWIDTH'(HIST_SCREEN_END)))
+        else if (s0_in_hist_window)
             s0_text_ram_row = FE_ROW_W'(HIST_ROW_START) + FE_ROW_W'(hist_slot);
         else if (s0_screen_row == HWIDTH'(SEP_SCREEN_ROW))
             s0_text_ram_row = FE_ROW_W'(HIST_ROW_END + 1);
@@ -175,8 +184,21 @@ module fe_scan
             s0_text_ram_row = FE_ROW_W'(TITLE_ROW);
     end
 
+    assign s0_avatar_remote_probe = s0_in_hist_window
+                                    && (hdata < HWIDTH'(ASSET_AVATAR_W_PX));
+    assign s0_avatar_local_probe  = s0_in_hist_window
+                                    && (hdata >= HWIDTH'(HSIZE - ASSET_AVATAR_W_PX))
+                                    && (hdata <  HWIDTH'(HSIZE));
+
     assign rd_row = s0_text_ram_row;
-    assign rd_col = FE_COL_W'(s0_screen_col);
+    always_comb begin
+        if (s0_avatar_remote_probe)
+            rd_col = FE_COL_W'(BUBBLE_MARGIN_L);
+        else if (s0_avatar_local_probe)
+            rd_col = FE_COL_W'(BUBBLE_RIGHT_EDGE);
+        else
+            rd_col = FE_COL_W'(s0_screen_col);
+    end
 
     // True for the leftover 8 px past the last input row -- used to blank
     // the glyph so this strip renders as a solid titlebar-blue band.
@@ -246,6 +268,10 @@ module fe_scan
     logic [3:0]        s1_splash_gy;
     logic [2:0]        s1_splash_gx;
     logic              s1_in_bottom_strip;
+    logic              s1_in_hist_window;
+    logic              s1_avatar_remote_probe;
+    logic              s1_avatar_local_probe;
+    logic              s1_asset_use_hi_half;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -261,6 +287,10 @@ module fe_scan
             s1_splash_gy        <= '0;
             s1_splash_gx        <= '0;
             s1_in_bottom_strip  <= 1'b0;
+            s1_in_hist_window   <= 1'b0;
+            s1_avatar_remote_probe <= 1'b0;
+            s1_avatar_local_probe  <= 1'b0;
+            s1_asset_use_hi_half   <= 1'b0;
         end else begin
             s1_gy               <= s0_gy;
             s1_gx               <= s0_gx;
@@ -274,8 +304,26 @@ module fe_scan
             s1_splash_gy        <= s0_splash_gy;
             s1_splash_gx        <= s0_splash_gx;
             s1_in_bottom_strip  <= s0_in_bottom_strip;
+            s1_in_hist_window   <= s0_in_hist_window;
+            s1_avatar_remote_probe <= s0_avatar_remote_probe;
+            s1_avatar_local_probe  <= s0_avatar_local_probe;
+            s1_asset_use_hi_half   <= asset_use_hi_half;
         end
     end
+
+    // -----------------------------------------------------------------
+    // SRAM-backed background and avatars.
+    // -----------------------------------------------------------------
+    logic       asset_use_hi_half;
+
+    fe_sram_asset_fetch u_asset_fetch (
+        .avatar_remote_req(s0_avatar_remote_probe),
+        .avatar_local_req (s0_avatar_local_probe),
+        .hdata            (hdata),
+        .vdata            (vdata),
+        .sram_addr        (asset_sram_addr),
+        .use_hi_half      (asset_use_hi_half)
+    );
 
     // -----------------------------------------------------------------
     // Glyph lookup mux: CONNECTED uses text_ram cell; otherwise pull
@@ -405,11 +453,29 @@ module fe_scan
     // -----------------------------------------------------------------
     logic [7:0] fg_r, fg_g, fg_b;
     logic [7:0] bg_r, bg_g, bg_b;
+    logic       use_sram_background;
+    logic [15:0] asset_rgb565_aligned;
+    logic [7:0]  asset_pixel_r, asset_pixel_g, asset_pixel_b;
+
+    assign asset_rgb565_aligned = s1_asset_use_hi_half
+                                    ? asset_sram_data[31:16]
+                                    : asset_sram_data[15:0];
+    assign asset_pixel_r = {asset_rgb565_aligned[15:11], asset_rgb565_aligned[15:13]};
+    assign asset_pixel_g = {asset_rgb565_aligned[10:5],  asset_rgb565_aligned[10:9]};
+    assign asset_pixel_b = {asset_rgb565_aligned[4:0],   asset_rgb565_aligned[4:2]};
 
     always_comb begin
         fg_r = COL_FG_R; fg_g = COL_FG_G; fg_b = COL_FG_B;
         bg_r = COL_BG_R; bg_g = COL_BG_G; bg_b = COL_BG_B;
-        if (s1_text_ram_row == FE_ROW_W'(TITLE_ROW)) begin
+        use_sram_background = in_connected
+                              && s1_in_hist_window
+                              && !s1_avatar_remote_probe
+                              && !s1_avatar_local_probe;
+        if (use_sram_background) begin
+            bg_r = asset_pixel_r;
+            bg_g = asset_pixel_g;
+            bg_b = asset_pixel_b;
+        end else if (s1_text_ram_row == FE_ROW_W'(TITLE_ROW)) begin
             bg_r = COL_TITLE_BG_R;
             bg_g = COL_TITLE_BG_G;
             bg_b = COL_TITLE_BG_B;
@@ -452,7 +518,25 @@ module fe_scan
     // Final pixel mux
     // -----------------------------------------------------------------
     logic fg;
+    logic remote_avatar_active;
+    logic local_avatar_active;
+    logic avatar_active;
     assign fg = pixel_on ^ cursor_xor;
+    assign remote_avatar_active = s1_avatar_remote_probe
+                                  && ((rd_code == byte_t'(SPRITE_BL))
+                                   || (rd_code == byte_t'(SPRITE_FBL))
+                                   || (rd_code == byte_t'(SPRITE_BL_TOP))
+                                   || (rd_code == byte_t'(SPRITE_BL_MID))
+                                   || (rd_code == byte_t'(SPRITE_BL_BOT)));
+    assign local_avatar_active = s1_avatar_local_probe
+                                 && ((rd_code == byte_t'(SPRITE_BR))
+                                  || (rd_code == byte_t'(SPRITE_FBR))
+                                  || (rd_code == byte_t'(SPRITE_BR_TOP))
+                                  || (rd_code == byte_t'(SPRITE_BR_MID))
+                                  || (rd_code == byte_t'(SPRITE_BR_BOT)));
+    assign avatar_active = in_connected
+                           && !s1_in_bottom_strip
+                           && (remote_avatar_active || local_avatar_active);
 
     always_comb begin
         if (!s1_de) begin
@@ -460,11 +544,15 @@ module fe_scan
             video_green = 8'h00;
             video_blue  = 8'h00;
         end else if (in_connected) begin
+            if (avatar_active) begin
+                video_red   = asset_pixel_r;
+                video_green = asset_pixel_g;
+                video_blue  = asset_pixel_b;
             // Big-emoji tile cells displace the mono mux entirely:
             // non-transparent indices output palette RGB, transparent
             // ones fall back to the same bg colour the rest of the
             // bubble's interior uses.
-            if (is_big_emoji && (big_pix_idx != 4'h0)) begin
+            end else if (is_big_emoji && (big_pix_idx != 4'h0)) begin
                 video_red   = big_pal_r;
                 video_green = big_pal_g;
                 video_blue  = big_pal_b;

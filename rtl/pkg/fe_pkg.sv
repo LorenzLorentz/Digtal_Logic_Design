@@ -183,6 +183,24 @@ package fe_pkg;
     localparam logic [7:0] COL_INPUT_BG_G   = 8'h20;
     localparam logic [7:0] COL_INPUT_BG_B   = 8'h20;
 
+    // -----------------------------------------------------------------
+    // SRAM-backed visual assets
+    // -----------------------------------------------------------------
+    // The lab board's BaseRAM is 4 MiB, read as 32-bit little-endian words.
+    // Store assets as packed RGB565 pixels in byte order low byte, high byte.
+    // Background: 800x600x2 = 960000 bytes at byte offset 0.
+    // Avatars: 16x16x2 each, aligned immediately after the background.
+    localparam int ASSET_BG_W_PX       = HSIZE;
+    localparam int ASSET_BG_H_PX       = VSIZE;
+    localparam int ASSET_AVATAR_W_PX   = 16;
+    localparam int ASSET_AVATAR_H_PX   = 16;
+    localparam int ASSET_BG_BASE_BYTES = 0;
+    localparam int ASSET_LOCAL_AVATAR_BASE_BYTES  = ASSET_BG_W_PX
+                                                    * ASSET_BG_H_PX * 2;
+    localparam int ASSET_REMOTE_AVATAR_BASE_BYTES = ASSET_LOCAL_AVATAR_BASE_BYTES
+                                                    + ASSET_AVATAR_W_PX
+                                                    * ASSET_AVATAR_H_PX * 2;
+
     // Splash backgrounds per non-CONNECTED state.
     localparam logic [7:0] COL_BOOT_BG_R    = 8'h08;
     localparam logic [7:0] COL_BOOT_BG_G    = 8'h10;

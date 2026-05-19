@@ -53,6 +53,14 @@ module chat_top_board
     input  logic        uart_rxd,
     output logic        uart_txd,
 
+    // ---- BaseRAM / SRAM (read-only assets written by board control UI) ----
+    output logic [19:0] base_ram_addr,
+    inout  wire  [31:0] base_ram_data,
+    output logic [3:0]  base_ram_be_n,
+    output logic        base_ram_ce_n,
+    output logic        base_ram_oe_n,
+    output logic        base_ram_we_n,
+
     // ---- HDMI (TMDS differential pads) ----
     output logic [2:0]  hdmi_tmds_p,
     output logic [2:0]  hdmi_tmds_n,
@@ -77,6 +85,14 @@ module chat_top_board
     // -----------------------------------------------------------------
     logic [7:0] video_red, video_green, video_blue;
     logic       video_hsync, video_vsync, video_de;
+    logic [31:0] base_ram_data_in;
+
+    assign base_ram_data_in = base_ram_data;
+    assign base_ram_data    = 32'hzzzz_zzzz;
+    assign base_ram_be_n    = 4'b0000;
+    assign base_ram_ce_n    = 1'b0;
+    assign base_ram_oe_n    = 1'b0;
+    assign base_ram_we_n    = 1'b1;
 
     chat_top #(
         .MY_NAME_LEN    (MY_NAME_LEN),
@@ -97,7 +113,9 @@ module chat_top_board
         .video_blue  (video_blue),
         .video_hsync (video_hsync),
         .video_vsync (video_vsync),
-        .video_de    (video_de)
+        .video_de    (video_de),
+        .asset_sram_addr(base_ram_addr),
+        .asset_sram_data(base_ram_data_in)
     );
 
     // -----------------------------------------------------------------

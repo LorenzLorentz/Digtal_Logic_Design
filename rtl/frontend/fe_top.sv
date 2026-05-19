@@ -62,6 +62,11 @@ module fe_top
     output logic                       video_vsync,
     output logic                       video_de,
 
+    // Read-only SRAM asset bus. Board wrapper maps this to BaseRAM;
+    // simulations can tie asset_sram_data to 0 for a black background.
+    output logic [19:0]                asset_sram_addr,
+    input  logic [31:0]                asset_sram_data,
+
     // Observability read port (independent BRAM port, used by sim).
     input  logic [FE_ROW_W-1:0]        rd_row,
     input  logic [FE_COL_W-1:0]        rd_col,
@@ -249,6 +254,8 @@ module fe_top
         .glyph_code    (glyph_code),
         .glyph_gy      (glyph_gy),
         .glyph_row     (glyph_row),
+        .asset_sram_addr(asset_sram_addr),
+        .asset_sram_data(asset_sram_data),
         .conn_state         (conn_state_pix),
         .hist_wr_row        (hist_wr_row_pix),
         .scroll_offset      (scroll_offset_pix),

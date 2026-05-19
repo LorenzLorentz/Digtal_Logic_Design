@@ -112,6 +112,28 @@ sequenceDiagram
 
 `chat_top.sv` 本身只输出 RGB+sync+DE, 没有 TMDS 编码, 这样 Verilator 能直接 elaborate 整个 chat_top 做集成测试.
 
+### SRAM 上传背景与头像
+
+Xilinx 实验板的 4MB BaseRAM 现在作为只读视觉素材区使用。先用脚本把图片打包成控制面板可直接写入的 raw binary：
+
+```bash
+python3 scripts/gen_sram_assets.py \
+  --background path/to/background.png \
+  --local-avatar path/to/me.png \
+  --remote-avatar path/to/peer.png \
+  --out chat_assets.bin
+```
+
+然后在实验板控制面板中把 `chat_assets.bin` 从 SRAM 字节地址 `0x0` 写入。控制面板写 SRAM 时会复位实验 FPGA；写完后需要重新下载本工程 bitstream。素材格式和地址布局：
+
+```text
+0x000000  800x600 RGB565 background, little-endian, 960000 bytes
+0x0EA600  16x16 RGB565 local avatar, little-endian, 512 bytes
+0x0EA800  16x16 RGB565 remote avatar, little-endian, 512 bytes
+```
+
+前端在 CONNECTED 页面读取 SRAM：聊天历史区背景使用上传背景，远端气泡左侧和本地气泡右侧显示对应头像。标题栏和输入栏仍保留固定配色，保证文字可读。
+
 ---
 
 ## 2. 子系统 (顶层模块)

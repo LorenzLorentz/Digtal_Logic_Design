@@ -211,6 +211,7 @@ module chat_top_pair
     logic [INPUT_LINE_W-1:0]                     a_fe_input_cursor_row;
     msg_len_t                                    a_fe_input_cursor_col;
     logic [INPUT_SCROLL_W-1:0]                   a_fe_input_scroll_offset;
+    logic [19:0]                                 a_asset_sram_addr;
     /* verilator lint_on UNUSEDSIGNAL */
     fe_top u_a_fe (
         .clk                     (clk),
@@ -235,6 +236,8 @@ module chat_top_pair
         .video_hsync             (a_video_hsync),
         .video_vsync             (a_video_vsync),
         .video_de                (a_video_de),
+        .asset_sram_addr         (a_asset_sram_addr),
+        .asset_sram_data         (32'h0000_0000),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (a_fe_rd_code),
@@ -385,6 +388,7 @@ module chat_top_pair
     logic [INPUT_LINE_W-1:0]                     b_fe_input_cursor_row;
     msg_len_t                                    b_fe_input_cursor_col;
     logic [INPUT_SCROLL_W-1:0]                   b_fe_input_scroll_offset;
+    logic [19:0]                                 b_asset_sram_addr;
     /* verilator lint_on UNUSEDSIGNAL */
     fe_top u_b_fe (
         .clk                     (clk),
@@ -409,6 +413,8 @@ module chat_top_pair
         .video_hsync             (b_video_hsync),
         .video_vsync             (b_video_vsync),
         .video_de                (b_video_de),
+        .asset_sram_addr         (b_asset_sram_addr),
+        .asset_sram_data         (32'h0000_0000),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (b_fe_rd_code),
