@@ -29,30 +29,35 @@ module fe_sram_asset_fetch
     output logic              use_hi_half
 );
 
-    logic [18:0] bg_pixel_idx;
-    logic [8:0]  avatar_pixel_idx;
     logic [19:0] base_word_addr;
-    logic [18:0] pixel_idx;
+    logic [19:0] bg_word_offset;
+    logic [8:0]  avatar_word_offset;
+    logic [19:0] word_offset;
 
     always_comb begin
-        bg_pixel_idx     = 19'(vdata) * 19'(ASSET_BG_W_PX) + 19'(hdata);
-        avatar_pixel_idx = {5'b0, vdata[3:0]} * 9'(ASSET_AVATAR_W_PX)
-                           + 9'(hdata[3:0]);
+        // HSIZE=800 -> 400 32-bit words per row.
+        bg_word_offset     = (20'(vdata) << 8)
+                           + (20'(vdata) << 7)
+                           + (20'(vdata) << 4)
+                           + 20'(hdata[HWIDTH-1:1]);
+        // Avatar width=16 -> 8 32-bit words per row.
+        avatar_word_offset = {2'b00, vdata[3:0], 3'b000}
+                           + 9'(hdata[3:1]);
 
         if (avatar_remote_req) begin
             base_word_addr = 20'(ASSET_REMOTE_AVATAR_BASE_BYTES >> 2);
-            pixel_idx      = 19'(avatar_pixel_idx);
+            word_offset    = 20'(avatar_word_offset);
         end else if (avatar_local_req) begin
             base_word_addr = 20'(ASSET_LOCAL_AVATAR_BASE_BYTES >> 2);
-            pixel_idx      = 19'(avatar_pixel_idx);
+            word_offset    = 20'(avatar_word_offset);
         end else begin
             base_word_addr = 20'(ASSET_BG_BASE_BYTES >> 2);
-            pixel_idx      = bg_pixel_idx;
+            word_offset    = bg_word_offset;
         end
     end
 
-    assign sram_addr   = base_word_addr + 20'(pixel_idx[18:1]);
-    assign use_hi_half = pixel_idx[0];
+    assign sram_addr   = base_word_addr + word_offset;
+    assign use_hi_half = hdata[0];
 
 endmodule
 
