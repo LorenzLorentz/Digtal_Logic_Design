@@ -39,6 +39,7 @@
 #include "Vfe_top.h"
 #include "verilated.h"
 #include "verilated_vcd_c.h"
+#include "../common/big_emoji_codes.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -377,6 +378,131 @@ static void test_emoji_codes_render_in_bubble() {
     CHECK_EQ(read_cell(HIST_ROW_START, 27), 0xEC, "down emoji code");
     CHECK_EQ(read_cell(HIST_ROW_START, 29), 0xED, "doge emoji code");
     CHECK_EQ(read_cell(HIST_ROW_START, 31), 0xEE, "mairuo emoji code");
+}
+
+// Big-emoji bubble: a single-byte payload in the big-emoji anchor range
+// expands the bubble to N_ROWS x N_COLS tile cells. Each cell's code is
+// anchor + sub_row * N_COLS + sub_col (the scan pipeline then routes that
+// tile_id to the colour ROM, but text_ram-side we just verify the codes).
+// Remote bubble starts at col BUBBLE_MARGIN_L = 2, so left border lives at
+// col 2 and right border at col 2 + 1 + N_COLS = 9.
+static void test_big_emoji_bubble_layout_remote() {
+    printf("== test_big_emoji_bubble_layout_remote\n");
+    reset();
+    bring_up();
+
+    const uint8_t payload[] = { (uint8_t)BIG_EMOJI_SHRUG_ANCHOR };
+    RenderCmd c;
+    c.cmd        = RENDER_APPEND_REMOTE;
+    c.msg_id     = 21;
+    c.side       = MSG_REMOTE;
+    c.status     = MSG_SUCCESS;
+    c.len        = 1;
+    c.payload    = payload;
+    c.payload_n  = 1;
+    send_cmd(c);
+
+    const int left  = BUBBLE_MARGIN_L;      // 2
+    const int right = left + 1 + BIG_EMOJI_N_COLS;  // 2 + 1 + 6 = 9
+    const uint8_t anchor = (uint8_t)BIG_EMOJI_SHRUG_ANCHOR;
+
+    // Row 0: TOP corners + first tile row.
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, left),  SPRITE_BL_TOP, "row0 BL_TOP");
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, right), SPRITE_BR_TOP, "row0 BR_TOP");
+    for (int c0 = 0; c0 < BIG_EMOJI_N_COLS; c0++) {
+        char lbl[64]; snprintf(lbl, sizeof(lbl), "row0 tile col %d", c0);
+        CHECK_EQ(read_cell(HIST_ROW_START + 0, left + 1 + c0),
+                 (uint8_t)(anchor + 0 * BIG_EMOJI_N_COLS + c0), lbl);
+    }
+
+    // Row 1: MID corners + second tile row.
+    CHECK_EQ(read_cell(HIST_ROW_START + 1, left),  SPRITE_BL_MID, "row1 BL_MID");
+    CHECK_EQ(read_cell(HIST_ROW_START + 1, right), SPRITE_BR_MID, "row1 BR_MID");
+    for (int c0 = 0; c0 < BIG_EMOJI_N_COLS; c0++) {
+        char lbl[64]; snprintf(lbl, sizeof(lbl), "row1 tile col %d", c0);
+        CHECK_EQ(read_cell(HIST_ROW_START + 1, left + 1 + c0),
+                 (uint8_t)(anchor + 1 * BIG_EMOJI_N_COLS + c0), lbl);
+    }
+
+    // Row 2: BOT corners + third tile row.
+    CHECK_EQ(read_cell(HIST_ROW_START + 2, left),  SPRITE_BL_BOT, "row2 BL_BOT");
+    CHECK_EQ(read_cell(HIST_ROW_START + 2, right), SPRITE_BR_BOT, "row2 BR_BOT");
+    for (int c0 = 0; c0 < BIG_EMOJI_N_COLS; c0++) {
+        char lbl[64]; snprintf(lbl, sizeof(lbl), "row2 tile col %d", c0);
+        CHECK_EQ(read_cell(HIST_ROW_START + 2, left + 1 + c0),
+                 (uint8_t)(anchor + 2 * BIG_EMOJI_N_COLS + c0), lbl);
+    }
+
+    // Past the right border on every row stays blank (no spill).
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, right + 1), ' ', "row0 col past R margin");
+    CHECK_EQ(read_cell(HIST_ROW_START + 1, right + 1), ' ', "row1 col past R margin");
+    CHECK_EQ(read_cell(HIST_ROW_START + 2, right + 1), ' ', "row2 col past R margin");
+}
+
+// Same idea, but for a local (right-aligned) bubble. Right edge sits at
+// BUBBLE_RIGHT_EDGE = 97, so left border is at 97 - 6 - 1 = 90 and tiles
+// occupy cols 91..96.
+static void test_big_emoji_bubble_layout_local() {
+    printf("== test_big_emoji_bubble_layout_local\n");
+    reset();
+    bring_up();
+
+    const uint8_t payload[] = { (uint8_t)BIG_EMOJI_HEARTBROKEN_ANCHOR };
+    RenderCmd c;
+    c.cmd        = RENDER_APPEND_LOCAL_PENDING;
+    c.msg_id     = 22;
+    c.side       = MSG_LOCAL;
+    c.status     = MSG_PENDING;
+    c.len        = 1;
+    c.payload    = payload;
+    c.payload_n  = 1;
+    send_cmd(c);
+
+    const int right = BUBBLE_RIGHT_EDGE;             // 97
+    const int left  = right - BIG_EMOJI_N_COLS - 1;  // 90
+    const uint8_t anchor = (uint8_t)BIG_EMOJI_HEARTBROKEN_ANCHOR;
+
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, left),  SPRITE_BL_TOP, "L row0 BL_TOP");
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, right), SPRITE_BR_TOP, "L row0 BR_TOP");
+    CHECK_EQ(read_cell(HIST_ROW_START + 2, left),  SPRITE_BL_BOT, "L row2 BL_BOT");
+    CHECK_EQ(read_cell(HIST_ROW_START + 2, right), SPRITE_BR_BOT, "L row2 BR_BOT");
+
+    for (int r = 0; r < BIG_EMOJI_N_ROWS; r++) {
+        for (int c0 = 0; c0 < BIG_EMOJI_N_COLS; c0++) {
+            char lbl[64]; snprintf(lbl, sizeof(lbl),
+                                   "L tile (r=%d,c=%d)", r, c0);
+            CHECK_EQ(read_cell(HIST_ROW_START + r, left + 1 + c0),
+                     (uint8_t)(anchor + r * BIG_EMOJI_N_COLS + c0), lbl);
+        }
+    }
+}
+
+// A non-anchor single byte must render as a regular 1-line bubble, NOT
+// expand into the 3-row layout. Guards against accidentally matching
+// codes outside [BIG_EMOJI_BASE, BIG_EMOJI_END_EXCL).
+static void test_single_byte_non_anchor_stays_one_line() {
+    printf("== test_single_byte_non_anchor_stays_one_line\n");
+    reset();
+    bring_up();
+
+    const uint8_t payload[] = { 'q' };
+    RenderCmd c;
+    c.cmd        = RENDER_APPEND_REMOTE;
+    c.msg_id     = 23;
+    c.side       = MSG_REMOTE;
+    c.status     = MSG_SUCCESS;
+    c.len        = 1;
+    c.payload    = payload;
+    c.payload_n  = 1;
+    send_cmd(c);
+
+    // Single-line bubble: width 1 -> SPRITE_BL at col 2, 'q' at col 3,
+    // SPRITE_BR at col 4. Rows 1 and 2 should stay blank.
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, 2), SPRITE_BL, "single-line BL");
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, 3), 'q',       "single-line payload");
+    CHECK_EQ(read_cell(HIST_ROW_START + 0, 4), SPRITE_BR, "single-line BR");
+    CHECK_EQ(read_cell(HIST_ROW_START + 1, 2), ' ',       "no row1 BL_MID");
+    CHECK_EQ(read_cell(HIST_ROW_START + 2, 2), ' ',       "no row2 BL_BOT");
 }
 
 // Local message: right-aligned bubble ending at col BUBBLE_RIGHT_EDGE (97).
@@ -1744,6 +1870,9 @@ int main(int argc, char** argv) {
     test_conn_state_connected();
     test_append_remote();
     test_emoji_codes_render_in_bubble();
+    test_big_emoji_bubble_layout_remote();
+    test_big_emoji_bubble_layout_local();
+    test_single_byte_non_anchor_stays_one_line();
     test_append_local_pending();
     test_update_status_success();
     test_update_status_fail();

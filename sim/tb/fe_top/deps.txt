@@ -7,5 +7,7 @@ rtl/frontend/fe_msg_payload_ram.sv
 rtl/frontend/fe_render_decoder.sv
 rtl/frontend/fe_video_timing.sv
 rtl/frontend/fe_glyph_rom.sv
+rtl/frontend/fe_big_emoji_pixel_rom.sv
+rtl/frontend/fe_big_emoji_palette_rom.sv
 rtl/frontend/fe_scan.sv
 rtl/frontend/fe_top.sv

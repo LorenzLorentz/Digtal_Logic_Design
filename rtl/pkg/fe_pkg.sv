@@ -112,6 +112,19 @@ package fe_pkg;
     localparam byte_t EMOJI_DOGE  = 8'hED;
     localparam byte_t EMOJI_MAIRUO = 8'hEE;
 
+    // Big-emoji tile codes occupy 0x80..(BIG_EMOJI_END_EXCL - 1). One
+    // anchor byte per emoji (the user-typed `\Name` token expands to
+    // just the anchor); the frontend lays out the bubble as N_ROWS x
+    // N_COLS character cells and fills them with codes anchor + (sub_row
+    // * N_COLS + sub_col). Pixel ROM is indexed by (code - BASE, gy)
+    // and returns a 4 bpp row whose nibbles look up the per-emoji
+    // palette (idx 0 = transparent / bubble bg, 1..15 = quantised colour).
+`ifdef SYNTHESIS
+    `include "fe_big_emoji_codes.svh"
+`else
+    `include "rtl/pkg/fe_big_emoji_codes.svh"
+`endif
+
     // Standalone status icons. 0xF2 is the "X" mark, drawn to the left
     // of failed local bubbles so the fail is unambiguous even if the
     // rounded vs. square corner sprites are hard to tell apart at a glance.

@@ -26,6 +26,7 @@
 #include "Vbe_top.h"
 #include "verilated.h"
 #include "verilated_vcd_c.h"
+#include "../common/big_emoji_codes.h"
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -848,6 +849,76 @@ static void test_emoji_tokens_encoded_on_commit() {
     for (int i = 0; i < 29; i++) {
         char lbl[48]; snprintf(lbl, sizeof(lbl), "store emoji payload[%d]", i);
         CHECK_EQ(store_payload_byte(i), expected[i], lbl);
+    }
+}
+
+// Big-emoji tokens (capital first letter) encode to a single anchor
+// byte each; render/tx/store all carry that single byte. The frontend
+// is what expands it into a multi-tile bubble on display.
+static void test_big_emoji_tokens_encoded_on_commit() {
+    printf("== test_big_emoji_tokens_encoded_on_commit\n");
+    reset();
+    for (char c : std::string("\\Shrug \\Hissing \\Heartbroken \\Sweat \\Xiucai")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r1;
+    CHECK_EQ(wait_render(r1), true, "got local append render");
+    CHECK_EQ(r1.cmd, RENDER_APPEND_LOCAL_PENDING, "render append local");
+    CHECK_EQ(r1.len, 9, "encoded render len (5 anchors + 4 spaces)");
+    const uint8_t expected[] = {
+        (uint8_t)BIG_EMOJI_SHRUG_ANCHOR,       ' ',
+        (uint8_t)BIG_EMOJI_HISSING_ANCHOR,     ' ',
+        (uint8_t)BIG_EMOJI_HEARTBROKEN_ANCHOR, ' ',
+        (uint8_t)BIG_EMOJI_SWEAT_ANCHOR,       ' ',
+        (uint8_t)BIG_EMOJI_XIUCAI_ANCHOR
+    };
+    for (int i = 0; i < 9; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "render big-emoji payload[%d]", i);
+        CHECK_EQ(payload_get_byte(r1.payload, i), expected[i], lbl);
+    }
+
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx), true, "got DATA tx");
+    CHECK_EQ(tx.len, 9, "encoded tx len");
+    for (int i = 0; i < 9; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "tx big-emoji payload[%d]", i);
+        CHECK_EQ(payload_get_byte(tx.payload, i), expected[i], lbl);
+    }
+
+    RenderEvent clear;
+    CHECK_EQ(wait_render(clear), true, "got input clear render");
+    CHECK_EQ(clear.cmd, RENDER_UPDATE_INPUT_LINE, "clear render");
+
+    StoreRead s = read_store(0);
+    CHECK_EQ(s.valid, 1, "store valid");
+    CHECK_EQ(s.len, 9, "encoded store len");
+    for (int i = 0; i < 9; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "store big-emoji payload[%d]", i);
+        CHECK_EQ(store_payload_byte(i), expected[i], lbl);
+    }
+}
+
+// An unmatched capitalized token (no such big emoji) must fall through
+// to the literal byte path, just like an unknown lowercase token does.
+static void test_big_emoji_unknown_token_passthrough() {
+    printf("== test_big_emoji_unknown_token_passthrough\n");
+    reset();
+    for (char c : std::string("\\Bogus")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r1;
+    CHECK_EQ(wait_render(r1), true, "got local append render");
+    CHECK_EQ(r1.len, 6, "literal len = original 6 bytes");
+    const char* expect = "\\Bogus";
+    for (int i = 0; i < 6; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "literal byte[%d]", i);
+        CHECK_EQ(payload_get_byte(r1.payload, i), (uint8_t)expect[i], lbl);
     }
 }
 
@@ -1757,6 +1828,8 @@ int main(int argc, char** argv) {
     test_two_commits_distinct_slots();
     test_payload_packed_correctly();
     test_emoji_tokens_encoded_on_commit();
+    test_big_emoji_tokens_encoded_on_commit();
+    test_big_emoji_unknown_token_passthrough();
     test_commit_full_pipeline_order();
     test_commit_blocked_by_render_backpressure();
     test_commit_blocked_by_tx_backpressure();

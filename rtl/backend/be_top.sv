@@ -385,7 +385,19 @@ module be_top
                     encoded_line_payload[dst*8 +: 8] = 8'hE3;
                     src += 3;
                     dst += 1;
-                end else begin
+                end
+                // Big-emoji tokens (capital first letter) are appended
+                // here; each branch emits a single anchor byte. The
+                // frontend expands the anchor into a 3 x 6 tile bubble
+                // on render -- backend does no per-tile expansion.
+                // Path mirrors fe_glyph_rom: Vivado searches the source
+                // dir, Verilator searches cwd=repo-root.
+`ifdef SYNTHESIS
+                `include "be_big_emoji_tokens.svh"
+`else
+                `include "rtl/backend/be_big_emoji_tokens.svh"
+`endif
+                else begin
                     encoded_line_payload[dst*8 +: 8] = line_buf[src];
                     src += 1;
                     dst += 1;

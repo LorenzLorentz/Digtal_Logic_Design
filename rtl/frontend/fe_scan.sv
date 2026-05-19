@@ -300,6 +300,59 @@ module fe_scan
     end
 
     // -----------------------------------------------------------------
+    // Big-emoji colour path. rd_code in [BIG_EMOJI_BASE, BIG_EMOJI_END_EXCL)
+    // means the cell belongs to a big-emoji bubble; the pixel ROM yields
+    // a 4 bpp palette index per pixel, and the palette ROM (indexed by
+    // emoji_id = tile_off / N_TILES) maps that to RGB. Index 0 is the
+    // transparent marker and falls back to the bubble background colour
+    // in the final pixel mux. Two cascaded combinational ROMs in stage 1
+    // -- fine at 40 MHz pixel clock.
+    // -----------------------------------------------------------------
+    logic        is_big_emoji;
+    logic [6:0]  big_tile_off;
+    logic [31:0] big_pixel_row;
+    logic [3:0]  big_pix_idx;
+    logic [2:0]  big_emoji_id;
+    logic [7:0]  big_pal_r, big_pal_g, big_pal_b;
+
+    assign is_big_emoji = in_connected
+                          && !s1_in_bottom_strip
+                          && (rd_code >= byte_t'(BIG_EMOJI_BASE))
+                          && (rd_code <  byte_t'(BIG_EMOJI_END_EXCL));
+    assign big_tile_off = rd_code[6:0];
+    // Constant-divisor synthesis: Vivado picks the right shift/add or LUT.
+    assign big_emoji_id = 3'(big_tile_off / 7'(BIG_EMOJI_N_TILES));
+
+    fe_big_emoji_pixel_rom u_big_pix (
+        .tile_off (big_tile_off),
+        .gy       (s1_gy),
+        .row      (big_pixel_row)
+    );
+
+    // Nibble select: gx=0 is the MSB nibble (matches how gen_big_emoji.py
+    // packs each row, mirroring the mono font ROM's MSB-first row byte).
+    always_comb begin
+        unique case (s1_gx)
+            3'd0: big_pix_idx = big_pixel_row[31:28];
+            3'd1: big_pix_idx = big_pixel_row[27:24];
+            3'd2: big_pix_idx = big_pixel_row[23:20];
+            3'd3: big_pix_idx = big_pixel_row[19:16];
+            3'd4: big_pix_idx = big_pixel_row[15:12];
+            3'd5: big_pix_idx = big_pixel_row[11: 8];
+            3'd6: big_pix_idx = big_pixel_row[ 7: 4];
+            3'd7: big_pix_idx = big_pixel_row[ 3: 0];
+        endcase
+    end
+
+    fe_big_emoji_palette_rom u_big_pal (
+        .emoji_id (big_emoji_id),
+        .idx      (big_pix_idx),
+        .r        (big_pal_r),
+        .g        (big_pal_g),
+        .b        (big_pal_b)
+    );
+
+    // -----------------------------------------------------------------
     // Cursor blink (toggle every BLINK_FRAMES vsync rising edges).
     // -----------------------------------------------------------------
     logic [$clog2(BLINK_FRAMES)-1:0] blink_cnt_q;
@@ -407,9 +460,23 @@ module fe_scan
             video_green = 8'h00;
             video_blue  = 8'h00;
         end else if (in_connected) begin
-            video_red   = fg ? fg_r : bg_r;
-            video_green = fg ? fg_g : bg_g;
-            video_blue  = fg ? fg_b : bg_b;
+            // Big-emoji tile cells displace the mono mux entirely:
+            // non-transparent indices output palette RGB, transparent
+            // ones fall back to the same bg colour the rest of the
+            // bubble's interior uses.
+            if (is_big_emoji && (big_pix_idx != 4'h0)) begin
+                video_red   = big_pal_r;
+                video_green = big_pal_g;
+                video_blue  = big_pal_b;
+            end else if (is_big_emoji) begin
+                video_red   = bg_r;
+                video_green = bg_g;
+                video_blue  = bg_b;
+            end else begin
+                video_red   = fg ? fg_r : bg_r;
+                video_green = fg ? fg_g : bg_g;
+                video_blue  = fg ? fg_b : bg_b;
+            end
         end else if (s1_splash_in_region && pixel_on) begin
             video_red   = COL_SPLASH_FG_R;
             video_green = COL_SPLASH_FG_G;

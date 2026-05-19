@@ -168,6 +168,15 @@ module fe_render_decoder
     logic [LINE_SEL_W-1:0]            cur_line_sel;
     assign cur_line_sel = cur_line_q[LINE_SEL_W-1:0];
 
+    // Big-emoji bubble state. When the stored payload is a single byte
+    // in [BIG_EMOJI_BASE, BIG_EMOJI_END_EXCL), the parse latches a fixed
+    // N_ROWS x N_COLS bubble layout and the hist_cell mux generates tile
+    // codes from (cur_line_q, payload_idx) instead of reading payload_q.
+    // fe_scan recognises tile codes and routes the pixel through the
+    // big-emoji colour ROMs.
+    logic                             is_big_emoji_q;
+    byte_t                            big_emoji_anchor_q;
+
     // -----------------------------------------------------------------
     // Persistent UI state
     // -----------------------------------------------------------------
@@ -518,8 +527,20 @@ module fe_render_decoder
             else
                 hist_cell = SPRITE_BR_MID;
         end
-        else if (payload_in_range)
-            hist_cell = payload_q[abs_idx[LINE_IDX_W-1:0]*8 +: 8];
+        else if (payload_in_range) begin
+            if (is_big_emoji_q) begin
+                // Tile code = anchor + cur_line_q * N_COLS + payload_idx.
+                // cur_line_q is bounded to BIG_EMOJI_N_ROWS - 1 (=2) and
+                // payload_idx to BIG_EMOJI_N_COLS - 1 (=5), so the offset
+                // is at most 17 -> always fits the per-emoji 18-tile range.
+                automatic byte_t tile_off;
+                tile_off = 8'(cur_line_q) * 8'(BIG_EMOJI_N_COLS)
+                           + 8'(payload_idx);
+                hist_cell = big_emoji_anchor_q + tile_off;
+            end else begin
+                hist_cell = payload_q[abs_idx[LINE_IDX_W-1:0]*8 +: 8];
+            end
+        end
         else
             hist_cell = " ";
 
@@ -794,6 +815,8 @@ module fe_render_decoder
                 ml_offset_q[i] <= '0;
                 ml_len_q[i]    <= '0;
             end
+            is_big_emoji_q     <= 1'b0;
+            big_emoji_anchor_q <= '0;
 
             conn_state_curr_q <= 2'(CONN_BOOT);
             peer_name_q       <= '0;
@@ -1315,43 +1338,78 @@ module fe_render_decoder
                 end
 
                 if (is_last_byte) begin
-                    automatic logic [LINE_CNT_W-1:0] final_n_lines;
-                    automatic msg_len_t             final_line_len;
-                    automatic logic [LINE_SEL_W-1:0] final_last_sel;
-                    final_n_lines = msg_parse_n_lines_q
-                                    + (is_break ? LINE_CNT_W'(1)
-                                                : LINE_CNT_W'(0));
-                    // If we broke this cycle the new (trailing) line
-                    // starts at byte_walk_idx_q + 1 == msg_total_len,
-                    // i.e. it's empty. Otherwise the still-open line's
-                    // content length is cur_line_pos + 1.
-                    final_line_len = is_break
-                        ? msg_len_t'(0)
-                        : msg_len_t'(cur_line_pos) + msg_len_t'(1);
-                    final_last_sel = is_break
-                        ? msg_parse_line_sel
-                        : msg_parse_last_sel;
+                    automatic byte_t                 first_byte;
+                    automatic logic                  is_big;
+                    first_byte = payload_q[7:0];
+                    // Single-byte payload whose byte falls in the big-emoji
+                    // anchor range: lay the bubble out as a fixed N_ROWS x
+                    // N_COLS tile grid and skip the text-bubble metadata.
+                    is_big = (msg_total_len_q == msg_len_t'(1))
+                          && (first_byte >= byte_t'(BIG_EMOJI_BASE))
+                          && (first_byte <  byte_t'(BIG_EMOJI_END_EXCL));
 
-                    ml_len_q[final_last_sel] <= final_line_len;
-                    n_lines_q  <= final_n_lines;
-                    cur_line_q <= '0;
-                    if (!is_break && final_line_len > msg_max_sub_len_q)
-                        msg_max_sub_len_q <= final_line_len;
-                    // Advance hist write pointer by the (final) line
-                    // count. & N_HIST_STORED-1 for ring wrap.
-                    hist_wr_row_q <= (hist_wr_row_q
-                        + HIST_W'(final_n_lines))
-                        & HIST_W'(N_HIST_STORED - 1);
-                    // Track total rows ever written for the current
-                    // peer, capped at N_HIST_STORED. Drives the
-                    // dynamic hist_scroll_max.
-                    if ({1'b0, used_hist_rows_q}
-                        + {1'b0, (HIST_W+1)'(final_n_lines)}
-                        >= (HIST_W+2)'(N_HIST_STORED))
-                        used_hist_rows_q <= (HIST_W+1)'(N_HIST_STORED);
-                    else
-                        used_hist_rows_q <= used_hist_rows_q
-                            + (HIST_W+1)'(final_n_lines);
+                    if (is_big) begin
+                        is_big_emoji_q     <= 1'b1;
+                        big_emoji_anchor_q <= first_byte;
+                        n_lines_q          <= LINE_CNT_W'(BIG_EMOJI_N_ROWS);
+                        cur_line_q         <= '0;
+                        msg_max_sub_len_q  <= msg_len_t'(BIG_EMOJI_N_COLS);
+                        for (int i = 0; i < BIG_EMOJI_N_ROWS; i++) begin
+                            ml_offset_q[i] <= '0;
+                            ml_len_q[i]    <= msg_len_t'(BIG_EMOJI_N_COLS);
+                        end
+                        // Advance hist pointer by N_ROWS (bubble is that
+                        // many text_ram rows tall).
+                        hist_wr_row_q <= (hist_wr_row_q
+                            + HIST_W'(BIG_EMOJI_N_ROWS))
+                            & HIST_W'(N_HIST_STORED - 1);
+                        if ({1'b0, used_hist_rows_q}
+                            + {1'b0, (HIST_W+1)'(BIG_EMOJI_N_ROWS)}
+                            >= (HIST_W+2)'(N_HIST_STORED))
+                            used_hist_rows_q <= (HIST_W+1)'(N_HIST_STORED);
+                        else
+                            used_hist_rows_q <= used_hist_rows_q
+                                + (HIST_W+1)'(BIG_EMOJI_N_ROWS);
+                    end else begin
+                        automatic logic [LINE_CNT_W-1:0] final_n_lines;
+                        automatic msg_len_t             final_line_len;
+                        automatic logic [LINE_SEL_W-1:0] final_last_sel;
+                        is_big_emoji_q <= 1'b0;
+                        final_n_lines = msg_parse_n_lines_q
+                                        + (is_break ? LINE_CNT_W'(1)
+                                                    : LINE_CNT_W'(0));
+                        // If we broke this cycle the new (trailing) line
+                        // starts at byte_walk_idx_q + 1 == msg_total_len,
+                        // i.e. it's empty. Otherwise the still-open line's
+                        // content length is cur_line_pos + 1.
+                        final_line_len = is_break
+                            ? msg_len_t'(0)
+                            : msg_len_t'(cur_line_pos) + msg_len_t'(1);
+                        final_last_sel = is_break
+                            ? msg_parse_line_sel
+                            : msg_parse_last_sel;
+
+                        ml_len_q[final_last_sel] <= final_line_len;
+                        n_lines_q  <= final_n_lines;
+                        cur_line_q <= '0;
+                        if (!is_break && final_line_len > msg_max_sub_len_q)
+                            msg_max_sub_len_q <= final_line_len;
+                        // Advance hist write pointer by the (final) line
+                        // count. & N_HIST_STORED-1 for ring wrap.
+                        hist_wr_row_q <= (hist_wr_row_q
+                            + HIST_W'(final_n_lines))
+                            & HIST_W'(N_HIST_STORED - 1);
+                        // Track total rows ever written for the current
+                        // peer, capped at N_HIST_STORED. Drives the
+                        // dynamic hist_scroll_max.
+                        if ({1'b0, used_hist_rows_q}
+                            + {1'b0, (HIST_W+1)'(final_n_lines)}
+                            >= (HIST_W+2)'(N_HIST_STORED))
+                            used_hist_rows_q <= (HIST_W+1)'(N_HIST_STORED);
+                        else
+                            used_hist_rows_q <= used_hist_rows_q
+                                + (HIST_W+1)'(final_n_lines);
+                    end
                 end else begin
                     byte_walk_idx_q <= byte_walk_idx_q + 1'b1;
                 end
@@ -1425,26 +1483,53 @@ module fe_render_decoder
 
                 if (byte_walk_idx_q
                     >= msg_total_len_q[MSG_BYTE_IDX_W:0]) begin
-                    // All bytes captured. Commit last line.
-                    automatic logic [LINE_CNT_W-1:0] final_n_lines;
-                    automatic msg_len_t             final_line_len;
-                    automatic logic [LINE_SEL_W-1:0] final_last_sel;
-                    final_n_lines = msg_parse_n_lines_q
-                                    + (is_break ? LINE_CNT_W'(1)
-                                                : LINE_CNT_W'(0));
-                    final_line_len = is_break
-                        ? msg_len_t'(0)
-                        : (msg_total_len_q
-                           - msg_len_t'(msg_parse_line_start_q));
-                    final_last_sel = is_break
-                        ? msg_parse_line_sel
-                        : msg_parse_last_sel;
+                    // All bytes captured. Commit last line. For a single
+                    // captured byte in the big-emoji range, override to
+                    // the fixed N_ROWS x N_COLS bubble layout. (Use
+                    // cap_byte rather than payload_q[7:0]: the latter is
+                    // being assigned this same cycle and isn't readable
+                    // yet.) hist_wr_row_q / used_hist_rows_q are NOT
+                    // re-advanced here -- they were locked in by the
+                    // original S_HIST_STORE.
+                    automatic byte_t                 first_byte;
+                    automatic logic                  is_big;
+                    first_byte = cap_byte;
+                    is_big = (msg_total_len_q == msg_len_t'(1))
+                          && (first_byte >= byte_t'(BIG_EMOJI_BASE))
+                          && (first_byte <  byte_t'(BIG_EMOJI_END_EXCL));
 
-                    ml_len_q[final_last_sel] <= final_line_len;
-                    n_lines_q  <= final_n_lines;
-                    cur_line_q <= '0;
-                    if (!is_break && final_line_len > msg_max_sub_len_q)
-                        msg_max_sub_len_q <= final_line_len;
+                    if (is_big) begin
+                        is_big_emoji_q     <= 1'b1;
+                        big_emoji_anchor_q <= first_byte;
+                        n_lines_q          <= LINE_CNT_W'(BIG_EMOJI_N_ROWS);
+                        cur_line_q         <= '0;
+                        msg_max_sub_len_q  <= msg_len_t'(BIG_EMOJI_N_COLS);
+                        for (int i = 0; i < BIG_EMOJI_N_ROWS; i++) begin
+                            ml_offset_q[i] <= '0;
+                            ml_len_q[i]    <= msg_len_t'(BIG_EMOJI_N_COLS);
+                        end
+                    end else begin
+                        automatic logic [LINE_CNT_W-1:0] final_n_lines;
+                        automatic msg_len_t             final_line_len;
+                        automatic logic [LINE_SEL_W-1:0] final_last_sel;
+                        is_big_emoji_q <= 1'b0;
+                        final_n_lines = msg_parse_n_lines_q
+                                        + (is_break ? LINE_CNT_W'(1)
+                                                    : LINE_CNT_W'(0));
+                        final_line_len = is_break
+                            ? msg_len_t'(0)
+                            : (msg_total_len_q
+                               - msg_len_t'(msg_parse_line_start_q));
+                        final_last_sel = is_break
+                            ? msg_parse_line_sel
+                            : msg_parse_last_sel;
+
+                        ml_len_q[final_last_sel] <= final_line_len;
+                        n_lines_q  <= final_n_lines;
+                        cur_line_q <= '0;
+                        if (!is_break && final_line_len > msg_max_sub_len_q)
+                            msg_max_sub_len_q <= final_line_len;
+                    end
                 end else begin
                     byte_walk_idx_q <= byte_walk_idx_q + 1'b1;
                 end
