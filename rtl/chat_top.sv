@@ -47,6 +47,10 @@ module chat_top
     input  logic ps2_clk,
     input  logic ps2_data,
 
+    // ---- PS/2 mouse (bidirectional for host-to-device init) ----
+    inout  logic ps2_mouse_clk,
+    inout  logic ps2_mouse_data,
+
     // ---- UART (PMOD, TTL) ----
     input  logic uart_rxd,
     output logic uart_txd,
@@ -85,15 +89,48 @@ module chat_top
     logic [2:0]   io_key_type;
     byte_t        io_key_ascii;
 
+    // -----------------------------------------------------------------
+    // PS/2 mouse
+    // -----------------------------------------------------------------
+    logic [9:0] mouse_x, mouse_y;
+    logic       mouse_scroll_up, mouse_scroll_down, mouse_left_click;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic       mouse_click_ready_unused;
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    io_mouse #(
+        .CLK_FREQ_HZ (CLK_FREQ_HZ),
+        .SCREEN_W    (800),
+        .SCREEN_H    (600)
+    ) u_mouse (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .ps2_clk     (ps2_mouse_clk),
+        .ps2_data    (ps2_mouse_data),
+        .mouse_x     (mouse_x),
+        .mouse_y     (mouse_y),
+        .scroll_up   (mouse_scroll_up),
+        .scroll_down (mouse_scroll_down),
+        .left_click  (mouse_left_click)
+    );
+
+    // Determine mouse region for scroll routing
+    logic mouse_in_input_area;
+    assign mouse_in_input_area = ({6'd0, mouse_y} >= 16'(INPUT_PIXEL_Y_LO))
+                              && ({6'd0, mouse_y} <= 16'(INPUT_PIXEL_Y_HI));
+
     io_top u_io (
-        .clk          (clk),
-        .rst_n        (rst_n),
-        .ps2_clk      (ps2_clk),
-        .ps2_data     (ps2_data),
-        .io_key_valid (io_key_valid),
-        .io_key_ready (io_key_ready),
-        .io_key_type  (io_key_type),
-        .io_key_ascii (io_key_ascii)
+        .clk                  (clk),
+        .rst_n                (rst_n),
+        .ps2_clk              (ps2_clk),
+        .ps2_data             (ps2_data),
+        .mouse_scroll_up      (mouse_scroll_up),
+        .mouse_scroll_down    (mouse_scroll_down),
+        .mouse_scroll_in_input(mouse_in_input_area),
+        .io_key_valid         (io_key_valid),
+        .io_key_ready         (io_key_ready),
+        .io_key_type          (io_key_type),
+        .io_key_ascii         (io_key_ascii)
     );
 
     // -----------------------------------------------------------------
@@ -157,6 +194,11 @@ module chat_top
         .io_key_ready           (io_key_ready),
         .io_key_type            (io_key_type),
         .io_key_ascii           (io_key_ascii),
+        .io_mouse_click_valid   (mouse_left_click),
+        .io_mouse_click_ready   (mouse_click_ready_unused),
+        .io_mouse_click_x       (mouse_x),
+        .io_mouse_click_y       (mouse_y),
+        .fe_input_scroll_offset (fe_input_scroll_offset_obs),
         .cm_rx_valid            (cm_rx_valid),
         .cm_rx_ready            (cm_rx_ready),
         .cm_rx_frame_type       (cm_rx_frame_type),
@@ -251,8 +293,8 @@ module chat_top
     logic [SCROLL_W-1:0]                         fe_scroll_offset_obs;
     logic [INPUT_LINE_W-1:0]                     fe_input_cursor_row_obs;
     msg_len_t                                    fe_input_cursor_col_obs;
-    logic [INPUT_SCROLL_W-1:0]                   fe_input_scroll_offset_obs;
     /* verilator lint_on UNUSEDSIGNAL */
+    logic [INPUT_SCROLL_W-1:0]                   fe_input_scroll_offset_obs;
 
     fe_top #(
         .LOCAL_NAME_LEN   (MY_NAME_LEN),

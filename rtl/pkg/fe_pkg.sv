@@ -74,6 +74,19 @@ package fe_pkg;
     localparam int INPUT_LINE_W     = (MAX_INPUT_LINES <= 1)
                                         ? 1 : $clog2(MAX_INPUT_LINES);
 
+    // Screen-pixel layout for the input area (used by mouse region detect).
+    //   screen row 0       : title
+    //   screen row 1       : separator
+    //   screen rows 2..30  : 29 history rows
+    //   screen row 31      : separator
+    //   screen rows 32..36 : 5 input rows
+    //   screen rows 37+    : blank
+    localparam int INPUT_SCREEN_START = 2 + N_HIST_VISIBLE + 1;       // 32
+    localparam int INPUT_SCREEN_END   = INPUT_SCREEN_START
+                                        + N_INPUT_VISIBLE - 1;        // 36
+    localparam int INPUT_PIXEL_Y_LO   = INPUT_SCREEN_START * 16;      // 512
+    localparam int INPUT_PIXEL_Y_HI   = (INPUT_SCREEN_END + 1) * 16 - 1; // 591
+
     // -----------------------------------------------------------------
     // Sprite codes (in 0xF0..0xFF -- the reserved sprite range)
     // -----------------------------------------------------------------

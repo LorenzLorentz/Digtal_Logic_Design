@@ -49,6 +49,10 @@ module chat_top_board
     input  logic        ps2_keyboard_clk,
     input  logic        ps2_keyboard_data,
 
+    // ---- PS/2 mouse (bidirectional for host-to-device init) ----
+    inout  logic        ps2_mouse_clk,
+    inout  logic        ps2_mouse_data,
+
     // ---- UART (PMOD, TTL) ----
     input  logic        uart_rxd,
     output logic        uart_txd,
@@ -93,6 +97,8 @@ module chat_top_board
         .clk_pix     (clk_pix),
         .ps2_clk     (ps2_keyboard_clk),
         .ps2_data    (ps2_keyboard_data),
+        .ps2_mouse_clk  (ps2_mouse_clk),
+        .ps2_mouse_data (ps2_mouse_data),
         .uart_rxd    (uart_rxd),
         .uart_txd    (uart_txd),
         .video_red   (video_red),

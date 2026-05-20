@@ -35,6 +35,11 @@ module io_top
     input  logic        ps2_clk,
     input  logic        ps2_data,
 
+    // Mouse scroll injection (1-cycle pulses, already region-decoded)
+    input  logic        mouse_scroll_up,
+    input  logic        mouse_scroll_down,
+    input  logic        mouse_scroll_in_input,
+
     // Backend handshake
     output logic        io_key_valid,
     input  logic        io_key_ready,
@@ -50,6 +55,35 @@ module io_top
     logic         dec_ev_valid;
     logic [2:0]   dec_ev_type;
     byte_t        dec_ev_ascii;
+
+    // ---- mouse scroll -> fifo (merged with keyboard, lower priority) ----
+    logic         mouse_ev_valid;
+    logic [2:0]   mouse_ev_type;
+    byte_t        mouse_ev_ascii;
+
+    always_comb begin
+        mouse_ev_valid = 1'b0;
+        mouse_ev_type  = 3'd0;
+        mouse_ev_ascii = 8'h00;
+        if (mouse_scroll_up) begin
+            mouse_ev_valid = 1'b1;
+            mouse_ev_type  = 3'(KEY_UP);
+            mouse_ev_ascii = mouse_scroll_in_input ? 8'h01 : 8'h00;
+        end else if (mouse_scroll_down) begin
+            mouse_ev_valid = 1'b1;
+            mouse_ev_type  = 3'(KEY_DOWN);
+            mouse_ev_ascii = mouse_scroll_in_input ? 8'h01 : 8'h00;
+        end
+    end
+
+    // Merge: keyboard has priority over mouse scroll.
+    logic fifo_in_valid;
+    logic [2:0] fifo_in_type;
+    byte_t      fifo_in_ascii;
+
+    assign fifo_in_valid = dec_ev_valid || mouse_ev_valid;
+    assign fifo_in_type  = dec_ev_valid ? dec_ev_type  : mouse_ev_type;
+    assign fifo_in_ascii = dec_ev_valid ? dec_ev_ascii : mouse_ev_ascii;
 
     /* verilator lint_off PINCONNECTEMPTY */
     io_ps2_phy u_phy (
@@ -79,9 +113,9 @@ module io_top
     ) u_fifo (
         .clk       (clk),
         .rst_n     (rst_n),
-        .in_valid  (dec_ev_valid),
-        .in_ready  (/* decoder doesn't check; full -> drop */),
-        .in_data   ({dec_ev_type, dec_ev_ascii}),
+        .in_valid  (fifo_in_valid),
+        .in_ready  (/* no backpressure; full -> drop */),
+        .in_data   ({fifo_in_type, fifo_in_ascii}),
         .out_valid (io_key_valid),
         .out_ready (io_key_ready),
         .out_data  ({io_key_type, io_key_ascii})

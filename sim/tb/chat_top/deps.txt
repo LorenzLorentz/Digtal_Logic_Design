@@ -6,6 +6,8 @@ rtl/common/crc16.sv
 rtl/io/io_ps2_phy.sv
 rtl/io/io_ps2_decoder.sv
 rtl/io/io_top.sv
+rtl/io/io_ps2_tx.sv
+rtl/io/io_mouse.sv
 rtl/comm/uart_tx.sv
 rtl/comm/uart_rx.sv
 rtl/comm/comm_frame_encoder.sv

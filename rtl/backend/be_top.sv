@@ -99,6 +99,17 @@ module be_top
     input  logic [2:0]                 io_key_type,
     input  byte_t                      io_key_ascii,
 
+    // ---- mouse click -> backend ----
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic                       io_mouse_click_valid,
+    output logic                       io_mouse_click_ready,
+    input  logic [9:0]                 io_mouse_click_x,
+    input  logic [9:0]                 io_mouse_click_y,
+
+    // ---- frontend -> backend : input scroll offset (for click) ----
+    /* verilator lint_on UNUSEDSIGNAL */
+    input  logic [3:0]                 fe_input_scroll_offset,
+
     // ---- comm -> backend : remote frame ----
     input  logic                       cm_rx_valid,
     output logic                       cm_rx_ready,
@@ -191,7 +202,10 @@ module be_top
         // Replaces a 128-iter unrolled for-loop whose per-iteration
         // 19-token priority chain + 1024-bit dynamic bit-slice write
         // was blowing up Vivado RTL Opt Phase 2.
-        S_LINE_ENCODE              = 5'd24
+        S_LINE_ENCODE              = 5'd24,
+        // Mouse click in input area: multi-cycle 2D→linear cursor
+        // position conversion. Walks line_buf tracking visual rows.
+        S_MOUSE_CLICK              = 5'd25
     } state_e;
 
     state_e state_q, state_d;
@@ -242,6 +256,18 @@ module be_top
     // Peer username state (packed: byte i at bits [i*8 +: 8]).
     logic [MAX_NAME_LEN*8-1:0]          peer_name_q;
     msg_len_t                           peer_name_len_q;
+
+    // Mouse click: shadow copy of the frontend's input scroll offset
+    // so the backend can compute the clicked buffer row from screen
+    // coordinates.  Mirrored on every RENDER_INPUT_SCROLL_UP/DOWN.
+    logic [3:0]                         input_scroll_shadow_q;
+
+    // Mouse click: walk registers for the multi-cycle 2D→linear
+    // conversion in S_MOUSE_CLICK.
+    logic [3:0]                         click_target_row_q;
+    logic [6:0]                         click_target_col_q;
+    logic [3:0]                         click_vis_row_q;
+    logic [6:0]                         click_vis_col_q;
 
     // -----------------------------------------------------------------
     // Combinational helpers
@@ -470,13 +496,17 @@ module be_top
     assign io_key_ready    = (in_chat_idle && !cm_status_valid && !cm_rx_valid)
                           || (in_handshake_idle && !cm_rx_valid)
                           || (in_disc_idle      && !cm_rx_valid);
+    assign io_mouse_click_ready = in_chat_idle && !cm_status_valid
+                               && !cm_rx_valid && !io_key_valid;
 
     logic accept_io;
     logic accept_rx;
     logic accept_status;
-    assign accept_status = cm_status_valid && cm_status_ready;
-    assign accept_rx     = cm_rx_valid     && cm_rx_ready;
-    assign accept_io     = io_key_valid    && io_key_ready;
+    logic accept_mouse_click;
+    assign accept_status      = cm_status_valid      && cm_status_ready;
+    assign accept_rx          = cm_rx_valid           && cm_rx_ready;
+    assign accept_io          = io_key_valid          && io_key_ready;
+    assign accept_mouse_click = io_mouse_click_valid  && io_mouse_click_ready;
 
     // -----------------------------------------------------------------
     // Next-state logic
@@ -570,6 +600,12 @@ module be_top
                                             : S_RENDER_SCROLL_DOWN;
                         default: state_d = S_IDLE;
                     endcase
+                end else if (accept_mouse_click) begin
+                    // Only transition if click falls within the input area
+                    // (screen rows 32..36, i.e. pixel Y 512..591).
+                    if (io_mouse_click_y[9:4] >= 6'd32 &&
+                        io_mouse_click_y[9:4] <= 6'd36)
+                        state_d = S_MOUSE_CLICK;
                 end
             end
 
@@ -599,6 +635,7 @@ module be_top
             S_RENDER_SCROLL_DOWN:       if (be_render_ready) state_d = S_IDLE;
             S_RENDER_INPUT_SCROLL_UP:   if (be_render_ready) state_d = S_IDLE;
             S_RENDER_INPUT_SCROLL_DOWN: if (be_render_ready) state_d = S_IDLE;
+            S_MOUSE_CLICK:              if (be_render_ready) state_d = S_IDLE;
             S_ENTER_RENDER_LOCAL:       if (be_render_ready) state_d = S_ENTER_SEND_COMM;
             S_ENTER_SEND_COMM:          if (be_tx_ready)     state_d = S_ENTER_RENDER_INPUT_CLEAR;
             S_ENTER_RENDER_INPUT_CLEAR: if (be_render_ready) state_d = S_IDLE;
@@ -770,6 +807,11 @@ module be_top
                 be_render_valid = 1'b1;
                 be_render_cmd   = 4'(RENDER_INPUT_SCROLL_DOWN);
             end
+            S_MOUSE_CLICK: begin
+                be_render_valid      = 1'b1;
+                be_render_cmd        = 4'(RENDER_MOVE_CURSOR);
+                be_render_cursor_pos = cursor_pos_q;
+            end
             default: ;
         endcase
     end
@@ -840,6 +882,11 @@ module be_top
             enc_dst_q          <= '0;
             peer_name_len_q    <= '0;
             peer_name_q        <= '0;
+            input_scroll_shadow_q <= '0;
+            click_target_row_q <= '0;
+            click_target_col_q <= '0;
+            click_vis_row_q    <= '0;
+            click_vis_col_q    <= '0;
             for (int i = 0; i < MAX_LINE_LEN; i++) line_buf[i]    <= 8'd0;
         end else begin
             state_q       <= state_d;
@@ -912,6 +959,65 @@ module be_top
                     cursor_pos_q  <= '0;
                     wr_ptr_q      <= wr_ptr_q + 1'b1;
                     next_msg_id_q <= next_msg_id_q + 8'd1;
+                end
+            end
+
+            // -------------------------------------------------------------
+            // S_MOUSE_CLICK: multi-cycle 2D→linear cursor conversion.
+            // Walks line_buf[shift_idx_q] tracking visual row/col.
+            // Newline (0x0A) or soft wrap (96 chars) advances the
+            // visual row.  When click_vis_row matches the target,
+            // cursor_pos_q is set and we transition to S_RENDER_MOVE_CURSOR.
+            // INPUT_SOFT_WRAP_W = 96 (matches fe_render_decoder).
+            // -------------------------------------------------------------
+            if (state_q == S_IDLE && state_d == S_MOUSE_CLICK) begin
+                // Latch click target from pixel coordinates
+                automatic logic [6:0] raw_col;
+                automatic logic [5:0] buf_row;
+                raw_col = io_mouse_click_x[9:3];     // pixel_x / 8
+                // Buffer row = (screen_row - 32) + scroll offset
+                buf_row = io_mouse_click_y[9:4] - 6'd32
+                          + {1'b0, fe_input_scroll_offset};
+                click_target_row_q <= buf_row[3:0];
+                // Adjust col for prefix on first buffer row (row 0)
+                if (buf_row == '0)
+                    click_target_col_q <= (raw_col > 7'd2)
+                                          ? raw_col - 7'd2 : 7'd0;
+                else
+                    click_target_col_q <= raw_col;
+                // Init walk registers
+                shift_idx_q     <= '0;
+                click_vis_row_q <= '0;
+                click_vis_col_q <= '0;
+            end
+
+            if (state_q == S_MOUSE_CLICK) begin
+                if (shift_idx_q >= len_q) begin
+                    // Walked past end without matching row: clamp
+                    cursor_pos_q <= len_q;
+                end else begin
+                    automatic byte_t cur_byte;
+                    cur_byte = line_buf[shift_idx_q[LINE_IDX_W-1:0]];
+                    if (click_vis_row_q == click_target_row_q
+                        && click_vis_col_q >= click_target_col_q) begin
+                        // Found the target position
+                        cursor_pos_q <= shift_idx_q;
+                    end else begin
+                        // Advance position trackers
+                        if (cur_byte == 8'h0A) begin
+                            // Newline: advance to next visual row
+                            click_vis_row_q <= click_vis_row_q + 4'd1;
+                            click_vis_col_q <= '0;
+                        end else begin
+                            click_vis_col_q <= click_vis_col_q + 7'd1;
+                            if (click_vis_col_q == 7'd95) begin
+                                // Soft wrap at 96 chars
+                                click_vis_row_q <= click_vis_row_q + 4'd1;
+                                click_vis_col_q <= '0;
+                            end
+                        end
+                        shift_idx_q <= shift_idx_q + LEN_WIDTH'(1);
+                    end
                 end
             end
 
@@ -1007,6 +1113,25 @@ module be_top
               && (key_type_e'(io_key_type) == KEY_ESC)) begin
                 len_q        <= '0;
                 cursor_pos_q <= '0;
+            end
+
+            // -------------------------------------------------------------
+            // Input scroll shadow: mirrors the frontend's scroll offset so
+            // mouse clicks can be mapped to the correct buffer row.
+            // Clamped to [0, INPUT_SCROLL_MAX].  Reset on username change
+            // (store clear resets the frontend offset too).
+            // -------------------------------------------------------------
+            if (do_store_clear) begin
+                input_scroll_shadow_q <= '0;
+            end
+            if (state_q == S_IDLE && state_d == S_RENDER_INPUT_SCROLL_UP) begin
+                if (input_scroll_shadow_q != '0)
+                    input_scroll_shadow_q <= input_scroll_shadow_q - 4'd1;
+            end
+            if (state_q == S_IDLE && state_d == S_RENDER_INPUT_SCROLL_DOWN) begin
+                // Clamp at INPUT_SCROLL_MAX = MAX_INPUT_LINES - N_INPUT_VISIBLE = 11
+                if (input_scroll_shadow_q < 4'd11)
+                    input_scroll_shadow_q <= input_scroll_shadow_q + 4'd1;
             end
         end
     end

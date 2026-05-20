@@ -137,8 +137,10 @@ module fe_scan
     localparam int HIST_SCREEN_START  = HIST_ROW_START;                                  // = 2
     localparam int HIST_SCREEN_END    = HIST_SCREEN_START + N_HIST_VISIBLE - 1;          // = 30
     localparam int SEP_SCREEN_ROW     = HIST_SCREEN_END + 1;                             // = 31
+    /* verilator lint_off VARHIDDEN */
     localparam int INPUT_SCREEN_START = HIST_SCREEN_END + 2;                             // = 32
     localparam int INPUT_SCREEN_END   = INPUT_SCREEN_START + N_INPUT_VISIBLE - 1;        // = 36
+    /* verilator lint_on VARHIDDEN */
 
     localparam int INPUT_WIN_W = (N_INPUT_VISIBLE <= 1)
                                    ? 1 : $clog2(N_INPUT_VISIBLE);
