@@ -279,6 +279,7 @@ module fe_scan
     logic              s1_avatar_remote_probe;
     logic              s1_avatar_local_probe;
     logic              s1_asset_use_hi_half;
+    logic [31:0]       s1_asset_sram_data;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -298,6 +299,7 @@ module fe_scan
             s1_avatar_remote_probe <= 1'b0;
             s1_avatar_local_probe  <= 1'b0;
             s1_asset_use_hi_half   <= 1'b0;
+            s1_asset_sram_data     <= 32'h0000_0000;
         end else begin
             s1_gy               <= s0_gy;
             s1_gx               <= s0_gx;
@@ -315,6 +317,7 @@ module fe_scan
             s1_avatar_remote_probe <= s0_avatar_remote_probe;
             s1_avatar_local_probe  <= s0_avatar_local_probe;
             s1_asset_use_hi_half   <= asset_use_hi_half;
+            s1_asset_sram_data     <= asset_sram_data;
         end
     end
 
@@ -465,8 +468,8 @@ module fe_scan
     logic [7:0]  asset_pixel_r, asset_pixel_g, asset_pixel_b;
 
     assign asset_rgb565_aligned = s1_asset_use_hi_half
-                                    ? asset_sram_data[31:16]
-                                    : asset_sram_data[15:0];
+                                    ? s1_asset_sram_data[31:16]
+                                    : s1_asset_sram_data[15:0];
     assign asset_pixel_r = {asset_rgb565_aligned[15:11], asset_rgb565_aligned[15:13]};
     assign asset_pixel_g = {asset_rgb565_aligned[10:5],  asset_rgb565_aligned[10:9]};
     assign asset_pixel_b = {asset_rgb565_aligned[4:0],   asset_rgb565_aligned[4:2]};

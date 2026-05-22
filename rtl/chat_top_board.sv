@@ -57,6 +57,14 @@ module chat_top_board
     input  logic        uart_rxd,
     output logic        uart_txd,
 
+    // ---- BaseRAM / SRAM visual assets (read-only) ----
+    output logic [19:0] base_ram_addr,
+    inout  wire  [31:0] base_ram_data,
+    output logic [3:0]  base_ram_be_n,
+    output logic        base_ram_ce_n,
+    output logic        base_ram_oe_n,
+    output logic        base_ram_we_n,
+
     // ---- HDMI (TMDS differential pads) ----
     output logic [2:0]  hdmi_tmds_p,
     output logic [2:0]  hdmi_tmds_n,
@@ -81,16 +89,24 @@ module chat_top_board
     // -----------------------------------------------------------------
     logic [7:0] video_red, video_green, video_blue;
     logic       video_hsync, video_vsync, video_de;
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic [19:0] asset_sram_addr_unused;
-    /* verilator lint_on UNUSEDSIGNAL */
+    logic [19:0] asset_sram_addr;
+    logic [31:0] asset_sram_data;
+
+    assign base_ram_addr = asset_sram_addr;
+    assign base_ram_be_n = 4'b0000;
+    assign base_ram_ce_n = 1'b0;
+    assign base_ram_oe_n = 1'b0;
+    assign base_ram_we_n = 1'b1;
+    assign base_ram_data = 32'hzzzz_zzzz;
+    assign asset_sram_data = base_ram_data;
 
     chat_top #(
         .MY_NAME_LEN    (MY_NAME_LEN),
         .MY_NAME_PACKED (MY_NAME_PACKED),
         .CLK_FREQ_HZ    (CLK_FREQ_HZ),
         .BAUD           (BAUD),
-        .TIMEOUT_CYCLES (TIMEOUT_CYCLES)
+        .TIMEOUT_CYCLES (TIMEOUT_CYCLES),
+        .ENABLE_SRAM_ASSETS(1'b1)
     ) u_chat (
         .clk         (clk_100m),
         .btn_rst     (btn_rst),
@@ -107,8 +123,8 @@ module chat_top_board
         .video_hsync (video_hsync),
         .video_vsync (video_vsync),
         .video_de    (video_de),
-        .asset_sram_addr(asset_sram_addr_unused),
-        .asset_sram_data(32'h0000_0000)
+        .asset_sram_addr(asset_sram_addr),
+        .asset_sram_data(asset_sram_data)
     );
 
     // -----------------------------------------------------------------

@@ -114,7 +114,7 @@ sequenceDiagram
 
 ### SRAM 上传背景与头像
 
-Xilinx 实验板的 4MB BaseRAM 现在作为只读视觉素材区使用。先用脚本把图片打包成控制面板可直接写入的 raw binary：
+Xilinx 实验板的 4MB BaseRAM 作为只读视觉素材区使用。图片不进入 bitstream，也不要生成 HDL ROM / `$readmemh` 片上 RAM；否则综合会尝试构造接近 1MB 的片上存储，编译会非常慢甚至失败。先用脚本把图片打包成控制面板可直接写入的 raw binary：
 
 ```bash
 python3 scripts/gen_sram_assets.py \
@@ -124,7 +124,7 @@ python3 scripts/gen_sram_assets.py \
   --out chat_assets.bin
 ```
 
-然后在实验板控制面板中把 `chat_assets.bin` 从 SRAM 字节地址 `0x0` 写入。控制面板写 SRAM 时会复位实验 FPGA；写完后需要重新下载本工程 bitstream。素材格式和地址布局：
+然后在实验板控制面板中把 `chat_assets.bin` 从 SRAM 字节地址 `0x0` 写入。替换壁纸或头像时只需要重新生成并写入这个 SRAM 文件，bitstream 仍读取同一套地址布局。控制面板写 SRAM 时会复位实验 FPGA；写完后需要重新下载本工程 bitstream。素材格式和地址布局：
 
 ```text
 0x000000  800x600 RGB565 background, little-endian, 960000 bytes

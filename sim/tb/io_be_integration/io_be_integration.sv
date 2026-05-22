@@ -91,16 +91,22 @@ module io_be_integration
     logic        io_key_ready;
     logic [2:0]  io_key_type;
     byte_t       io_key_ascii;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic        io_mouse_click_ready_unused;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     io_top u_io (
-        .clk          (clk),
-        .rst_n        (rst_n),
-        .ps2_clk      (ps2_clk),
-        .ps2_data     (ps2_data),
-        .io_key_valid (io_key_valid),
-        .io_key_ready (io_key_ready),
-        .io_key_type  (io_key_type),
-        .io_key_ascii (io_key_ascii)
+        .clk                  (clk),
+        .rst_n                (rst_n),
+        .ps2_clk              (ps2_clk),
+        .ps2_data             (ps2_data),
+        .mouse_scroll_up      (1'b0),
+        .mouse_scroll_down    (1'b0),
+        .mouse_scroll_in_input(1'b0),
+        .io_key_valid         (io_key_valid),
+        .io_key_ready         (io_key_ready),
+        .io_key_type          (io_key_type),
+        .io_key_ascii         (io_key_ascii)
     );
 
     be_top #(
@@ -114,6 +120,11 @@ module io_be_integration
         .io_key_ready            (io_key_ready),
         .io_key_type             (io_key_type),
         .io_key_ascii            (io_key_ascii),
+        .io_mouse_click_valid    (1'b0),
+        .io_mouse_click_ready    (io_mouse_click_ready_unused),
+        .io_mouse_click_x        (10'd0),
+        .io_mouse_click_y        (10'd0),
+        .fe_input_scroll_offset  ('0),
 
         .cm_rx_valid             (cm_rx_valid),
         .cm_rx_ready             (cm_rx_ready),
