@@ -76,6 +76,7 @@ module fe_render_decoder
     output logic [FE_ROW_W-1:0]        wr_row,
     output logic [FE_COL_W-1:0]        wr_col,
     output byte_t                      wr_code,
+    output logic [1:0]                 wr_attr,
 
     // observability for scan & test
     output logic [1:0]                 conn_state_obs,
@@ -88,6 +89,7 @@ module fe_render_decoder
     // rows to text_ram rows without snooping internal state.
     output logic [HIST_W-1:0]          hist_wr_row_obs,
     output logic [SCROLL_W-1:0]        scroll_offset_obs,
+    output logic [N_HIST_STORED*2-1:0] hist_avatar_attr_obs,
 
     // for fe_scan: 2-D cursor position within the multi-row input
     // window, plus the current input scroll offset.
@@ -243,6 +245,14 @@ module fe_render_decoder
     // (fe_msg_payload_ram) to free the LUTs.
     logic [1:0]                       slot_side_q     [N_HIST_STORED];
     msg_len_t                         slot_len_q      [N_HIST_STORED];
+    logic [1:0]                       slot_avatar_attr_q [N_HIST_STORED];
+
+    genvar attr_i;
+    generate
+        for (attr_i = 0; attr_i < N_HIST_STORED; attr_i++) begin : g_hist_avatar_attr_obs
+            assign hist_avatar_attr_obs[attr_i*2 +: 2] = slot_avatar_attr_q[attr_i];
+        end
+    endgenerate
 
     // -----------------------------------------------------------------
     // Payload BRAM ports + multi-cycle STORE/LOAD walk state.
@@ -328,6 +338,15 @@ module fe_render_decoder
     logic accept;
     assign accept = be_render_valid && be_render_ready;
 
+    function automatic logic [1:0] bubble_attr_for_side(input logic [1:0] side);
+        if (side == 2'(MSG_REMOTE))
+            bubble_attr_for_side = BUBBLE_ATTR_REMOTE;
+        else if (side == 2'(MSG_LOCAL))
+            bubble_attr_for_side = BUBBLE_ATTR_LOCAL;
+        else
+            bubble_attr_for_side = BUBBLE_ATTR_NONE;
+    endfunction
+
     // Effective scroll caps. Both grow with actual content (rather
     // than the buffer size), so the user can't scroll up past the
     // oldest stored row of history or the last typed input row.
@@ -395,6 +414,7 @@ module fe_render_decoder
     logic [FE_COL_W-1:0] input_idx;
 
     byte_t titlebar_cell, legend_cell, hist_cell, input_cell;
+    logic [1:0] hist_attr;
 
     // Bubble geometry for history rows
     logic              show_fail;
@@ -407,10 +427,13 @@ module fe_render_decoder
     // is visible at a glance. bubble_left is always >= 16 (the soft-wrap
     // caps message width at MAX_BUBBLE_INNER_W = 80), so the -1 is safe.
     logic [FE_COL_W-1:0] fail_x_col;
+    logic              hist_in_bubble_span;
 
     assign show_fail = (side_q == 2'(MSG_LOCAL)) && (status_q == 2'(MSG_FAIL));
     assign cur_sub_len = ml_len_q[cur_line_sel];
     assign fail_x_col  = bubble_left - FE_COL_W'(1);
+    assign hist_in_bubble_span = (col_cnt_q >= bubble_left)
+                               && (col_cnt_q <= bubble_right);
 
     // Bubble inner width is the message-wide max sub-line length. Every
     // sub-line of the same message uses the same width (shorter lines
@@ -498,7 +521,9 @@ module fe_render_decoder
         // history row -- bubble layout (multi-line aware). Failed local
         // messages get an explicit X mark in the first visual row at
         // col bubble_left - 1.
-        //
+        hist_attr = (!is_big_emoji_q && hist_in_bubble_span)
+                    ? bubble_attr_for_side(side_q)
+                    : BUBBLE_ATTR_NONE;
         // For single-line bubbles (n_lines_q == 1) use the existing
         // single-cell SPRITE_BL/BR (or FBL/FBR for fail). For multi-
         // line bubbles, swap in the stack-aware TOP/MID/BOT sprite so
@@ -601,6 +626,7 @@ module fe_render_decoder
         wr_row  = '0;
         wr_col  = col_cnt_q;
         wr_code = 8'h20;
+        wr_attr = BUBBLE_ATTR_NONE;
         unique case (state_q)
             S_HIST_CLEAR: begin
                 wr_en   = 1'b1;
@@ -622,11 +648,13 @@ module fe_render_decoder
                 wr_en   = 1'b1;
                 wr_row  = target_row_q;
                 wr_code = hist_cell;
+                wr_attr = hist_attr;
             end
             S_UPDATE_STATUS: begin
                 wr_en   = 1'b1;
                 wr_row  = target_row_q;
                 wr_code = hist_cell;
+                wr_attr = hist_attr;
             end
             // S_INPUT_PARSE writes no cells -- it just runs the
             // newline-scan and falls through to S_INPUT_REDRAW.
@@ -859,8 +887,9 @@ module fe_render_decoder
                 msg_id_valid_q[i] <= 1'b0;
             end
             for (int i = 0; i < N_HIST_STORED; i++) begin
-                slot_side_q[i] <= 2'(MSG_LOCAL);
-                slot_len_q[i]  <= '0;
+                slot_side_q[i]        <= 2'(MSG_LOCAL);
+                slot_len_q[i]         <= '0;
+                slot_avatar_attr_q[i] <= BUBBLE_ATTR_NONE;
             end
 
             chain_titlebar_q  <= 1'b0;
@@ -963,8 +992,9 @@ module fe_render_decoder
                                 for (int i = 0; i < 256; i++)
                                     msg_id_valid_q[i] <= 1'b0;
                                 for (int i = 0; i < N_HIST_STORED; i++) begin
-                                    slot_side_q[i] <= 2'(MSG_LOCAL);
-                                    slot_len_q[i]  <= '0;
+                                    slot_side_q[i]        <= 2'(MSG_LOCAL);
+                                    slot_len_q[i]         <= '0;
+                                    slot_avatar_attr_q[i] <= BUBBLE_ATTR_NONE;
                                 end
                             end
                         end else begin
@@ -1358,6 +1388,15 @@ module fe_render_decoder
                             ml_offset_q[i] <= '0;
                             ml_len_q[i]    <= msg_len_t'(BIG_EMOJI_N_COLS);
                         end
+                        for (int i = 0; i < MAX_LINES; i++) begin
+                            if (i < BIG_EMOJI_N_ROWS) begin
+                                slot_avatar_attr_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= (i == 0) ? bubble_attr_for_side(side_q)
+                                              : BUBBLE_ATTR_NONE;
+                            end
+                        end
                         // Advance hist pointer by N_ROWS (bubble is that
                         // many text_ram rows tall).
                         hist_wr_row_q <= (hist_wr_row_q
@@ -1394,6 +1433,15 @@ module fe_render_decoder
                         cur_line_q <= '0;
                         if (!is_break && final_line_len > msg_max_sub_len_q)
                             msg_max_sub_len_q <= final_line_len;
+                        for (int i = 0; i < MAX_LINES; i++) begin
+                            if (LINE_CNT_W'(i) < final_n_lines) begin
+                                slot_avatar_attr_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= (i == 0) ? bubble_attr_for_side(side_q)
+                                              : BUBBLE_ATTR_NONE;
+                            end
+                        end
                         // Advance hist write pointer by the (final) line
                         // count. & N_HIST_STORED-1 for ring wrap.
                         hist_wr_row_q <= (hist_wr_row_q

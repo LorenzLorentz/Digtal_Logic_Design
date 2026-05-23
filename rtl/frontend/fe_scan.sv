@@ -55,6 +55,7 @@ module fe_scan
     output logic [FE_ROW_W-1:0]    rd_row,
     output logic [FE_COL_W-1:0]    rd_col,
     input  byte_t                  rd_code,            // 1 cycle after addr
+    input  logic [1:0]             rd_attr,            // aligned with rd_code
 
     // ---- glyph_rom (combinational) ----
     output byte_t                  glyph_code,
@@ -69,6 +70,7 @@ module fe_scan
     input  logic [1:0]             conn_state,
     input  logic [HIST_W-1:0]      hist_wr_row,         // ring head
     input  logic [SCROLL_W-1:0]    scroll_offset,       // history scroll
+    input  logic [N_HIST_STORED*2-1:0] hist_avatar_attr,
     input  logic [INPUT_LINE_W-1:0]   input_cursor_row,   // 2-D cursor (row)
     // Cursor col is narrowed to FE_COL_W -- any column past
     // FE_N_COLS-1 is off-screen and would never match a scan cell.
@@ -157,6 +159,7 @@ module fe_scan
     logic                     s0_in_hist_window;
     logic                     s0_avatar_remote_probe;
     logic                     s0_avatar_local_probe;
+    logic [1:0]               s0_avatar_attr;
 
     always_comb begin
         hist_slot_offset = HIST_W'(s0_screen_row - HWIDTH'(HIST_SCREEN_START));
@@ -171,6 +174,9 @@ module fe_scan
 
         s0_in_hist_window = (s0_screen_row >= HWIDTH'(HIST_SCREEN_START))
                          && (s0_screen_row <= HWIDTH'(HIST_SCREEN_END));
+        s0_avatar_attr = s0_in_hist_window
+                         ? hist_avatar_attr[{hist_slot, 1'b0} +: 2]
+                         : BUBBLE_ATTR_NONE;
 
         if (s0_screen_row == HWIDTH'(0))
             s0_text_ram_row = FE_ROW_W'(TITLE_ROW);
@@ -195,22 +201,15 @@ module fe_scan
     end
 
     assign s0_avatar_remote_probe = ENABLE_SRAM_ASSETS
-                                    && s0_in_hist_window
+                                    && (s0_avatar_attr == BUBBLE_ATTR_REMOTE)
                                     && (hdata < HWIDTH'(ASSET_AVATAR_W_PX));
     assign s0_avatar_local_probe  = ENABLE_SRAM_ASSETS
-                                    && s0_in_hist_window
+                                    && (s0_avatar_attr == BUBBLE_ATTR_LOCAL)
                                     && (hdata >= HWIDTH'(HSIZE - ASSET_AVATAR_W_PX))
                                     && (hdata <  HWIDTH'(HSIZE));
 
     assign rd_row = s0_text_ram_row;
-    always_comb begin
-        if (s0_avatar_remote_probe)
-            rd_col = FE_COL_W'(BUBBLE_MARGIN_L);
-        else if (s0_avatar_local_probe)
-            rd_col = FE_COL_W'(BUBBLE_RIGHT_EDGE);
-        else
-            rd_col = FE_COL_W'(s0_screen_col);
-    end
+    assign rd_col = FE_COL_W'(s0_screen_col);
 
     // True for the leftover 8 px past the last input row -- used to blank
     // the glyph so this strip renders as a solid titlebar-blue band.
@@ -328,6 +327,7 @@ module fe_scan
     logic              s1_avatar_local_probe;
     logic              s1_asset_use_hi_half;
     logic [31:0]       s1_asset_sram_data;
+    logic [1:0]        s1_rd_attr;
     logic              s1_mouse_pointer_on;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
@@ -349,6 +349,7 @@ module fe_scan
             s1_avatar_local_probe  <= 1'b0;
             s1_asset_use_hi_half   <= 1'b0;
             s1_asset_sram_data     <= 32'h0000_0000;
+            s1_rd_attr             <= BUBBLE_ATTR_NONE;
             s1_mouse_pointer_on    <= 1'b0;
         end else begin
             s1_gy               <= s0_gy;
@@ -368,6 +369,7 @@ module fe_scan
             s1_avatar_local_probe  <= s0_avatar_local_probe;
             s1_asset_use_hi_half   <= asset_use_hi_half;
             s1_asset_sram_data     <= asset_sram_data;
+            s1_rd_attr             <= rd_attr;
             s1_mouse_pointer_on    <= mouse_pointer_on_s0;
         end
     end
@@ -547,6 +549,16 @@ module fe_scan
             bg_g = COL_INPUT_BG_G;
             bg_b = COL_INPUT_BG_B;
         end
+
+        if (in_connected && (s1_rd_attr == BUBBLE_ATTR_REMOTE)) begin
+            bg_r = COL_REMOTE_BUBBLE_BG_R;
+            bg_g = COL_REMOTE_BUBBLE_BG_G;
+            bg_b = COL_REMOTE_BUBBLE_BG_B;
+        end else if (in_connected && (s1_rd_attr == BUBBLE_ATTR_LOCAL)) begin
+            bg_r = COL_LOCAL_BUBBLE_BG_R;
+            bg_g = COL_LOCAL_BUBBLE_BG_G;
+            bg_b = COL_LOCAL_BUBBLE_BG_B;
+        end
     end
 
     // Splash background colour per state.
@@ -584,18 +596,8 @@ module fe_scan
     logic local_avatar_active;
     logic avatar_active;
     assign fg = pixel_on ^ cursor_xor;
-    assign remote_avatar_active = s1_avatar_remote_probe
-                                  && ((rd_code == byte_t'(SPRITE_BL))
-                                   || (rd_code == byte_t'(SPRITE_FBL))
-                                   || (rd_code == byte_t'(SPRITE_BL_TOP))
-                                   || (rd_code == byte_t'(SPRITE_BL_MID))
-                                   || (rd_code == byte_t'(SPRITE_BL_BOT)));
-    assign local_avatar_active = s1_avatar_local_probe
-                                 && ((rd_code == byte_t'(SPRITE_BR))
-                                  || (rd_code == byte_t'(SPRITE_FBR))
-                                  || (rd_code == byte_t'(SPRITE_BR_TOP))
-                                  || (rd_code == byte_t'(SPRITE_BR_MID))
-                                  || (rd_code == byte_t'(SPRITE_BR_BOT)));
+    assign remote_avatar_active = s1_avatar_remote_probe;
+    assign local_avatar_active  = s1_avatar_local_probe;
     assign avatar_active = ENABLE_SRAM_ASSETS
                            && in_connected
                            && !s1_in_bottom_strip

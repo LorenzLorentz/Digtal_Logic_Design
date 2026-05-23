@@ -43,12 +43,14 @@ module fe_text_ram
     input  logic [ROW_W-1:0]   wr_row,
     input  logic [COL_W-1:0]   wr_col,
     input  byte_t              wr_code,
+    input  logic [1:0]         wr_attr,
 
     // ---- Read port A (scan side, registered output) ----
     input  logic               rd_clk,
     input  logic [ROW_W-1:0]   rd_row,
     input  logic [COL_W-1:0]   rd_col,
     output byte_t              rd_code,
+    output logic [1:0]         rd_attr,
 
     // ---- Read port B (observability / test, registered output) ----
     input  logic               rd2_clk,
@@ -59,25 +61,34 @@ module fe_text_ram
 
     localparam int DEPTH = N_ROWS * N_COLS;
 
-    byte_t mem [DEPTH];
+    byte_t      mem      [DEPTH];
+    logic [1:0] attr_mem [DEPTH];
 
     initial begin
-        for (int i = 0; i < DEPTH; i++)
+        for (int i = 0; i < DEPTH; i++) begin
             mem[i] = 8'h20;  // ASCII space
+            attr_mem[i] = BUBBLE_ATTR_NONE;
+        end
     end
 
     // Address = {row, col}. N_COLS must be a power of two so the
     // concat equals row*N_COLS + col without an explicit multiplier.
     // (Default N_COLS=128 satisfies this.)
     always_ff @(posedge wr_clk) begin
-        if (wr_en) mem[{wr_row, wr_col}] <= wr_code;
+        if (wr_en) begin
+            mem[{wr_row, wr_col}]      <= wr_code;
+            attr_mem[{wr_row, wr_col}] <= wr_attr;
+        end
     end
 
     byte_t rd_code_q;
+    logic [1:0] rd_attr_q;
     always_ff @(posedge rd_clk) begin
         rd_code_q <= mem[{rd_row, rd_col}];
+        rd_attr_q <= attr_mem[{rd_row, rd_col}];
     end
     assign rd_code = rd_code_q;
+    assign rd_attr = rd_attr_q;
 
     byte_t rd2_code_q;
     always_ff @(posedge rd2_clk) begin

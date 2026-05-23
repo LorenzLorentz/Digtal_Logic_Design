@@ -1,0 +1,7 @@
+# RTL files needed by this testbench, in dependency order.
+rtl/pkg/chat_pkg.sv
+rtl/pkg/fe_pkg.sv
+rtl/frontend/fe_big_emoji_pixel_rom.sv
+rtl/frontend/fe_big_emoji_palette_rom.sv
+rtl/frontend/fe_sram_asset_fetch.sv
+rtl/frontend/fe_scan.sv

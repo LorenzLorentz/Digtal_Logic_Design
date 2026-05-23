@@ -36,6 +36,7 @@ TESTS := \
     comm_top_lb \
     be_message_store \
     be_top \
+    fe_scan \
     fe_sram_asset_fetch \
     fe_top \
     chat_top \

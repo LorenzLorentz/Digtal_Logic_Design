@@ -98,9 +98,11 @@ module fe_top
     logic [FE_ROW_W-1:0]   wr_row;
     logic [FE_COL_W-1:0]   wr_col;
     byte_t                 wr_code;
+    logic [1:0]            wr_attr;
 
     logic [HIST_W-1:0]     hist_wr_row_dec;
     logic [SCROLL_W-1:0]   scroll_offset_dec;
+    logic [N_HIST_STORED*2-1:0] hist_avatar_attr_dec;
 
     assign hist_wr_row_obs   = hist_wr_row_dec;
     assign scroll_offset_obs = scroll_offset_dec;
@@ -140,6 +142,7 @@ module fe_top
         .wr_row                 (wr_row),
         .wr_col                 (wr_col),
         .wr_code                (wr_code),
+        .wr_attr                (wr_attr),
         .conn_state_obs         (conn_state_obs),
         .input_len_obs          (input_len_obs),
         .input_cursor_obs       (input_cursor_obs),
@@ -147,6 +150,7 @@ module fe_top
         .peer_name_len_obs      (peer_name_len_obs),
         .hist_wr_row_obs        (hist_wr_row_dec),
         .scroll_offset_obs      (scroll_offset_dec),
+        .hist_avatar_attr_obs   (hist_avatar_attr_dec),
         .input_cursor_row_obs   (input_cursor_row_obs),
         .input_cursor_col_obs   (input_cursor_col_obs),
         .input_scroll_offset_obs(input_scroll_offset_obs)
@@ -172,6 +176,7 @@ module fe_top
     logic [FE_ROW_W-1:0]   scan_rd_row;
     logic [FE_COL_W-1:0]   scan_rd_col;
     byte_t                 scan_rd_code;
+    logic [1:0]            scan_rd_attr;
 
     // glyph_rom (combinational read)
     byte_t              glyph_code;
@@ -192,6 +197,7 @@ module fe_top
     logic [1:0]                conn_state_pix;
     logic [HIST_W-1:0]         hist_wr_row_pix;
     logic [SCROLL_W-1:0]       scroll_offset_pix;
+    logic [N_HIST_STORED*2-1:0] hist_avatar_attr_pix;
     logic [INPUT_LINE_W-1:0]   input_cursor_row_pix;
     // Cursor col only needs FE_COL_W bits on the scan side (off-screen
     // cols never match anyway). Narrowing here keeps fe_scan from
@@ -223,6 +229,13 @@ module fe_top
                 .clk(clk_pix), .rst_n(rst_n),
                 .async_in(scroll_offset_dec[gi]),
                 .sync_out(scroll_offset_pix[gi])
+            );
+        end
+        for (gi = 0; gi < N_HIST_STORED*2; gi++) begin : g_sync_avatar_attr
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_avatar_attr (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(hist_avatar_attr_dec[gi]),
+                .sync_out(hist_avatar_attr_pix[gi])
             );
         end
         for (gi = 0; gi < INPUT_LINE_W; gi++) begin : g_sync_icrow
@@ -275,6 +288,7 @@ module fe_top
         .rd_row        (scan_rd_row),
         .rd_col        (scan_rd_col),
         .rd_code       (scan_rd_code),
+        .rd_attr       (scan_rd_attr),
         .glyph_code    (glyph_code),
         .glyph_gy      (glyph_gy),
         .glyph_row     (glyph_row),
@@ -283,6 +297,7 @@ module fe_top
         .conn_state         (conn_state_pix),
         .hist_wr_row        (hist_wr_row_pix),
         .scroll_offset      (scroll_offset_pix),
+        .hist_avatar_attr   (hist_avatar_attr_pix),
         .input_cursor_row   (input_cursor_row_pix),
         .input_cursor_col   (input_cursor_col_pix),
         .input_scroll_offset(input_scroll_offset_pix),
@@ -303,10 +318,12 @@ module fe_top
         .wr_row   (wr_row),
         .wr_col   (wr_col),
         .wr_code  (wr_code),
+        .wr_attr  (wr_attr),
         .rd_clk   (clk_pix),
         .rd_row   (scan_rd_row),
         .rd_col   (scan_rd_col),
         .rd_code  (scan_rd_code),
+        .rd_attr  (scan_rd_attr),
         .rd2_clk  (clk_pix),
         .rd2_row  (rd_row),
         .rd2_col  (rd_col),

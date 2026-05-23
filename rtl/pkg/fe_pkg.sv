@@ -108,6 +108,13 @@ package fe_pkg;
     localparam byte_t SPRITE_BL_MID  = 8'hFC;
     localparam byte_t SPRITE_BR_MID  = 8'hFD;
 
+    // Per-cell bubble background attribute stored alongside text_ram.
+    // The low 8 bits remain the glyph code; this sideband lets scan
+    // paint a filled bubble behind ordinary text and spaces.
+    localparam logic [1:0] BUBBLE_ATTR_NONE   = 2'd0;
+    localparam logic [1:0] BUBBLE_ATTR_REMOTE = 2'd1;
+    localparam logic [1:0] BUBBLE_ATTR_LOCAL  = 2'd2;
+
     // Emoji glyphs produced by backend token expansion.
     localparam byte_t EMOJI_HAPPY = 8'hE0;
     localparam byte_t EMOJI_SAD   = 8'hE1;
@@ -195,6 +202,14 @@ package fe_pkg;
     localparam logic [7:0] COL_INPUT_BG_R   = 8'h20;
     localparam logic [7:0] COL_INPUT_BG_G   = 8'h20;
     localparam logic [7:0] COL_INPUT_BG_B   = 8'h20;
+
+    // Filled chat bubbles, drawn above the SRAM wallpaper.
+    localparam logic [7:0] COL_REMOTE_BUBBLE_BG_R = 8'h07;
+    localparam logic [7:0] COL_REMOTE_BUBBLE_BG_G = 8'h5E;
+    localparam logic [7:0] COL_REMOTE_BUBBLE_BG_B = 8'h54;
+    localparam logic [7:0] COL_LOCAL_BUBBLE_BG_R  = 8'h02;
+    localparam logic [7:0] COL_LOCAL_BUBBLE_BG_G  = 8'h28;
+    localparam logic [7:0] COL_LOCAL_BUBBLE_BG_B  = 8'h23;
 
     // -----------------------------------------------------------------
     // SRAM-backed visual assets
