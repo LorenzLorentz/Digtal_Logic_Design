@@ -325,6 +325,8 @@ module chat_top
         .video_de                (video_de),
         .asset_sram_addr         (asset_sram_addr),
         .asset_sram_data         (asset_sram_data),
+        .mouse_x                 (mouse_x),
+        .mouse_y                 (mouse_y),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (fe_rd_code),

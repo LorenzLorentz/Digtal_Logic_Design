@@ -68,6 +68,11 @@ module fe_top
     output logic [19:0]                asset_sram_addr,
     input  logic [31:0]                asset_sram_data,
 
+    // Mouse pointer (chat-clock domain; CDC'd to pixel clock below).
+    // Tie to '0 in sims that don't model a mouse.
+    input  logic [9:0]                 mouse_x,
+    input  logic [9:0]                 mouse_y,
+
     // Observability read port (independent BRAM port, used by sim).
     input  logic [FE_ROW_W-1:0]        rd_row,
     input  logic [FE_COL_W-1:0]        rd_col,
@@ -193,6 +198,8 @@ module fe_top
     // dragging in 9 unused MSBs.
     logic [FE_COL_W-1:0]       input_cursor_col_pix;
     logic [INPUT_SCROLL_W-1:0] input_scroll_offset_pix;
+    logic [9:0]                mouse_x_pix;
+    logic [9:0]                mouse_y_pix;
 
     sync_2ff #(.RST_VAL(1'b0)) u_sync_cs0 (
         .clk(clk_pix), .rst_n(rst_n),
@@ -239,6 +246,20 @@ module fe_top
                 .sync_out(input_scroll_offset_pix[gi])
             );
         end
+        for (gi = 0; gi < 10; gi++) begin : g_sync_mx
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_mx (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(mouse_x[gi]),
+                .sync_out(mouse_x_pix[gi])
+            );
+        end
+        for (gi = 0; gi < 10; gi++) begin : g_sync_my
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_my (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(mouse_y[gi]),
+                .sync_out(mouse_y_pix[gi])
+            );
+        end
     endgenerate
 
     fe_scan #(
@@ -265,6 +286,8 @@ module fe_top
         .input_cursor_row   (input_cursor_row_pix),
         .input_cursor_col   (input_cursor_col_pix),
         .input_scroll_offset(input_scroll_offset_pix),
+        .mouse_x            (mouse_x_pix),
+        .mouse_y            (mouse_y_pix),
         .video_red     (video_red),
         .video_green   (video_green),
         .video_blue    (video_blue),

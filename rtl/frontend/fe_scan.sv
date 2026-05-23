@@ -75,6 +75,11 @@ module fe_scan
     input  logic [FE_COL_W-1:0]       input_cursor_col,   // 2-D cursor (col)
     input  logic [INPUT_SCROLL_W-1:0] input_scroll_offset,// input window top
 
+    // ---- Mouse pointer (pixel-clock domain) ----
+    // Hotspot is the top-left corner of the sprite.
+    input  logic [9:0]                mouse_x,
+    input  logic [9:0]                mouse_y,
+
     // ---- RGB / sync out ----
     output logic [7:0]             video_red,
     output logic [7:0]             video_green,
@@ -261,6 +266,49 @@ module fe_scan
     end
 
     // -----------------------------------------------------------------
+    // Mouse pointer overlay  --  small NW arrow centred on (mouse_x,
+    // mouse_y). The pointer is rendered by *inverting* the underlying
+    // pixel so it stays visible on any background (white text bubbles,
+    // SRAM wallpaper, the blue title bar, etc.).
+    //
+    // Sprite is 8 wide x 12 tall, hotspot at the top-left tip.
+    //   row 0:  #.......
+    //   row 1:  ##......
+    //   row 2:  ###.....
+    //   row 3:  ####....
+    //   row 4:  #####...
+    //   row 5:  ######..
+    //   row 6:  #######.
+    //   row 7:  ########
+    //   row 8:  ###.....
+    //   row 9:  .##.....
+    //   row 10: ..##....
+    //   row 11: ...##...
+    //
+    // Padded to 16 rows so out-of-range dy doesn't index past the array.
+    // -----------------------------------------------------------------
+    localparam logic [7:0] MOUSE_CURSOR_ROM [16] = '{
+        8'h80, 8'hC0, 8'hE0, 8'hF0, 8'hF8, 8'hFC, 8'hFE, 8'hFF,
+        8'hE0, 8'h60, 8'h30, 8'h18, 8'h00, 8'h00, 8'h00, 8'h00
+    };
+
+    logic [HWIDTH-1:0] mouse_dx_s0;
+    logic [HWIDTH-1:0] mouse_dy_s0;
+    logic              mouse_in_sprite_s0;
+    logic              mouse_pointer_on_s0;
+
+    // Unsigned subtraction: if hdata < mouse_x (pixel is left of the
+    // sprite) the result underflows to a large value and the < 8 / < 12
+    // checks reject it, so the sprite naturally clips at screen edges.
+    assign mouse_dx_s0 = hdata - HWIDTH'(mouse_x);
+    assign mouse_dy_s0 = vdata - HWIDTH'(mouse_y);
+    assign mouse_in_sprite_s0 = (mouse_dx_s0 < HWIDTH'(8))
+                              && (mouse_dy_s0 < HWIDTH'(12));
+    assign mouse_pointer_on_s0 =
+        mouse_in_sprite_s0
+        && MOUSE_CURSOR_ROM[mouse_dy_s0[3:0]][3'd7 - mouse_dx_s0[2:0]];
+
+    // -----------------------------------------------------------------
     // Stage 1  --  align everything we registered with rd_code's
     //              one-cycle BRAM read latency.
     // -----------------------------------------------------------------
@@ -280,6 +328,7 @@ module fe_scan
     logic              s1_avatar_local_probe;
     logic              s1_asset_use_hi_half;
     logic [31:0]       s1_asset_sram_data;
+    logic              s1_mouse_pointer_on;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -300,6 +349,7 @@ module fe_scan
             s1_avatar_local_probe  <= 1'b0;
             s1_asset_use_hi_half   <= 1'b0;
             s1_asset_sram_data     <= 32'h0000_0000;
+            s1_mouse_pointer_on    <= 1'b0;
         end else begin
             s1_gy               <= s0_gy;
             s1_gx               <= s0_gx;
@@ -318,6 +368,7 @@ module fe_scan
             s1_avatar_local_probe  <= s0_avatar_local_probe;
             s1_asset_use_hi_half   <= asset_use_hi_half;
             s1_asset_sram_data     <= asset_sram_data;
+            s1_mouse_pointer_on    <= mouse_pointer_on_s0;
         end
     end
 
@@ -585,6 +636,16 @@ module fe_scan
             video_red   = splash_bg_r;
             video_green = splash_bg_g;
             video_blue  = splash_bg_b;
+        end
+
+        // Mouse pointer overlay  --  topmost, applied after all the
+        // regular pixel selection so it shows up over text, bubbles,
+        // wallpaper, splash, anything. Inverted-color rendering keeps
+        // the cursor visible regardless of what's underneath.
+        if (s1_de && s1_mouse_pointer_on) begin
+            video_red   = ~video_red;
+            video_green = ~video_green;
+            video_blue  = ~video_blue;
         end
     end
 
