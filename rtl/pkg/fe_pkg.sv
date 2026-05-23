@@ -96,11 +96,10 @@ package fe_pkg;
     localparam byte_t SPRITE_FBL     = 8'hF6;  // fail left border (square)
     localparam byte_t SPRITE_FBR     = 8'hF7;  // fail right border (square)
 
-    // Multi-line bubble border sprites: top-of-cell arc + vertical
+    // Multi-line bubble border sprites: top-aligned corner + vertical
     // exiting the bottom (SPRITE_*_TOP); pure vertical (SPRITE_*_MID);
-    // vertical entering from top + bottom arc (SPRITE_*_BOT). Stacking
-    // these in column-aligned cells across n_lines rows reproduces the
-    // tall (...) bracket -- visually one box, no extra rendered rows.
+    // vertical entering from top + bottom-aligned corner (SPRITE_*_BOT).
+    // fe_scan uses the glyph outline to clip the bubble fill.
     localparam byte_t SPRITE_BL_TOP  = 8'hF8;
     localparam byte_t SPRITE_BR_TOP  = 8'hF9;
     localparam byte_t SPRITE_BL_BOT  = 8'hFA;

@@ -464,6 +464,73 @@ module fe_scan
     );
 
     // -----------------------------------------------------------------
+    // Bubble fill mask. The text cell sideband tells us whether a cell
+    // belongs to a normal message bubble; edge sprite cells still need
+    // per-pixel clipping so wallpaper remains visible outside the
+    // rounded outline.
+    // -----------------------------------------------------------------
+    function automatic logic [2:0] glyph_leftmost_x(input logic [7:0] row);
+        begin
+            glyph_leftmost_x = 3'd7;
+            if      (row[7]) glyph_leftmost_x = 3'd0;
+            else if (row[6]) glyph_leftmost_x = 3'd1;
+            else if (row[5]) glyph_leftmost_x = 3'd2;
+            else if (row[4]) glyph_leftmost_x = 3'd3;
+            else if (row[3]) glyph_leftmost_x = 3'd4;
+            else if (row[2]) glyph_leftmost_x = 3'd5;
+            else if (row[1]) glyph_leftmost_x = 3'd6;
+            else if (row[0]) glyph_leftmost_x = 3'd7;
+        end
+    endfunction
+
+    function automatic logic [2:0] glyph_rightmost_x(input logic [7:0] row);
+        begin
+            glyph_rightmost_x = 3'd0;
+            if      (row[0]) glyph_rightmost_x = 3'd7;
+            else if (row[1]) glyph_rightmost_x = 3'd6;
+            else if (row[2]) glyph_rightmost_x = 3'd5;
+            else if (row[3]) glyph_rightmost_x = 3'd4;
+            else if (row[4]) glyph_rightmost_x = 3'd3;
+            else if (row[5]) glyph_rightmost_x = 3'd2;
+            else if (row[6]) glyph_rightmost_x = 3'd1;
+            else if (row[7]) glyph_rightmost_x = 3'd0;
+        end
+    endfunction
+
+    logic bubble_attr_active;
+    logic bubble_left_edge;
+    logic bubble_right_edge;
+    logic bubble_fill_active;
+
+    assign bubble_attr_active = in_connected
+                                && (s1_rd_attr != BUBBLE_ATTR_NONE);
+    assign bubble_left_edge = (rd_code == byte_t'(SPRITE_BL))
+                           || (rd_code == byte_t'(SPRITE_FBL))
+                           || (rd_code == byte_t'(SPRITE_BL_TOP))
+                           || (rd_code == byte_t'(SPRITE_BL_MID))
+                           || (rd_code == byte_t'(SPRITE_BL_BOT));
+    assign bubble_right_edge = (rd_code == byte_t'(SPRITE_BR))
+                            || (rd_code == byte_t'(SPRITE_FBR))
+                            || (rd_code == byte_t'(SPRITE_BR_TOP))
+                            || (rd_code == byte_t'(SPRITE_BR_MID))
+                            || (rd_code == byte_t'(SPRITE_BR_BOT));
+
+    always_comb begin
+        bubble_fill_active = 1'b0;
+        if (bubble_attr_active) begin
+            if (bubble_left_edge) begin
+                bubble_fill_active = (glyph_row != 8'h00)
+                                     && (s1_gx >= glyph_leftmost_x(glyph_row));
+            end else if (bubble_right_edge) begin
+                bubble_fill_active = (glyph_row != 8'h00)
+                                     && (s1_gx <= glyph_rightmost_x(glyph_row));
+            end else begin
+                bubble_fill_active = 1'b1;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------
     // Cursor blink (toggle every BLINK_FRAMES vsync rising edges).
     // -----------------------------------------------------------------
     logic [$clog2(BLINK_FRAMES)-1:0] blink_cnt_q;
@@ -550,11 +617,11 @@ module fe_scan
             bg_b = COL_INPUT_BG_B;
         end
 
-        if (in_connected && (s1_rd_attr == BUBBLE_ATTR_REMOTE)) begin
+        if (bubble_fill_active && (s1_rd_attr == BUBBLE_ATTR_REMOTE)) begin
             bg_r = COL_REMOTE_BUBBLE_BG_R;
             bg_g = COL_REMOTE_BUBBLE_BG_G;
             bg_b = COL_REMOTE_BUBBLE_BG_B;
-        end else if (in_connected && (s1_rd_attr == BUBBLE_ATTR_LOCAL)) begin
+        end else if (bubble_fill_active && (s1_rd_attr == BUBBLE_ATTR_LOCAL)) begin
             bg_r = COL_LOCAL_BUBBLE_BG_R;
             bg_g = COL_LOCAL_BUBBLE_BG_G;
             bg_b = COL_LOCAL_BUBBLE_BG_B;

@@ -22,6 +22,12 @@ static constexpr uint8_t REMOTE_B = 0x54;
 static constexpr uint8_t LOCAL_R  = 0x02;
 static constexpr uint8_t LOCAL_G  = 0x28;
 static constexpr uint8_t LOCAL_B  = 0x23;
+static constexpr uint8_t FG_R = 0xFF;
+static constexpr uint8_t FG_G = 0xFF;
+static constexpr uint8_t FG_B = 0xFF;
+
+static constexpr uint8_t SPRITE_BL = 0xF3;
+static constexpr uint8_t SPRITE_BR = 0xF4;
 
 static constexpr uint32_t BG_W_PX          = 800;
 static constexpr uint32_t BG_H_PX          = 600;
@@ -98,6 +104,23 @@ static void drive_visible_pixel(uint16_t h, uint16_t v, uint8_t attr) {
     tick();
 }
 
+static void drive_visible_pixel(
+    uint16_t h,
+    uint16_t v,
+    uint8_t attr,
+    uint8_t code,
+    uint8_t glyph_row
+) {
+    dut->hdata = h;
+    dut->vdata = v;
+    dut->data_enable = 1;
+    dut->rd_code = code;
+    dut->rd_attr = attr;
+    dut->glyph_row = glyph_row;
+    dut->asset_sram_data = 0;
+    tick();
+}
+
 static void test_bubble_background_attr() {
     printf("== test_bubble_background_attr\n");
     reset();
@@ -111,6 +134,45 @@ static void test_bubble_background_attr() {
     CHECK_EQ(dut->video_red,   LOCAL_R, "local bubble red");
     CHECK_EQ(dut->video_green, LOCAL_G, "local bubble green");
     CHECK_EQ(dut->video_blue,  LOCAL_B, "local bubble blue");
+}
+
+static void test_bubble_fill_clips_to_edge_outline() {
+    printf("== test_bubble_fill_clips_to_edge_outline\n");
+    reset();
+
+    // Left edge row "..#.....": x<2 is outside, x=2 is border,
+    // x>2 is inside the rounded bubble.
+    drive_visible_pixel(1, 33, BUBBLE_ATTR_REMOTE, SPRITE_BL, 0x20);
+    CHECK_EQ(dut->video_red,   0x00, "left outside red");
+    CHECK_EQ(dut->video_green, 0x00, "left outside green");
+    CHECK_EQ(dut->video_blue,  0x00, "left outside blue");
+
+    drive_visible_pixel(2, 33, BUBBLE_ATTR_REMOTE, SPRITE_BL, 0x20);
+    CHECK_EQ(dut->video_red,   FG_R, "left border red");
+    CHECK_EQ(dut->video_green, FG_G, "left border green");
+    CHECK_EQ(dut->video_blue,  FG_B, "left border blue");
+
+    drive_visible_pixel(3, 33, BUBBLE_ATTR_REMOTE, SPRITE_BL, 0x20);
+    CHECK_EQ(dut->video_red,   REMOTE_R, "left inside red");
+    CHECK_EQ(dut->video_green, REMOTE_G, "left inside green");
+    CHECK_EQ(dut->video_blue,  REMOTE_B, "left inside blue");
+
+    // Right edge row ".....#..": x<5 is inside, x=5 is border,
+    // x>5 is outside.
+    drive_visible_pixel(4, 33, BUBBLE_ATTR_REMOTE, SPRITE_BR, 0x04);
+    CHECK_EQ(dut->video_red,   REMOTE_R, "right inside red");
+    CHECK_EQ(dut->video_green, REMOTE_G, "right inside green");
+    CHECK_EQ(dut->video_blue,  REMOTE_B, "right inside blue");
+
+    drive_visible_pixel(5, 33, BUBBLE_ATTR_REMOTE, SPRITE_BR, 0x04);
+    CHECK_EQ(dut->video_red,   FG_R, "right border red");
+    CHECK_EQ(dut->video_green, FG_G, "right border green");
+    CHECK_EQ(dut->video_blue,  FG_B, "right border blue");
+
+    drive_visible_pixel(6, 33, BUBBLE_ATTR_REMOTE, SPRITE_BR, 0x04);
+    CHECK_EQ(dut->video_red,   0x00, "right outside red");
+    CHECK_EQ(dut->video_green, 0x00, "right outside green");
+    CHECK_EQ(dut->video_blue,  0x00, "right outside blue");
 }
 
 static void test_avatar_request_only_first_row() {
@@ -150,6 +212,7 @@ int main(int argc, char** argv) {
     dut = &d;
 
     test_bubble_background_attr();
+    test_bubble_fill_clips_to_edge_outline();
     test_avatar_request_only_first_row();
 
     if (g_failures == 0) { printf("\nPASS  (all checks)\n"); return 0; }
