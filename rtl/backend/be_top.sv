@@ -257,17 +257,29 @@ module be_top
     logic [MAX_NAME_LEN*8-1:0]          peer_name_q;
     msg_len_t                           peer_name_len_q;
 
-    // Mouse click: shadow copy of the frontend's input scroll offset
-    // so the backend can compute the clicked buffer row from screen
-    // coordinates.  Mirrored on every RENDER_INPUT_SCROLL_UP/DOWN.
-    logic [3:0]                         input_scroll_shadow_q;
+    // Mouse click sticky latch (latest-wins). io_mouse_click_valid is
+    // a 1-cycle pulse and the X/Y position regs in io_mouse keep moving
+    // after the click. We need to (a) not lose the click if the FSM is
+    // busy when it arrives and (b) keep the X/Y at the moment of the
+    // click, not the moment the FSM gets around to processing it. If a
+    // second click arrives while pending, the newest wins -- the older
+    // un-consumed click is overwritten (FIFO would queue them up and
+    // make the cursor teleport through every click in order, which is
+    // not what anybody wants).
+    logic                               click_pending_q;
+    logic [6:0]                         click_raw_col_q;     // io_mouse_click_x[9:3]
+    logic [5:0]                         click_screen_row_q;  // io_mouse_click_y[9:4]
 
     // Mouse click: walk registers for the multi-cycle 2D→linear
-    // conversion in S_MOUSE_CLICK.
+    // conversion in S_MOUSE_CLICK. click_walk_done_q gates the render
+    // output -- without it, S_MOUSE_CLICK asserts be_render_valid on
+    // cycle 1 with the stale cursor_pos_q, FE accepts, BE exits before
+    // the walk has even started.
     logic [3:0]                         click_target_row_q;
     logic [6:0]                         click_target_col_q;
     logic [3:0]                         click_vis_row_q;
     logic [6:0]                         click_vis_col_q;
+    logic                               click_walk_done_q;
 
     // -----------------------------------------------------------------
     // Combinational helpers
@@ -496,6 +508,10 @@ module be_top
     assign io_key_ready    = (in_chat_idle && !cm_status_valid && !cm_rx_valid)
                           || (in_handshake_idle && !cm_rx_valid)
                           || (in_disc_idle      && !cm_rx_valid);
+    // click_ready stays a level signal driven from BE state for symmetry
+    // with the other accept ports, but io_mouse never reads it: clicks
+    // are 1-cycle pulses, captured unconditionally by the sticky latch
+    // below.
     assign io_mouse_click_ready = in_chat_idle && !cm_status_valid
                                && !cm_rx_valid && !io_key_valid;
 
@@ -506,7 +522,10 @@ module be_top
     assign accept_status      = cm_status_valid      && cm_status_ready;
     assign accept_rx          = cm_rx_valid           && cm_rx_ready;
     assign accept_io          = io_key_valid          && io_key_ready;
-    assign accept_mouse_click = io_mouse_click_valid  && io_mouse_click_ready;
+    // Consume the latched click, not the live pulse: the pulse can fire
+    // while BE is in any state, and we want to act on it as soon as the
+    // gating conditions allow.
+    assign accept_mouse_click = click_pending_q       && io_mouse_click_ready;
 
     // -----------------------------------------------------------------
     // Next-state logic
@@ -602,9 +621,12 @@ module be_top
                     endcase
                 end else if (accept_mouse_click) begin
                     // Only transition if click falls within the input area
-                    // (screen rows 32..36, i.e. pixel Y 512..591).
-                    if (io_mouse_click_y[9:4] >= 6'd32 &&
-                        io_mouse_click_y[9:4] <= 6'd36)
+                    // (screen rows 32..36, i.e. pixel Y 512..591). Clicks
+                    // outside the input area still consume the pending
+                    // latch (BE returns to S_IDLE next cycle) so they
+                    // don't stick around.
+                    if (click_screen_row_q >= 6'd32 &&
+                        click_screen_row_q <= 6'd36)
                         state_d = S_MOUSE_CLICK;
                 end
             end
@@ -635,7 +657,9 @@ module be_top
             S_RENDER_SCROLL_DOWN:       if (be_render_ready) state_d = S_IDLE;
             S_RENDER_INPUT_SCROLL_UP:   if (be_render_ready) state_d = S_IDLE;
             S_RENDER_INPUT_SCROLL_DOWN: if (be_render_ready) state_d = S_IDLE;
-            S_MOUSE_CLICK:              if (be_render_ready) state_d = S_IDLE;
+            // Stay in S_MOUSE_CLICK while the walk progresses; only emit
+            // the render command once cursor_pos_q has been resolved.
+            S_MOUSE_CLICK: if (click_walk_done_q && be_render_ready) state_d = S_IDLE;
             S_ENTER_RENDER_LOCAL:       if (be_render_ready) state_d = S_ENTER_SEND_COMM;
             S_ENTER_SEND_COMM:          if (be_tx_ready)     state_d = S_ENTER_RENDER_INPUT_CLEAR;
             S_ENTER_RENDER_INPUT_CLEAR: if (be_render_ready) state_d = S_IDLE;
@@ -808,7 +832,9 @@ module be_top
                 be_render_cmd   = 4'(RENDER_INPUT_SCROLL_DOWN);
             end
             S_MOUSE_CLICK: begin
-                be_render_valid      = 1'b1;
+                // Gated on walk_done so the FE doesn't latch a stale
+                // cursor_pos_q on cycle 1 of the walk.
+                be_render_valid      = click_walk_done_q;
                 be_render_cmd        = 4'(RENDER_MOVE_CURSOR);
                 be_render_cursor_pos = cursor_pos_q;
             end
@@ -882,11 +908,14 @@ module be_top
             enc_dst_q          <= '0;
             peer_name_len_q    <= '0;
             peer_name_q        <= '0;
-            input_scroll_shadow_q <= '0;
+            click_pending_q    <= 1'b0;
+            click_raw_col_q    <= '0;
+            click_screen_row_q <= '0;
             click_target_row_q <= '0;
             click_target_col_q <= '0;
             click_vis_row_q    <= '0;
             click_vis_col_q    <= '0;
+            click_walk_done_q  <= 1'b0;
             for (int i = 0; i < MAX_LINE_LEN; i++) line_buf[i]    <= 8'd0;
         end else begin
             state_q       <= state_d;
@@ -971,37 +1000,45 @@ module be_top
             // INPUT_SOFT_WRAP_W = 96 (matches fe_render_decoder).
             // -------------------------------------------------------------
             if (state_q == S_IDLE && state_d == S_MOUSE_CLICK) begin
-                // Latch click target from pixel coordinates
+                // Latch click target from the *latched* click coords so
+                // intermediate mouse movement between click and FSM
+                // pickup doesn't change where the cursor lands.
                 automatic logic [6:0] raw_col;
                 automatic logic [5:0] buf_row;
-                raw_col = io_mouse_click_x[9:3];     // pixel_x / 8
-                // Buffer row = (screen_row - 32) + scroll offset
-                buf_row = io_mouse_click_y[9:4] - 6'd32
+                raw_col = click_raw_col_q;
+                // Buffer row = (screen_row - 32) + scroll offset.
+                buf_row = click_screen_row_q - 6'd32
                           + {1'b0, fe_input_scroll_offset};
                 click_target_row_q <= buf_row[3:0];
-                // Adjust col for prefix on first buffer row (row 0)
+                // Adjust col for the "> " prefix on buffer row 0.
                 if (buf_row == '0)
                     click_target_col_q <= (raw_col > 7'd2)
                                           ? raw_col - 7'd2 : 7'd0;
                 else
                     click_target_col_q <= raw_col;
                 // Init walk registers
-                shift_idx_q     <= '0;
-                click_vis_row_q <= '0;
-                click_vis_col_q <= '0;
+                shift_idx_q       <= '0;
+                click_vis_row_q   <= '0;
+                click_vis_col_q   <= '0;
+                click_walk_done_q <= 1'b0;
             end
 
-            if (state_q == S_MOUSE_CLICK) begin
+            // The walk only runs while !done. Once we've resolved
+            // cursor_pos_q the FSM sits in S_MOUSE_CLICK with
+            // be_render_valid asserted waiting for FE ready.
+            if (state_q == S_MOUSE_CLICK && !click_walk_done_q) begin
                 if (shift_idx_q >= len_q) begin
                     // Walked past end without matching row: clamp
-                    cursor_pos_q <= len_q;
+                    cursor_pos_q      <= len_q;
+                    click_walk_done_q <= 1'b1;
                 end else begin
                     automatic byte_t cur_byte;
                     cur_byte = line_buf[shift_idx_q[LINE_IDX_W-1:0]];
                     if (click_vis_row_q == click_target_row_q
                         && click_vis_col_q >= click_target_col_q) begin
                         // Found the target position
-                        cursor_pos_q <= shift_idx_q;
+                        cursor_pos_q      <= shift_idx_q;
+                        click_walk_done_q <= 1'b1;
                     end else begin
                         // Advance position trackers
                         if (cur_byte == 8'h0A) begin
@@ -1019,6 +1056,23 @@ module be_top
                         shift_idx_q <= shift_idx_q + LEN_WIDTH'(1);
                     end
                 end
+            end
+
+            // -------------------------------------------------------------
+            // Mouse-click sticky latch (latest-wins). io_mouse_click_valid
+            // is a 1-cycle pulse from io_mouse; clicks must not be lost
+            // when BE isn't in S_IDLE, but rapid clicks should NOT queue --
+            // only the most recent un-consumed click matters. The pulse
+            // also takes priority over accept_mouse_click in the same
+            // cycle so a click landing exactly as BE picks one up isn't
+            // dropped on the floor.
+            // -------------------------------------------------------------
+            if (io_mouse_click_valid) begin
+                click_raw_col_q    <= io_mouse_click_x[9:3];
+                click_screen_row_q <= io_mouse_click_y[9:4];
+                click_pending_q    <= 1'b1;
+            end else if (accept_mouse_click) begin
+                click_pending_q    <= 1'b0;
             end
 
             // -------------------------------------------------------------
@@ -1115,24 +1169,6 @@ module be_top
                 cursor_pos_q <= '0;
             end
 
-            // -------------------------------------------------------------
-            // Input scroll shadow: mirrors the frontend's scroll offset so
-            // mouse clicks can be mapped to the correct buffer row.
-            // Clamped to [0, INPUT_SCROLL_MAX].  Reset on username change
-            // (store clear resets the frontend offset too).
-            // -------------------------------------------------------------
-            if (do_store_clear) begin
-                input_scroll_shadow_q <= '0;
-            end
-            if (state_q == S_IDLE && state_d == S_RENDER_INPUT_SCROLL_UP) begin
-                if (input_scroll_shadow_q != '0)
-                    input_scroll_shadow_q <= input_scroll_shadow_q - 4'd1;
-            end
-            if (state_q == S_IDLE && state_d == S_RENDER_INPUT_SCROLL_DOWN) begin
-                // Clamp at INPUT_SCROLL_MAX = MAX_INPUT_LINES - N_INPUT_VISIBLE = 11
-                if (input_scroll_shadow_q < 4'd11)
-                    input_scroll_shadow_q <= input_scroll_shadow_q + 4'd1;
-            end
         end
     end
 
