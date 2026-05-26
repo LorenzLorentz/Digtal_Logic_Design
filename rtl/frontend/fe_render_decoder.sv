@@ -95,6 +95,7 @@ module fe_render_decoder
     // window, plus the current input scroll offset.
     output logic [INPUT_LINE_W-1:0]    input_cursor_row_obs,
     output msg_len_t                   input_cursor_col_obs,
+    output logic [INPUT_N_LINES_W-1:0] input_n_lines_obs,
     output logic [INPUT_SCROLL_W-1:0]  input_scroll_offset_obs
 );
 
@@ -345,6 +346,11 @@ module fe_render_decoder
             bubble_attr_for_side = BUBBLE_ATTR_LOCAL;
         else
             bubble_attr_for_side = BUBBLE_ATTR_NONE;
+    endfunction
+
+    function automatic logic is_big_emoji_tile_code(input byte_t code);
+        is_big_emoji_tile_code = (code >= byte_t'(BIG_EMOJI_BASE))
+                              && (code <  byte_t'(BIG_EMOJI_END_EXCL));
     endfunction
 
     // Effective scroll caps. Both grow with actual content (rather
@@ -608,7 +614,11 @@ module fe_render_decoder
                            + 8'(payload_idx);
                 hist_cell = big_emoji_anchor_q + tile_off;
             end else begin
-                hist_cell = payload_q[abs_idx[LINE_IDX_W-1:0]*8 +: 8];
+                automatic byte_t payload_byte;
+                payload_byte = payload_q[abs_idx[LINE_IDX_W-1:0]*8 +: 8];
+                hist_cell = is_big_emoji_tile_code(payload_byte)
+                    ? " "
+                    : payload_byte;
             end
         end
         else
@@ -637,6 +647,11 @@ module fe_render_decoder
                     + LINE_IDX_W'(col_cnt_q)];
             else
                 input_cell = " ";
+        end
+        if ((input_n_lines_q >= LINE_CNT_W'(MAX_INPUT_LINES))
+         && (input_row_cnt_q == INPUT_LINE_W'(MAX_INPUT_LINES - 1))
+         && (col_cnt_q == FE_COL_W'(INPUT_LIMIT_MARK_COL))) begin
+            input_cell = "!";
         end
     end
 
@@ -1646,6 +1661,7 @@ module fe_render_decoder
     assign scroll_offset_obs        = scroll_offset_q;
     assign input_cursor_row_obs     = input_cursor_row_q;
     assign input_cursor_col_obs     = input_cursor_col_q;
+    assign input_n_lines_obs        = input_n_lines_q;
     assign input_scroll_offset_obs  = input_scroll_offset_q;
 
 endmodule

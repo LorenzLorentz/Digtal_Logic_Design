@@ -220,6 +220,7 @@ static void clear_inputs() {
     dut->cm_status_code    = 0;
     dut->be_tx_ready       = 1;
     dut->be_render_ready   = 1;
+    dut->fe_input_at_limit = 0;
     dut->line_rd_idx       = 0;
     dut->store_rd_idx      = 0;
 }
@@ -874,51 +875,93 @@ static void test_emoji_tokens_encoded_on_commit() {
 }
 
 // Big-emoji tokens (capital first letter) encode to a single anchor
-// byte each; render/tx/store all carry that single byte. The frontend
-// is what expands it into a multi-tile bubble on display.
+// byte only when the token is the entire message. The frontend is what
+// expands that one byte into a multi-tile bubble on display.
 static void test_big_emoji_tokens_encoded_on_commit() {
     printf("== test_big_emoji_tokens_encoded_on_commit\n");
     reset();
-    for (char c : std::string("\\Shrug \\Hissing \\Heartbroken \\Sweat \\Xiucai")) {
-        send_key(KEY_CHAR, (uint8_t)c);
-        drain_render();
-    }
-    send_key(KEY_ENTER, 0);
 
-    RenderEvent r1;
-    CHECK_EQ(wait_render(r1), true, "got local append render");
-    CHECK_EQ(r1.cmd, RENDER_APPEND_LOCAL_PENDING, "render append local");
-    CHECK_EQ(r1.len, 9, "encoded render len (5 anchors + 4 spaces)");
-    const uint8_t expected[] = {
-        (uint8_t)BIG_EMOJI_SHRUG_ANCHOR,       ' ',
-        (uint8_t)BIG_EMOJI_HISSING_ANCHOR,     ' ',
-        (uint8_t)BIG_EMOJI_HEARTBROKEN_ANCHOR, ' ',
-        (uint8_t)BIG_EMOJI_SWEAT_ANCHOR,       ' ',
-        (uint8_t)BIG_EMOJI_XIUCAI_ANCHOR
+    struct Case { const char* token; uint8_t anchor; };
+    const Case cases[] = {
+        {"\\Shrug",       (uint8_t)BIG_EMOJI_SHRUG_ANCHOR},
+        {"\\Hissing",     (uint8_t)BIG_EMOJI_HISSING_ANCHOR},
+        {"\\Heartbroken", (uint8_t)BIG_EMOJI_HEARTBROKEN_ANCHOR},
+        {"\\Sweat",       (uint8_t)BIG_EMOJI_SWEAT_ANCHOR},
+        {"\\Xiucai",      (uint8_t)BIG_EMOJI_XIUCAI_ANCHOR},
     };
-    for (int i = 0; i < 9; i++) {
-        char lbl[48]; snprintf(lbl, sizeof(lbl), "render big-emoji payload[%d]", i);
-        CHECK_EQ(payload_get_byte(r1.payload, i), expected[i], lbl);
+
+    for (int i = 0; i < 5; i++) {
+        for (char c : std::string(cases[i].token)) {
+            send_key(KEY_CHAR, (uint8_t)c);
+            drain_render();
+        }
+        send_key(KEY_ENTER, 0);
+
+        RenderEvent r1;
+        CHECK_EQ(wait_render(r1), true, "got local append render");
+        CHECK_EQ(r1.cmd, RENDER_APPEND_LOCAL_PENDING, "render append local");
+        CHECK_EQ(r1.len, 1, "standalone big-emoji render len");
+        CHECK_EQ(payload_get_byte(r1.payload, 0), cases[i].anchor,
+                 "standalone big-emoji render anchor");
+
+        TxEvent tx;
+        CHECK_EQ(wait_tx(tx), true, "got DATA tx");
+        CHECK_EQ(tx.len, 1, "standalone big-emoji tx len");
+        CHECK_EQ(payload_get_byte(tx.payload, 0), cases[i].anchor,
+                 "standalone big-emoji tx anchor");
+
+        RenderEvent clear;
+        CHECK_EQ(wait_render(clear), true, "got input clear render");
+        CHECK_EQ(clear.cmd, RENDER_UPDATE_INPUT_LINE, "clear render");
+
+        StoreRead s = read_store(i);
+        CHECK_EQ(s.valid, 1, "store valid");
+        CHECK_EQ(s.len, 1, "standalone big-emoji store len");
+        CHECK_EQ(store_payload_byte(0), cases[i].anchor,
+                 "standalone big-emoji store anchor");
     }
+}
 
-    TxEvent tx;
-    CHECK_EQ(wait_tx(tx), true, "got DATA tx");
-    CHECK_EQ(tx.len, 9, "encoded tx len");
-    for (int i = 0; i < 9; i++) {
-        char lbl[48]; snprintf(lbl, sizeof(lbl), "tx big-emoji payload[%d]", i);
-        CHECK_EQ(payload_get_byte(tx.payload, i), expected[i], lbl);
-    }
+static void test_big_emoji_tokens_mixed_text_passthrough() {
+    printf("== test_big_emoji_tokens_mixed_text_passthrough\n");
+    reset();
 
-    RenderEvent clear;
-    CHECK_EQ(wait_render(clear), true, "got input clear render");
-    CHECK_EQ(clear.cmd, RENDER_UPDATE_INPUT_LINE, "clear render");
+    const char* tokens[] = {
+        "\\Shrug", "\\Hissing", "\\Heartbroken", "\\Sweat", "\\Xiucai"
+    };
 
-    StoreRead s = read_store(0);
-    CHECK_EQ(s.valid, 1, "store valid");
-    CHECK_EQ(s.len, 9, "encoded store len");
-    for (int i = 0; i < 9; i++) {
-        char lbl[48]; snprintf(lbl, sizeof(lbl), "store big-emoji payload[%d]", i);
-        CHECK_EQ(store_payload_byte(i), expected[i], lbl);
+    for (int i = 0; i < 5; i++) {
+        std::string msg = std::string("x") + tokens[i] + "y";
+        for (char c : msg) {
+            send_key(KEY_CHAR, (uint8_t)c);
+            drain_render();
+        }
+        send_key(KEY_ENTER, 0);
+
+        RenderEvent r1;
+        CHECK_EQ(wait_render(r1), true, "got local append render");
+        CHECK_EQ(r1.cmd, RENDER_APPEND_LOCAL_PENDING, "render append local");
+        CHECK_EQ(r1.len, msg.size(), "mixed big-emoji literal render len");
+        for (size_t j = 0; j < msg.size(); j++) {
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "mixed literal byte[%zu]", j);
+            CHECK_EQ(payload_get_byte(r1.payload, (int)j), (uint8_t)msg[j], lbl);
+        }
+
+        TxEvent tx;
+        CHECK_EQ(wait_tx(tx), true, "got DATA tx");
+        CHECK_EQ(tx.len, msg.size(), "mixed big-emoji literal tx len");
+
+        RenderEvent clear;
+        CHECK_EQ(wait_render(clear), true, "got input clear render");
+        CHECK_EQ(clear.cmd, RENDER_UPDATE_INPUT_LINE, "clear render");
+
+        StoreRead s = read_store(i);
+        CHECK_EQ(s.valid, 1, "store valid");
+        CHECK_EQ(s.len, msg.size(), "mixed big-emoji literal store len");
+        for (size_t j = 0; j < msg.size(); j++) {
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "store mixed literal byte[%zu]", j);
+            CHECK_EQ(store_payload_byte((int)j), (uint8_t)msg[j], lbl);
+        }
     }
 }
 
@@ -1851,6 +1894,65 @@ static void test_multiline_backspace() {
     CHECK_EQ(read_buf(3), (uint8_t)'d',    "buf[3] = 'd'");
 }
 
+static void test_input_height_limit_drops_extra_newlines() {
+    printf("== test_input_height_limit_drops_extra_newlines\n");
+    reset();
+
+    std::string msg;
+    for (int i = 0; i < 16; i++) {
+        msg.push_back((char)('a' + (i % 26)));
+        if (i != 15) msg.push_back((char)0x0A);
+    }
+
+    for (char c : msg) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+    CHECK_EQ(dut->line_len, msg.size(), "line_len at 16 input rows");
+
+    for (int i = 0; i < 3; i++) {
+        send_key(KEY_CHAR, 0x0A);
+    }
+    CHECK_EQ(dut->line_len, msg.size(), "extra newlines are dropped");
+    for (size_t i = 0; i < msg.size(); i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "buf after drop[%zu]", i);
+        CHECK_EQ(read_buf((int)i), (uint8_t)msg[i], lbl);
+    }
+
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+
+    StoreRead s = read_store(0);
+    CHECK_EQ(s.valid, 1, "store valid");
+    CHECK_EQ(s.len, msg.size(), "store len excludes dropped newlines");
+    for (size_t i = 0; i < msg.size(); i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "store after drop[%zu]", i);
+        CHECK_EQ(store_payload_byte((int)i), (uint8_t)msg[i], lbl);
+    }
+}
+
+static void test_frontend_height_limit_blocks_newline_only() {
+    printf("== test_frontend_height_limit_blocks_newline_only\n");
+    reset();
+
+    for (char c : std::string("abc")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+    CHECK_EQ(dut->line_len, 3, "baseline len");
+
+    dut->fe_input_at_limit = 1;
+    send_key(KEY_CHAR, 0x0A);
+    CHECK_EQ(no_render_for(8), true, "height-limit newline emits no render");
+    CHECK_EQ(dut->line_len, 3, "height-limit newline dropped");
+
+    send_key(KEY_CHAR, (uint8_t)'z');
+    drain_render();
+    CHECK_EQ(dut->line_len, 4, "ordinary char still accepted at limit");
+    CHECK_EQ(read_buf(3), (uint8_t)'z', "char inserted after limit marker");
+    dut->fe_input_at_limit = 0;
+}
+
 // =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
@@ -1892,6 +1994,7 @@ int main(int argc, char** argv) {
     test_emoji_tokens_encoded_on_commit();
     test_big_emoji_tokens_encoded_on_commit();
     test_ctrl_e_sticker_picker_sends_big_emoji();
+    test_big_emoji_tokens_mixed_text_passthrough();
     test_big_emoji_unknown_token_passthrough();
     test_commit_full_pipeline_order();
     test_commit_blocked_by_render_backpressure();
@@ -1940,6 +2043,8 @@ int main(int argc, char** argv) {
     // (J) Multi-line input
     test_multiline_input_commit();
     test_multiline_backspace();
+    test_input_height_limit_drops_extra_newlines();
+    test_frontend_height_limit_blocks_newline_only();
 
     tfp->close();
     delete tfp;

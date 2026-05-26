@@ -134,6 +134,7 @@ module chat_top_pair
         .io_mouse_click_x       (10'd0),
         .io_mouse_click_y       (10'd0),
         .fe_input_scroll_offset ('0),
+        .fe_input_at_limit      (a_fe_input_at_limit),
         .ui_popup_active        (a_ui_popup_active),
         .ui_popup_type          (a_ui_popup_type),
         .ui_popup_x             (a_ui_popup_x),
@@ -223,9 +224,14 @@ module chat_top_pair
     logic [SCROLL_W-1:0]                         a_fe_scroll_offset;
     logic [INPUT_LINE_W-1:0]                     a_fe_input_cursor_row;
     msg_len_t                                    a_fe_input_cursor_col;
+    logic [INPUT_N_LINES_W-1:0]                  a_fe_input_n_lines;
     logic [INPUT_SCROLL_W-1:0]                   a_fe_input_scroll_offset;
+    logic                                        a_fe_input_at_limit;
     logic [19:0]                                 a_asset_sram_addr;
     /* verilator lint_on UNUSEDSIGNAL */
+    assign a_fe_input_at_limit =
+        (a_fe_input_n_lines >= INPUT_N_LINES_W'(MAX_INPUT_LINES));
+
     fe_top u_a_fe (
         .clk                     (clk),
         .rst_n                   (rst_n),
@@ -269,6 +275,7 @@ module chat_top_pair
         .scroll_offset_obs       (a_fe_scroll_offset),
         .input_cursor_row_obs    (a_fe_input_cursor_row),
         .input_cursor_col_obs    (a_fe_input_cursor_col),
+        .input_n_lines_obs       (a_fe_input_n_lines),
         .input_scroll_offset_obs (a_fe_input_scroll_offset)
     );
 
@@ -331,6 +338,7 @@ module chat_top_pair
         .io_mouse_click_x       (10'd0),
         .io_mouse_click_y       (10'd0),
         .fe_input_scroll_offset ('0),
+        .fe_input_at_limit      (b_fe_input_at_limit),
         .ui_popup_active        (b_ui_popup_active),
         .ui_popup_type          (b_ui_popup_type),
         .ui_popup_x             (b_ui_popup_x),
@@ -419,9 +427,14 @@ module chat_top_pair
     logic [SCROLL_W-1:0]                         b_fe_scroll_offset;
     logic [INPUT_LINE_W-1:0]                     b_fe_input_cursor_row;
     msg_len_t                                    b_fe_input_cursor_col;
+    logic [INPUT_N_LINES_W-1:0]                  b_fe_input_n_lines;
     logic [INPUT_SCROLL_W-1:0]                   b_fe_input_scroll_offset;
+    logic                                        b_fe_input_at_limit;
     logic [19:0]                                 b_asset_sram_addr;
     /* verilator lint_on UNUSEDSIGNAL */
+    assign b_fe_input_at_limit =
+        (b_fe_input_n_lines >= INPUT_N_LINES_W'(MAX_INPUT_LINES));
+
     fe_top u_b_fe (
         .clk                     (clk),
         .rst_n                   (rst_n),
@@ -465,6 +478,7 @@ module chat_top_pair
         .scroll_offset_obs       (b_fe_scroll_offset),
         .input_cursor_row_obs    (b_fe_input_cursor_row),
         .input_cursor_col_obs    (b_fe_input_cursor_col),
+        .input_n_lines_obs       (b_fe_input_n_lines),
         .input_scroll_offset_obs (b_fe_input_scroll_offset)
     );
 

@@ -129,6 +129,7 @@ module io_be_integration
         .io_mouse_click_x        (10'd0),
         .io_mouse_click_y        (10'd0),
         .fe_input_scroll_offset  ('0),
+        .fe_input_at_limit       (1'b0),
         .ui_popup_active         (ui_popup_active_unused),
         .ui_popup_type           (ui_popup_type_unused),
         .ui_popup_x              (ui_popup_x_unused),

@@ -203,6 +203,7 @@ module chat_top
         .io_mouse_click_x       (mouse_x),
         .io_mouse_click_y       (mouse_y),
         .fe_input_scroll_offset (fe_input_scroll_offset_obs),
+        .fe_input_at_limit      (fe_input_at_limit),
         .ui_popup_active        (ui_popup_active),
         .ui_popup_type          (ui_popup_type),
         .ui_popup_x             (ui_popup_x),
@@ -301,8 +302,12 @@ module chat_top
     logic [SCROLL_W-1:0]                         fe_scroll_offset_obs;
     logic [INPUT_LINE_W-1:0]                     fe_input_cursor_row_obs;
     msg_len_t                                    fe_input_cursor_col_obs;
+    logic [INPUT_N_LINES_W-1:0]                  fe_input_n_lines_obs;
     /* verilator lint_on UNUSEDSIGNAL */
     logic [INPUT_SCROLL_W-1:0]                   fe_input_scroll_offset_obs;
+    logic                                        fe_input_at_limit;
+    assign fe_input_at_limit =
+        (fe_input_n_lines_obs >= INPUT_N_LINES_W'(MAX_INPUT_LINES));
 
     fe_top #(
         .LOCAL_NAME_LEN   (MY_NAME_LEN),
@@ -351,6 +356,7 @@ module chat_top
         .scroll_offset_obs       (fe_scroll_offset_obs),
         .input_cursor_row_obs    (fe_input_cursor_row_obs),
         .input_cursor_col_obs    (fe_input_cursor_col_obs),
+        .input_n_lines_obs       (fe_input_n_lines_obs),
         .input_scroll_offset_obs (fe_input_scroll_offset_obs)
     );
 
