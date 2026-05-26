@@ -88,6 +88,7 @@ module fe_top
     output logic [SCROLL_W-1:0]        scroll_offset_obs,
     output logic [INPUT_LINE_W-1:0]    input_cursor_row_obs,
     output msg_len_t                   input_cursor_col_obs,
+    output logic [INPUT_N_LINES_W-1:0] input_n_lines_obs,
     output logic [INPUT_SCROLL_W-1:0]  input_scroll_offset_obs
 );
 
@@ -153,6 +154,7 @@ module fe_top
         .hist_avatar_attr_obs   (hist_avatar_attr_dec),
         .input_cursor_row_obs   (input_cursor_row_obs),
         .input_cursor_col_obs   (input_cursor_col_obs),
+        .input_n_lines_obs      (input_n_lines_obs),
         .input_scroll_offset_obs(input_scroll_offset_obs)
     );
 

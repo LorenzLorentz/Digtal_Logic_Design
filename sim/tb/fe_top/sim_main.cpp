@@ -78,6 +78,7 @@ static constexpr int HIST_ROW_START   = 2;
 static constexpr int INPUT_ROW        = 67;     // = INPUT_ROW_START
 static constexpr int INPUT_ROW_START  = 67;
 static constexpr int MAX_INPUT_LINES  = 16;
+static constexpr int INPUT_LIMIT_MARK_COL = 99;
 
 // Bubble layout constants (must match fe_pkg.sv).
 static constexpr int BUBBLE_MARGIN_L   = 2;
@@ -504,6 +505,38 @@ static void test_single_byte_non_anchor_stays_one_line() {
     CHECK_EQ(read_cell(HIST_ROW_START + 0, 4), SPRITE_BR, "single-line BR");
     CHECK_EQ(read_cell(HIST_ROW_START + 1, 2), ' ',       "no row1 BL_MID");
     CHECK_EQ(read_cell(HIST_ROW_START + 2, 2), ' ',       "no row2 BL_BOT");
+}
+
+static void test_big_emoji_tile_codes_sanitized_in_text_bubble() {
+    printf("== test_big_emoji_tile_codes_sanitized_in_text_bubble\n");
+    reset();
+    bring_up();
+
+    const uint8_t payload[] = {
+        (uint8_t)BIG_EMOJI_HISSING_ANCHOR, 'A',
+        (uint8_t)BIG_EMOJI_SHRUG_ANCHOR,   'B',
+        (uint8_t)BIG_EMOJI_HEARTBROKEN_ANCHOR,
+        (uint8_t)BIG_EMOJI_SWEAT_ANCHOR,
+        (uint8_t)BIG_EMOJI_XIUCAI_ANCHOR
+    };
+
+    RenderCmd c;
+    c.cmd        = RENDER_APPEND_REMOTE;
+    c.msg_id     = 24;
+    c.side       = MSG_REMOTE;
+    c.status     = MSG_SUCCESS;
+    c.len        = sizeof(payload);
+    c.payload    = payload;
+    c.payload_n  = sizeof(payload);
+    send_cmd(c);
+
+    CHECK_EQ(read_cell(HIST_ROW_START, 3), ' ', "hissing tile suppressed");
+    CHECK_EQ(read_cell(HIST_ROW_START, 4), 'A', "literal A remains");
+    CHECK_EQ(read_cell(HIST_ROW_START, 5), ' ', "shrug tile suppressed");
+    CHECK_EQ(read_cell(HIST_ROW_START, 6), 'B', "literal B remains");
+    CHECK_EQ(read_cell(HIST_ROW_START, 7), ' ', "heartbroken tile suppressed");
+    CHECK_EQ(read_cell(HIST_ROW_START, 8), ' ', "sweat tile suppressed");
+    CHECK_EQ(read_cell(HIST_ROW_START, 9), ' ', "xiucai tile suppressed");
 }
 
 // Local message: right-aligned bubble ending at col BUBBLE_RIGHT_EDGE (97).
@@ -1645,6 +1678,30 @@ static void test_input_newline_marker_hidden_empty_line() {
     CHECK_EQ(read_cell(INPUT_ROW_START+1, 0), ' ',  "row1 col0 blank");
 }
 
+static void test_input_height_limit_marker() {
+    printf("== test_input_height_limit_marker\n");
+    reset();
+    bring_up();
+
+    std::vector<char> buf;
+    for (int i = 0; i < MAX_INPUT_LINES; i++) {
+        buf.push_back((char)('a' + (i % 26)));
+        if (i != MAX_INPUT_LINES - 1) buf.push_back((char)0x0A);
+    }
+    type_chars(buf.data(), buf.size());
+
+    CHECK_EQ((int)dut->input_cursor_row_obs, MAX_INPUT_LINES - 1,
+             "cursor on capped bottom input row");
+    CHECK_EQ((int)dut->input_scroll_offset_obs, MAX_INPUT_LINES - 5,
+             "input window follows capped bottom row");
+    CHECK_EQ(read_cell(INPUT_ROW_START + MAX_INPUT_LINES - 2,
+                       INPUT_LIMIT_MARK_COL),
+             ' ', "no marker above bottom row");
+    CHECK_EQ(read_cell(INPUT_ROW_START + MAX_INPUT_LINES - 1,
+                       INPUT_LIMIT_MARK_COL),
+             '!', "single input height limit marker");
+}
+
 // P5.3 -- a row closed by soft-wrap (not \n) gets NO ↵; only newline-
 // terminated rows do. Type W+1 'a's so row 0 fills via soft-wrap and
 // row 1 has 1 byte.
@@ -1904,6 +1961,7 @@ int main(int argc, char** argv) {
     test_big_emoji_bubble_layout_remote();
     test_big_emoji_bubble_layout_local();
     test_single_byte_non_anchor_stays_one_line();
+    test_big_emoji_tile_codes_sanitized_in_text_bubble();
     test_append_local_pending();
     test_update_status_success();
     test_update_status_fail();
@@ -1940,6 +1998,7 @@ int main(int argc, char** argv) {
     test_input_soft_wrap_cursor_pre_wrap();
     test_input_newline_marker_hidden_at_end_of_line();
     test_input_newline_marker_hidden_empty_line();
+    test_input_height_limit_marker();
     test_input_no_nl_glyph_on_soft_wrap();
     test_remote_max_len_message();
     test_local_max_len_message();

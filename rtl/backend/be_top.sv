@@ -109,6 +109,7 @@ module be_top
     // ---- frontend -> backend : input scroll offset (for click) ----
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [3:0]                 fe_input_scroll_offset,
+    input  logic                       fe_input_at_limit,
 
     // ---- comm -> backend : remote frame ----
     input  logic                       cm_rx_valid,
@@ -217,9 +218,14 @@ module be_top
     logic [LEN_WIDTH-1:0]               len_q;
     logic [LEN_WIDTH-1:0]               cursor_pos_q;
     logic                               enter_pulse_q;
+    localparam int MAX_INPUT_VIS_LINES = 16;
+    localparam int INPUT_NEWLINE_LIMIT = MAX_INPUT_VIS_LINES - 1;
+    localparam int INPUT_NL_COUNT_W    = $clog2(MAX_INPUT_VIS_LINES + 1);
+    logic [INPUT_NL_COUNT_W-1:0]        input_newline_count_q;
 
     // last ASCII byte just inserted -- drives be_render_ascii during INSERT
     byte_t                              last_event_ascii_q;
+    logic                               delete_was_newline_q;
 
     // S_LINE_INSERT/_DELETE byte-walk counter. Counts down (insert)
     // from len_q toward cursor_pos_q, or up (delete) from
@@ -284,6 +290,13 @@ module be_top
     // -----------------------------------------------------------------
     // Combinational helpers
     // -----------------------------------------------------------------
+    logic key_char_insert_allowed;
+    assign key_char_insert_allowed =
+        (len_q < LEN_WIDTH'(MAX_LINE_LEN))
+        && ((io_key_ascii != 8'h0A)
+         || ((!fe_input_at_limit)
+          && (input_newline_count_q
+             < INPUT_NL_COUNT_W'(INPUT_NEWLINE_LIMIT))));
 
     // Token encoder: one byte per cycle, single-step.
     //
@@ -584,7 +597,7 @@ module be_top
                         // The subsequent S_RENDER_INSERT / _DELETE
                         // emit the BE->FE render command unchanged.
                         KEY_CHAR: begin
-                            state_d = (len_q < LEN_WIDTH'(MAX_LINE_LEN))
+                            state_d = key_char_insert_allowed
                                       ? S_LINE_INSERT : S_IDLE;
                         end
                         KEY_BACKSPACE: begin
@@ -903,6 +916,8 @@ module be_top
             status_msg_id_q    <= '0;
             status_status_q    <= '0;
             last_event_ascii_q <= 8'd0;
+            delete_was_newline_q <= 1'b0;
+            input_newline_count_q <= '0;
             shift_idx_q        <= '0;
             enc_src_q          <= '0;
             enc_dst_q          <= '0;
@@ -944,6 +959,8 @@ module be_top
                     line_buf[shift_addr] <= last_event_ascii_q;
                     len_q        <= len_q        + LEN_WIDTH'(1);
                     cursor_pos_q <= cursor_pos_q + LEN_WIDTH'(1);
+                    if (last_event_ascii_q == 8'h0A)
+                        input_newline_count_q <= input_newline_count_q + 1'b1;
                 end else begin
                     line_buf[shift_addr] <= line_buf[
                         LINE_IDX_W'(shift_idx_q - LEN_WIDTH'(1))];
@@ -961,6 +978,8 @@ module be_top
                 if (shift_idx_q >= len_q - LEN_WIDTH'(1)) begin
                     len_q        <= len_q        - LEN_WIDTH'(1);
                     cursor_pos_q <= cursor_pos_q - LEN_WIDTH'(1);
+                    if (delete_was_newline_q && input_newline_count_q != '0)
+                        input_newline_count_q <= input_newline_count_q - 1'b1;
                 end else begin
                     line_buf[shift_addr] <= line_buf[
                         LINE_IDX_W'(shift_idx_q + LEN_WIDTH'(1))];
@@ -986,6 +1005,7 @@ module be_top
                     pending_len_q <= enc_dst_q;
                     len_q         <= '0;
                     cursor_pos_q  <= '0;
+                    input_newline_count_q <= '0;
                     wr_ptr_q      <= wr_ptr_q + 1'b1;
                     next_msg_id_q <= next_msg_id_q + 8'd1;
                 end
@@ -1114,7 +1134,7 @@ module be_top
                             // counter init happens via entering_new_state
                             // below; len_q / cursor_pos_q update on
                             // the LAST cycle of S_LINE_INSERT.
-                            if (len_q < LEN_WIDTH'(MAX_LINE_LEN)) begin
+                            if (key_char_insert_allowed) begin
                                 last_event_ascii_q <= io_key_ascii;
                             end
                         end
@@ -1122,6 +1142,12 @@ module be_top
                         KEY_BACKSPACE: begin
                             // Same idea -- the actual shift is the
                             // job of S_LINE_DELETE.
+                            if (cursor_pos_q != 0) begin
+                                delete_was_newline_q <=
+                                    (line_buf[LINE_IDX_W'(
+                                        cursor_pos_q - LEN_WIDTH'(1))]
+                                     == 8'h0A);
+                            end
                         end
 
                         KEY_LEFT: begin
@@ -1167,6 +1193,7 @@ module be_top
               && (key_type_e'(io_key_type) == KEY_ESC)) begin
                 len_q        <= '0;
                 cursor_pos_q <= '0;
+                input_newline_count_q <= '0;
             end
 
         end

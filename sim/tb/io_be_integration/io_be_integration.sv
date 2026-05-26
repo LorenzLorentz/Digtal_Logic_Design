@@ -125,6 +125,7 @@ module io_be_integration
         .io_mouse_click_x        (10'd0),
         .io_mouse_click_y        (10'd0),
         .fe_input_scroll_offset  ('0),
+        .fe_input_at_limit       (1'b0),
 
         .cm_rx_valid             (cm_rx_valid),
         .cm_rx_ready             (cm_rx_ready),
