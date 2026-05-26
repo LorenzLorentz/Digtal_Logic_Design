@@ -88,6 +88,11 @@ module fe_scan
     input  logic [9:0]                popup_x,
     input  logic [9:0]                popup_y,
 
+    // ---- Emoji suggestion overlay (pixel-clock domain) ----
+    input  logic                      emoji_suggest_active,
+    input  logic [EMOJI_SUGGEST_COUNT_W-1:0] emoji_suggest_count,
+    input  logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] emoji_suggest_ids,
+
     // ---- RGB / sync out ----
     output logic [7:0]             video_red,
     output logic [7:0]             video_green,
@@ -274,6 +279,27 @@ module fe_scan
     logic [3:0]        popup_label_col_s0;
     logic [HWIDTH-1:0] popup_label_dx_s0;
 
+    logic [HWIDTH-1:0] emoji_suggest_h_s0;
+    logic [HWIDTH-1:0] emoji_suggest_dx_s0;
+    logic [HWIDTH-1:0] emoji_suggest_dy_s0;
+    logic [HWIDTH-1:0] emoji_suggest_mouse_dx;
+    logic [HWIDTH-1:0] emoji_suggest_mouse_dy;
+    logic [3:0]        emoji_suggest_row_s0;
+    logic [3:0]        emoji_suggest_mouse_row;
+    logic              emoji_suggest_in_region_s0;
+    logic              emoji_suggest_border_s0;
+    logic              emoji_suggest_item_s0;
+    logic              emoji_suggest_mouse_in_item;
+    logic              emoji_suggest_item_hover_s0;
+    logic              emoji_suggest_label_active_s0;
+    emoji_token_id_t   emoji_suggest_label_token_s0;
+    logic [3:0]        emoji_suggest_label_len_s0;
+    byte_t             emoji_suggest_label_char_s0;
+    logic [2:0]        emoji_suggest_label_gx_s0;
+    logic [3:0]        emoji_suggest_label_gy_s0;
+    logic [3:0]        emoji_suggest_label_col_s0;
+    logic [HWIDTH-1:0] emoji_suggest_label_dx_s0;
+
     always_comb begin
         popup_w_s0 = '0;
         popup_h_s0 = '0;
@@ -374,6 +400,78 @@ module fe_scan
         ? 4'(popup_dy_s0 - HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX
                                     + POPUP_MSG_TEXT_Y_PX))
         : 4'(popup_dy_s0 - HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_TEXT_Y_PX));
+
+    assign emoji_suggest_h_s0 =
+        HWIDTH'(EMOJI_SUGGEST_BORDER_PX * 2)
+        + (HWIDTH'(emoji_suggest_count) << 4);
+    assign emoji_suggest_dx_s0 =
+        hdata - HWIDTH'(EMOJI_SUGGEST_X_PX);
+    assign emoji_suggest_dy_s0 =
+        vdata - HWIDTH'(EMOJI_SUGGEST_Y_PX);
+    assign emoji_suggest_mouse_dx =
+        HWIDTH'(mouse_x) - HWIDTH'(EMOJI_SUGGEST_X_PX);
+    assign emoji_suggest_mouse_dy =
+        HWIDTH'(mouse_y) - HWIDTH'(EMOJI_SUGGEST_Y_PX);
+    assign emoji_suggest_row_s0 =
+        4'((emoji_suggest_dy_s0 - HWIDTH'(EMOJI_SUGGEST_BORDER_PX)) >> 4);
+    assign emoji_suggest_mouse_row =
+        4'((emoji_suggest_mouse_dy - HWIDTH'(EMOJI_SUGGEST_BORDER_PX)) >> 4);
+
+    assign emoji_suggest_in_region_s0 =
+        emoji_suggest_active
+        && (emoji_suggest_count != '0)
+        && (emoji_suggest_dx_s0 < HWIDTH'(EMOJI_SUGGEST_W_PX))
+        && (emoji_suggest_dy_s0 < emoji_suggest_h_s0);
+    assign emoji_suggest_border_s0 =
+        emoji_suggest_in_region_s0
+        && ((emoji_suggest_dx_s0 < HWIDTH'(EMOJI_SUGGEST_BORDER_PX))
+         || (emoji_suggest_dy_s0 < HWIDTH'(EMOJI_SUGGEST_BORDER_PX))
+         || (emoji_suggest_dx_s0 >= HWIDTH'(EMOJI_SUGGEST_W_PX
+                                            - EMOJI_SUGGEST_BORDER_PX))
+         || (emoji_suggest_dy_s0 >= emoji_suggest_h_s0
+                                      - HWIDTH'(EMOJI_SUGGEST_BORDER_PX)));
+    assign emoji_suggest_item_s0 =
+        emoji_suggest_in_region_s0
+        && !emoji_suggest_border_s0
+        && (emoji_suggest_dy_s0 >= HWIDTH'(EMOJI_SUGGEST_BORDER_PX))
+        && (emoji_suggest_row_s0 < 4'(emoji_suggest_count));
+    assign emoji_suggest_mouse_in_item =
+        emoji_suggest_active
+        && (emoji_suggest_mouse_dx < HWIDTH'(EMOJI_SUGGEST_W_PX))
+        && (emoji_suggest_mouse_dy >= HWIDTH'(EMOJI_SUGGEST_BORDER_PX))
+        && (emoji_suggest_mouse_dy < HWIDTH'(EMOJI_SUGGEST_BORDER_PX)
+                                  + (HWIDTH'(emoji_suggest_count) << 4))
+        && (emoji_suggest_mouse_row < 4'(emoji_suggest_count));
+    assign emoji_suggest_item_hover_s0 =
+        emoji_suggest_item_s0
+        && emoji_suggest_mouse_in_item
+        && (emoji_suggest_mouse_row == emoji_suggest_row_s0);
+
+    always_comb begin
+        emoji_suggest_label_token_s0 = '0;
+        if (emoji_suggest_row_s0 < 4'(EMOJI_SUGGEST_MAX)) begin
+            emoji_suggest_label_token_s0 = emoji_suggest_ids[
+                emoji_suggest_row_s0 * EMOJI_TOKEN_ID_W +: EMOJI_TOKEN_ID_W
+            ];
+        end
+    end
+    assign emoji_suggest_label_len_s0 =
+        4'(emoji_token_len(emoji_suggest_label_token_s0));
+    assign emoji_suggest_label_dx_s0 =
+        emoji_suggest_dx_s0 - HWIDTH'(EMOJI_SUGGEST_TEXT_X_PX);
+    assign emoji_suggest_label_col_s0 = 4'(emoji_suggest_label_dx_s0 >> 3);
+    assign emoji_suggest_label_active_s0 =
+        emoji_suggest_item_s0
+        && (emoji_suggest_dx_s0 >= HWIDTH'(EMOJI_SUGGEST_TEXT_X_PX))
+        && (emoji_suggest_dx_s0 < HWIDTH'(EMOJI_SUGGEST_TEXT_X_PX
+                                          + EMOJI_TOKEN_MAX_LEN * 8))
+        && (emoji_suggest_label_col_s0 < emoji_suggest_label_len_s0);
+    assign emoji_suggest_label_char_s0 =
+        emoji_token_char(emoji_suggest_label_token_s0,
+                         emoji_suggest_label_col_s0);
+    assign emoji_suggest_label_gx_s0 = emoji_suggest_label_dx_s0[2:0];
+    assign emoji_suggest_label_gy_s0 =
+        4'(emoji_suggest_dy_s0 - HWIDTH'(EMOJI_SUGGEST_BORDER_PX));
 
     // True for the leftover 8 px past the last input row -- used to blank
     // the glyph so this strip renders as a solid titlebar-blue band.
@@ -501,6 +599,13 @@ module fe_scan
     byte_t             s1_popup_label_char;
     logic [2:0]        s1_popup_label_gx;
     logic [3:0]        s1_popup_label_gy;
+    logic              s1_emoji_suggest_in_region;
+    logic              s1_emoji_suggest_border;
+    logic              s1_emoji_suggest_item_hover;
+    logic              s1_emoji_suggest_label_active;
+    byte_t             s1_emoji_suggest_label_char;
+    logic [2:0]        s1_emoji_suggest_label_gx;
+    logic [3:0]        s1_emoji_suggest_label_gy;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -531,6 +636,13 @@ module fe_scan
             s1_popup_label_char    <= 8'h20;
             s1_popup_label_gx      <= '0;
             s1_popup_label_gy      <= '0;
+            s1_emoji_suggest_in_region <= 1'b0;
+            s1_emoji_suggest_border    <= 1'b0;
+            s1_emoji_suggest_item_hover <= 1'b0;
+            s1_emoji_suggest_label_active <= 1'b0;
+            s1_emoji_suggest_label_char <= 8'h20;
+            s1_emoji_suggest_label_gx <= '0;
+            s1_emoji_suggest_label_gy <= '0;
         end else begin
             s1_gy               <= s0_gy;
             s1_gx               <= s0_gx;
@@ -559,6 +671,13 @@ module fe_scan
             s1_popup_label_char    <= popup_label_char_s0;
             s1_popup_label_gx      <= popup_label_gx_s0;
             s1_popup_label_gy      <= popup_label_gy_s0;
+            s1_emoji_suggest_in_region <= emoji_suggest_in_region_s0;
+            s1_emoji_suggest_border    <= emoji_suggest_border_s0;
+            s1_emoji_suggest_item_hover <= emoji_suggest_item_hover_s0;
+            s1_emoji_suggest_label_active <= emoji_suggest_label_active_s0;
+            s1_emoji_suggest_label_char <= emoji_suggest_label_char_s0;
+            s1_emoji_suggest_label_gx <= emoji_suggest_label_gx_s0;
+            s1_emoji_suggest_label_gy <= emoji_suggest_label_gy_s0;
         end
     end
 
@@ -591,19 +710,29 @@ module fe_scan
     assign base_glyph_gy   = in_connected ? s1_gy : s1_splash_gy;
 
     assign glyph_code = s1_popup_label_active
-                        ? s1_popup_label_char : base_glyph_code;
+                        ? s1_popup_label_char
+                        : (s1_emoji_suggest_label_active
+                           ? s1_emoji_suggest_label_char : base_glyph_code);
     assign glyph_gy   = s1_popup_label_active
-                        ? s1_popup_label_gy : base_glyph_gy;
+                        ? s1_popup_label_gy
+                        : (s1_emoji_suggest_label_active
+                           ? s1_emoji_suggest_label_gy : base_glyph_gy);
 
     logic pixel_on;
     logic popup_text_pixel_on;
+    logic emoji_suggest_text_pixel_on;
     assign popup_text_pixel_on =
         s1_popup_label_active
         && glyph_row[3'd7 - s1_popup_label_gx];
+    assign emoji_suggest_text_pixel_on =
+        s1_emoji_suggest_label_active
+        && glyph_row[3'd7 - s1_emoji_suggest_label_gx];
 
     always_comb begin
         if (s1_popup_label_active)
             pixel_on = popup_text_pixel_on;
+        else if (s1_emoji_suggest_label_active)
+            pixel_on = emoji_suggest_text_pixel_on;
         else if (in_connected)
             pixel_on = glyph_row[3'd7 - s1_gx];
         else if (s1_splash_in_region)
@@ -909,9 +1038,31 @@ module fe_scan
             video_blue  = splash_bg_b;
         end
 
-        // Popup overlay sits above the regular UI/splash but below the
-        // mouse pointer. The popup state is owned in the chat clock
-        // domain and synchronised into this scan pipeline by fe_top.
+        // Emoji suggestions and popup overlays sit above the regular
+        // UI/splash but below the mouse pointer. The message/sticker popup
+        // is applied after suggestions, so it wins if they ever overlap.
+        if (s1_de && s1_emoji_suggest_in_region) begin
+            if (s1_emoji_suggest_border) begin
+                video_red   = COL_POPUP_BORDER_R;
+                video_green = COL_POPUP_BORDER_G;
+                video_blue  = COL_POPUP_BORDER_B;
+            end else if (emoji_suggest_text_pixel_on) begin
+                video_red   = COL_POPUP_TEXT_R;
+                video_green = COL_POPUP_TEXT_G;
+                video_blue  = COL_POPUP_TEXT_B;
+            end else if (s1_emoji_suggest_item_hover) begin
+                video_red   = COL_POPUP_HOVER_R;
+                video_green = COL_POPUP_HOVER_G;
+                video_blue  = COL_POPUP_HOVER_B;
+            end else begin
+                video_red   = COL_POPUP_BG_R;
+                video_green = COL_POPUP_BG_G;
+                video_blue  = COL_POPUP_BG_B;
+            end
+        end
+
+        // Popup state is owned in the chat clock domain and synchronised
+        // into this scan pipeline by fe_top.
         if (s1_de && s1_popup_in_region) begin
             if (s1_popup_border || s1_popup_grid_line) begin
                 video_red   = COL_POPUP_BORDER_R;

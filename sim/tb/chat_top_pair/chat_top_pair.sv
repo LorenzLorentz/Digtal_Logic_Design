@@ -117,6 +117,10 @@ module chat_top_pair
     logic                          a_ui_popup_active;
     logic [1:0]                    a_ui_popup_type;
     logic [9:0]                    a_ui_popup_x, a_ui_popup_y;
+    logic                          a_emoji_suggest_active;
+    logic [EMOJI_SUGGEST_COUNT_W-1:0] a_emoji_suggest_count;
+    logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] a_emoji_suggest_ids;
+    msg_len_t                      a_emoji_suggest_anchor_pos;
     /* verilator lint_on UNUSEDSIGNAL */
 
     be_top #(
@@ -139,6 +143,10 @@ module chat_top_pair
         .ui_popup_type          (a_ui_popup_type),
         .ui_popup_x             (a_ui_popup_x),
         .ui_popup_y             (a_ui_popup_y),
+        .emoji_suggest_active   (a_emoji_suggest_active),
+        .emoji_suggest_count    (a_emoji_suggest_count),
+        .emoji_suggest_ids      (a_emoji_suggest_ids),
+        .emoji_suggest_anchor_pos(a_emoji_suggest_anchor_pos),
         .cm_rx_valid            (a_cm_rx_valid),
         .cm_rx_ready            (a_cm_rx_ready),
         .cm_rx_frame_type       (a_cm_rx_frame_type),
@@ -263,6 +271,9 @@ module chat_top_pair
         .ui_popup_type           (a_ui_popup_type),
         .ui_popup_x              (a_ui_popup_x),
         .ui_popup_y              (a_ui_popup_y),
+        .emoji_suggest_active    (a_emoji_suggest_active),
+        .emoji_suggest_count     (a_emoji_suggest_count),
+        .emoji_suggest_ids       (a_emoji_suggest_ids),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (a_fe_rd_code),
@@ -321,6 +332,10 @@ module chat_top_pair
     logic                          b_ui_popup_active;
     logic [1:0]                    b_ui_popup_type;
     logic [9:0]                    b_ui_popup_x, b_ui_popup_y;
+    logic                          b_emoji_suggest_active;
+    logic [EMOJI_SUGGEST_COUNT_W-1:0] b_emoji_suggest_count;
+    logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] b_emoji_suggest_ids;
+    msg_len_t                      b_emoji_suggest_anchor_pos;
     /* verilator lint_on UNUSEDSIGNAL */
 
     be_top #(
@@ -343,6 +358,10 @@ module chat_top_pair
         .ui_popup_type          (b_ui_popup_type),
         .ui_popup_x             (b_ui_popup_x),
         .ui_popup_y             (b_ui_popup_y),
+        .emoji_suggest_active   (b_emoji_suggest_active),
+        .emoji_suggest_count    (b_emoji_suggest_count),
+        .emoji_suggest_ids      (b_emoji_suggest_ids),
+        .emoji_suggest_anchor_pos(b_emoji_suggest_anchor_pos),
         .cm_rx_valid            (b_cm_rx_valid),
         .cm_rx_ready            (b_cm_rx_ready),
         .cm_rx_frame_type       (b_cm_rx_frame_type),
@@ -466,6 +485,9 @@ module chat_top_pair
         .ui_popup_type           (b_ui_popup_type),
         .ui_popup_x              (b_ui_popup_x),
         .ui_popup_y              (b_ui_popup_y),
+        .emoji_suggest_active    (b_emoji_suggest_active),
+        .emoji_suggest_count     (b_emoji_suggest_count),
+        .emoji_suggest_ids       (b_emoji_suggest_ids),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (b_fe_rd_code),

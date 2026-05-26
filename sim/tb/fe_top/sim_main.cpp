@@ -131,6 +131,9 @@ static void reset() {
     dut->ui_popup_type = 0;
     dut->ui_popup_x = 0;
     dut->ui_popup_y = 0;
+    dut->emoji_suggest_active = 0;
+    dut->emoji_suggest_count = 0;
+    dut->emoji_suggest_ids = 0;
     dut->rd_row = 0;
     dut->rd_col = 0;
     memset(&dut->be_render_payload,   0, sizeof(dut->be_render_payload));
@@ -696,6 +699,32 @@ static void test_update_input_line_clear() {
     const char expect[] = ">     ";
     for (int i = 0; i < 6; i++) {
         char lbl[32]; snprintf(lbl, sizeof(lbl), "input col %d", i);
+        CHECK_EQ(row[i], (uint8_t)expect[i], lbl);
+    }
+}
+
+static void test_update_input_line_nonempty() {
+    printf("== test_update_input_line_nonempty\n");
+    reset();
+    bring_up_and_type("\\ha");
+
+    const uint8_t happy[] = {'\\','h','a','p','p','y'};
+    RenderCmd c;
+    c.cmd        = RENDER_UPDATE_INPUT_LINE;
+    c.payload    = happy;
+    c.payload_n  = sizeof(happy);
+    c.len        = sizeof(happy);
+    c.cursor_pos = sizeof(happy);
+    send_cmd(c);
+
+    CHECK_EQ(dut->input_len_obs,    sizeof(happy), "input_len full update");
+    CHECK_EQ(dut->input_cursor_obs, sizeof(happy), "input_cursor full update");
+
+    uint8_t row[10];
+    read_row(INPUT_ROW, 0, 9, row);
+    const char expect[] = "> \\happy ";
+    for (int i = 0; i < 9; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "full input col %d", i);
         CHECK_EQ(row[i], (uint8_t)expect[i], lbl);
     }
 }
@@ -1974,6 +2003,7 @@ int main(int argc, char** argv) {
     test_insert_at_cursor();
     test_delete_at_cursor();
     test_update_input_line_clear();
+    test_update_input_line_nonempty();
     test_move_cursor();
     test_peer_change_clears_hist();
     test_scroll_up_down();

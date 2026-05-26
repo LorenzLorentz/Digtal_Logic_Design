@@ -123,7 +123,8 @@ module fe_render_decoder
         S_HIST_STORE    = 4'd7,
         S_HIST_LOAD     = 4'd8,
         S_HIST_WRITE    = 4'd9,
-        S_UPDATE_STATUS = 4'd10
+        S_UPDATE_STATUS = 4'd10,
+        S_INPUT_LOAD    = 4'd11
     } state_e;
 
     state_e state_q, state_d;
@@ -777,7 +778,9 @@ module fe_render_decoder
                             state_d = S_INPUT_INSERT;
                         RENDER_DELETE_AT_CURSOR:
                             state_d = S_INPUT_DELETE;
-                        RENDER_UPDATE_INPUT_LINE,
+                        RENDER_UPDATE_INPUT_LINE:
+                            state_d = (be_render_len != '0)
+                                      ? S_INPUT_LOAD : S_INPUT_PARSE;
                         RENDER_MOVE_CURSOR:
                             state_d = S_INPUT_PARSE;
 
@@ -809,6 +812,10 @@ module fe_render_decoder
             end
             S_INPUT_DELETE: begin
                 if (input_shift_idx_q >= input_len_q - LEN_WIDTH'(1))
+                    state_d = S_INPUT_PARSE;
+            end
+            S_INPUT_LOAD: begin
+                if (input_shift_idx_q >= input_len_q)
                     state_d = S_INPUT_PARSE;
             end
 
@@ -1107,13 +1114,9 @@ module fe_render_decoder
                     end
 
                     RENDER_UPDATE_INPUT_LINE: begin
-                        // BE only emits this on Enter-commit (len=0).
                         input_len_q    <= be_render_len;
                         input_cursor_q <= be_render_cursor_pos;
-                        if (be_render_len == '0) begin
-                            for (int i = 0; i < MAX_LINE_LEN; i++)
-                                input_line_q[i] <= 8'h20;
-                        end
+                        payload_q      <= be_render_payload;
                     end
 
                     RENDER_INSERT_AT_CURSOR: begin
@@ -1232,6 +1235,18 @@ module fe_render_decoder
                 end
             end
 
+            if (state_q == S_IDLE && state_d == S_INPUT_LOAD)
+                input_shift_idx_q <= '0;
+            if (state_q == S_INPUT_LOAD) begin
+                if (input_shift_idx_q < input_len_q) begin
+                    input_line_q[input_shift_idx_q[LINE_IDX_W-1:0]]
+                        <= payload_q[
+                            input_shift_idx_q[LINE_IDX_W-1:0]*8 +: 8
+                        ];
+                    input_shift_idx_q <= input_shift_idx_q + LEN_WIDTH'(1);
+                end
+            end
+
             // -----------------------------------------------------------
             // S_INPUT_PARSE (multi-cycle): walk input_line_q one byte
             // per cycle looking for 0x0A. Accumulates into
@@ -1256,6 +1271,14 @@ module fe_render_decoder
             // sample here.
             if ((state_q == S_INPUT_INSERT || state_q == S_INPUT_DELETE)
                  && state_d == S_INPUT_PARSE) begin
+                parse_idx_q          <= '0;
+                parse_n_lines_q      <= LINE_CNT_W'(1);
+                parse_line_start_q   <= '0;
+                input_ml_offset_q[0] <= '0;
+                parse_cursor_row_q   <= '0;
+                parse_cursor_col_q   <= input_cursor_q;
+            end
+            if (state_q == S_INPUT_LOAD && state_d == S_INPUT_PARSE) begin
                 parse_idx_q          <= '0;
                 parse_n_lines_q      <= LINE_CNT_W'(1);
                 parse_line_start_q   <= '0;

@@ -221,7 +221,12 @@ module be_top
         S_MOUSE_CLICK              = 5'd25,
         // Sticker picker selection: one-cycle local-message commit for
         // a single big-emoji anchor byte.
-        S_STICKER_COMMIT           = 5'd26
+        S_STICKER_COMMIT           = 5'd26,
+        // Emoji suggestion completion: insert the selected token suffix
+        // byte-by-byte, pack the full line, then push one full input update.
+        S_EMOJI_COMPLETE_INSERT    = 5'd27,
+        S_EMOJI_COMPLETE_PACK      = 5'd28,
+        S_EMOJI_COMPLETE_RENDER    = 5'd29
     } state_e;
 
     state_e state_q, state_d;
@@ -317,6 +322,9 @@ module be_top
     logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0]
                                         emoji_suggest_ids_q;
     msg_len_t                           emoji_suggest_anchor_q;
+    emoji_token_id_t                    emoji_complete_token_q;
+    msg_len_t                           emoji_complete_char_idx_q;
+    msg_len_t                           emoji_complete_token_len_q;
 
     localparam logic [9:0] STICKER_PICKER_X = 10'd240;
     localparam logic [9:0] STICKER_PICKER_Y = 10'd424;
@@ -350,6 +358,15 @@ module be_top
     logic [3:0] click_sticker_col;
     logic       click_in_sticker_picker;
     byte_t      click_sticker_anchor;
+    logic [9:0] click_emoji_dx;
+    logic [9:0] click_emoji_dy;
+    logic [3:0] click_emoji_row;
+    logic       click_in_emoji_suggest;
+    emoji_token_id_t click_emoji_token_id;
+    msg_len_t   click_emoji_token_len;
+    msg_len_t   click_emoji_prefix_len;
+    msg_len_t   click_emoji_suffix_len;
+    logic       click_emoji_fits;
 
     assign click_popup_dx = click_x_q - popup_x_q;
     assign click_popup_dy = click_y_q - popup_y_q;
@@ -360,6 +377,33 @@ module be_top
         && (click_popup_dx < 10'(POPUP_STICKER_PICKER_W_PX))
         && (click_popup_dy < 10'(POPUP_STICKER_PICKER_H_PX));
     assign click_sticker_anchor = sticker_anchor_for_col(click_sticker_col);
+    assign click_emoji_dx  = click_x_q - 10'(EMOJI_SUGGEST_X_PX);
+    assign click_emoji_dy  = click_y_q - 10'(EMOJI_SUGGEST_Y_PX);
+    assign click_emoji_row =
+        4'((click_emoji_dy - 10'(EMOJI_SUGGEST_BORDER_PX)) >> 4);
+    assign click_in_emoji_suggest =
+        emoji_suggest_active_q
+        && (click_emoji_dx < 10'(EMOJI_SUGGEST_W_PX))
+        && (click_emoji_dy >= 10'(EMOJI_SUGGEST_BORDER_PX))
+        && (click_emoji_dy < 10'(EMOJI_SUGGEST_BORDER_PX)
+                           + 10'(emoji_suggest_count_q)
+                           * 10'(EMOJI_SUGGEST_ITEM_H_PX))
+        && (click_emoji_row < 4'(emoji_suggest_count_q));
+    always_comb begin
+        click_emoji_token_id = '0;
+        if (click_emoji_row < 4'(EMOJI_SUGGEST_MAX)) begin
+            click_emoji_token_id = emoji_suggest_ids_q[
+                click_emoji_row * EMOJI_TOKEN_ID_W +: EMOJI_TOKEN_ID_W
+            ];
+        end
+    end
+    assign click_emoji_token_len = emoji_token_len(click_emoji_token_id);
+    assign click_emoji_prefix_len = cursor_pos_q - emoji_suggest_anchor_q;
+    assign click_emoji_suffix_len =
+        (click_emoji_token_len > click_emoji_prefix_len)
+        ? (click_emoji_token_len - click_emoji_prefix_len) : '0;
+    assign click_emoji_fits =
+        (len_q + click_emoji_suffix_len) <= LEN_WIDTH'(MAX_LINE_LEN);
 
     // Emoji suggestion matcher. This deliberately uses a fixed small token
     // table instead of scanning the full 128-byte line. The only dynamic
@@ -784,6 +828,12 @@ module be_top
                         // miss just closes the popup in the sequential block.
                         if (click_in_sticker_picker)
                             state_d = S_STICKER_COMMIT;
+                    end else if (emoji_suggest_active_q) begin
+                        if (click_in_emoji_suggest && click_emoji_fits) begin
+                            state_d = (click_emoji_prefix_len >= click_emoji_token_len)
+                                      ? S_EMOJI_COMPLETE_PACK
+                                      : S_EMOJI_COMPLETE_INSERT;
+                        end
                     end else if (click_screen_row_q >= 6'd32 &&
                                  click_screen_row_q <= 6'd36) begin
                         // Only transition if click falls within the input
@@ -824,6 +874,17 @@ module be_top
             // the render command once cursor_pos_q has been resolved.
             S_MOUSE_CLICK: if (click_walk_done_q && be_render_ready) state_d = S_IDLE;
             S_STICKER_COMMIT: state_d = S_ENTER_RENDER_LOCAL;
+            S_EMOJI_COMPLETE_INSERT: begin
+                if ((shift_idx_q == cursor_pos_q)
+                 && (emoji_complete_char_idx_q + LEN_WIDTH'(1)
+                     >= emoji_complete_token_len_q))
+                    state_d = S_EMOJI_COMPLETE_PACK;
+            end
+            S_EMOJI_COMPLETE_PACK: begin
+                if (shift_idx_q >= len_q)
+                    state_d = S_EMOJI_COMPLETE_RENDER;
+            end
+            S_EMOJI_COMPLETE_RENDER: if (be_render_ready) state_d = S_IDLE;
             S_ENTER_RENDER_LOCAL:       if (be_render_ready) state_d = S_ENTER_SEND_COMM;
             S_ENTER_SEND_COMM:          if (be_tx_ready)     state_d = S_ENTER_RENDER_INPUT_CLEAR;
             S_ENTER_RENDER_INPUT_CLEAR: if (be_render_ready) state_d = S_IDLE;
@@ -953,6 +1014,15 @@ module be_top
                 be_render_status     = 2'(MSG_PENDING);
                 be_render_len        = '0;
                 be_render_cursor_pos = '0;
+            end
+            S_EMOJI_COMPLETE_RENDER: begin
+                be_render_valid      = 1'b1;
+                be_render_cmd        = 4'(RENDER_UPDATE_INPUT_LINE);
+                be_render_side       = 2'(MSG_LOCAL);
+                be_render_status     = 2'(MSG_PENDING);
+                be_render_len        = len_q;
+                be_render_payload    = pending_payload_q;
+                be_render_cursor_pos = cursor_pos_q;
             end
             S_RX_RENDER: begin
                 be_render_valid   = 1'b1;
@@ -1101,6 +1171,9 @@ module be_top
             emoji_suggest_count_q    <= '0;
             emoji_suggest_ids_q      <= '0;
             emoji_suggest_anchor_q   <= '0;
+            emoji_complete_token_q   <= '0;
+            emoji_complete_char_idx_q <= '0;
+            emoji_complete_token_len_q <= '0;
             for (int i = 0; i < MAX_LINE_LEN; i++) line_buf[i]    <= 8'd0;
         end else begin
             state_q       <= state_d;
@@ -1373,6 +1446,51 @@ module be_top
                     end
                     popup_active_q <= 1'b0;
                     popup_type_q   <= 2'(POPUP_NONE);
+                end
+                else if (accept_mouse_click && emoji_suggest_active_q) begin
+                    if (click_in_emoji_suggest && click_emoji_fits) begin
+                        emoji_complete_token_q     <= click_emoji_token_id;
+                        emoji_complete_char_idx_q  <= click_emoji_prefix_len;
+                        emoji_complete_token_len_q <= click_emoji_token_len;
+                        shift_idx_q                <= len_q;
+                    end
+                    emoji_suggest_tracking_q <= 1'b0;
+                    emoji_suggest_active_q   <= 1'b0;
+                    emoji_suggest_count_q    <= '0;
+                    emoji_suggest_ids_q      <= '0;
+                    emoji_suggest_anchor_q   <= '0;
+                end
+            end
+
+            if (state_q == S_EMOJI_COMPLETE_INSERT) begin
+                if (shift_idx_q == cursor_pos_q) begin
+                    line_buf[shift_addr] <= emoji_token_char(
+                        emoji_complete_token_q, 4'(emoji_complete_char_idx_q));
+                    len_q        <= len_q        + LEN_WIDTH'(1);
+                    cursor_pos_q <= cursor_pos_q + LEN_WIDTH'(1);
+                    emoji_complete_char_idx_q <=
+                        emoji_complete_char_idx_q + LEN_WIDTH'(1);
+                    if (emoji_complete_char_idx_q + LEN_WIDTH'(1)
+                        < emoji_complete_token_len_q) begin
+                        shift_idx_q <= len_q + LEN_WIDTH'(1);
+                    end
+                end else begin
+                    line_buf[shift_addr] <= line_buf[
+                        LINE_IDX_W'(shift_idx_q - LEN_WIDTH'(1))];
+                    shift_idx_q <= shift_idx_q - LEN_WIDTH'(1);
+                end
+            end
+
+            if ((state_q != S_EMOJI_COMPLETE_PACK)
+             && (state_d == S_EMOJI_COMPLETE_PACK)) begin
+                pending_payload_q <= '0;
+                shift_idx_q       <= '0;
+            end
+            if (state_q == S_EMOJI_COMPLETE_PACK) begin
+                if (shift_idx_q < len_q) begin
+                    pending_payload_q[shift_idx_q*8 +: 8]
+                        <= line_buf[shift_idx_q[LINE_IDX_W-1:0]];
+                    shift_idx_q <= shift_idx_q + LEN_WIDTH'(1);
                 end
             end
 

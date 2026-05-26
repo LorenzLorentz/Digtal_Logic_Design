@@ -41,6 +41,11 @@ static constexpr uint8_t POPUP_TEXT_B   = 0xFB;
 static constexpr uint8_t POPUP_NONE = 0;
 static constexpr uint8_t POPUP_MSG_MENU = 1;
 
+static constexpr int EMOJI_SUGGEST_X_PX = 16;
+static constexpr int EMOJI_SUGGEST_Y_PX = 260;
+static constexpr int EMOJI_SUGGEST_BORDER_PX = 2;
+static constexpr int EMOJI_SUGGEST_TEXT_X_PX = 8;
+
 static constexpr uint8_t SPRITE_BL = 0xF3;
 static constexpr uint8_t SPRITE_BR = 0xF4;
 
@@ -105,6 +110,9 @@ static void reset() {
     dut->popup_type = POPUP_NONE;
     dut->popup_x = 0;
     dut->popup_y = 0;
+    dut->emoji_suggest_active = 0;
+    dut->emoji_suggest_count = 0;
+    dut->emoji_suggest_ids = 0;
     clear_avatar_attrs();
 
     tick();
@@ -275,6 +283,38 @@ static void test_popup_menu_text_uses_glyph_rom_bus() {
     CHECK_EQ(dut->video_blue,  POPUP_TEXT_B, "popup text blue");
 }
 
+static void test_emoji_suggest_overlay() {
+    printf("== test_emoji_suggest_overlay\n");
+    reset();
+
+    dut->emoji_suggest_active = 1;
+    dut->emoji_suggest_count = 1;
+    dut->emoji_suggest_ids = 0;  // slot 0 = EMOJI_TOKEN_HAPPY
+    dut->mouse_x = 1023;
+    dut->mouse_y = 1023;
+
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX, EMOJI_SUGGEST_Y_PX,
+                        BUBBLE_ATTR_NONE);
+    CHECK_EQ(dut->video_red,   POPUP_BORDER_R, "suggest border red");
+    CHECK_EQ(dut->video_green, POPUP_BORDER_G, "suggest border green");
+    CHECK_EQ(dut->video_blue,  POPUP_BORDER_B, "suggest border blue");
+
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX + 40,
+                        EMOJI_SUGGEST_Y_PX + EMOJI_SUGGEST_BORDER_PX + 8,
+                        BUBBLE_ATTR_NONE);
+    CHECK_EQ(dut->video_red,   POPUP_BG_R, "suggest bg red");
+    CHECK_EQ(dut->video_green, POPUP_BG_G, "suggest bg green");
+    CHECK_EQ(dut->video_blue,  POPUP_BG_B, "suggest bg blue");
+
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX + EMOJI_SUGGEST_TEXT_X_PX,
+                        EMOJI_SUGGEST_Y_PX + EMOJI_SUGGEST_BORDER_PX,
+                        BUBBLE_ATTR_NONE, ' ', 0x80);
+    CHECK_EQ(dut->glyph_code, (uint8_t)'\\', "suggest label glyph");
+    CHECK_EQ(dut->video_red,   POPUP_TEXT_R, "suggest text red");
+    CHECK_EQ(dut->video_green, POPUP_TEXT_G, "suggest text green");
+    CHECK_EQ(dut->video_blue,  POPUP_TEXT_B, "suggest text blue");
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vfe_scan d;
@@ -285,6 +325,7 @@ int main(int argc, char** argv) {
     test_avatar_request_only_first_row();
     test_popup_menu_overlay();
     test_popup_menu_text_uses_glyph_rom_bus();
+    test_emoji_suggest_overlay();
 
     if (g_failures == 0) { printf("\nPASS  (all checks)\n"); return 0; }
     printf("\nFAIL  %d check(s) failed\n", g_failures);

@@ -180,6 +180,13 @@ package chat_pkg;
     localparam int EMOJI_SUGGEST_MAX     = EMOJI_TOKEN_COUNT;
     localparam int EMOJI_SUGGEST_COUNT_W = $clog2(EMOJI_SUGGEST_MAX + 1);
 
+    localparam int EMOJI_SUGGEST_X_PX      = 16;
+    localparam int EMOJI_SUGGEST_Y_PX      = 260;
+    localparam int EMOJI_SUGGEST_W_PX      = 112;
+    localparam int EMOJI_SUGGEST_BORDER_PX = 2;
+    localparam int EMOJI_SUGGEST_ITEM_H_PX = 16;
+    localparam int EMOJI_SUGGEST_TEXT_X_PX = 8;
+
     typedef logic [EMOJI_TOKEN_ID_W-1:0] emoji_token_id_t;
 
     localparam emoji_token_id_t EMOJI_TOKEN_HAPPY       = emoji_token_id_t'(0);

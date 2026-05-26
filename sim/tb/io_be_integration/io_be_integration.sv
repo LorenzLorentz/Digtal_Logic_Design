@@ -97,6 +97,10 @@ module io_be_integration
     logic [1:0]  ui_popup_type_unused;
     logic [9:0]  ui_popup_x_unused;
     logic [9:0]  ui_popup_y_unused;
+    logic        emoji_suggest_active_unused;
+    logic [EMOJI_SUGGEST_COUNT_W-1:0] emoji_suggest_count_unused;
+    logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] emoji_suggest_ids_unused;
+    msg_len_t    emoji_suggest_anchor_unused;
     /* verilator lint_on UNUSEDSIGNAL */
 
     io_top u_io (
@@ -134,6 +138,10 @@ module io_be_integration
         .ui_popup_type           (ui_popup_type_unused),
         .ui_popup_x              (ui_popup_x_unused),
         .ui_popup_y              (ui_popup_y_unused),
+        .emoji_suggest_active    (emoji_suggest_active_unused),
+        .emoji_suggest_count     (emoji_suggest_count_unused),
+        .emoji_suggest_ids       (emoji_suggest_ids_unused),
+        .emoji_suggest_anchor_pos(emoji_suggest_anchor_unused),
 
         .cm_rx_valid             (cm_rx_valid),
         .cm_rx_ready             (cm_rx_ready),

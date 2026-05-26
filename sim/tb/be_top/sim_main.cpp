@@ -42,6 +42,9 @@ static constexpr int MAX_LINE_LEN = 128;
 static constexpr int MAX_MSG_LEN  = 128;
 static constexpr int PAYLOAD_W    = MAX_MSG_LEN * 8 / 32;
 static constexpr int EMOJI_TOKEN_ID_W = 4;
+static constexpr int EMOJI_SUGGEST_X_PX = 16;
+static constexpr int EMOJI_SUGGEST_Y_PX = 260;
+static constexpr int EMOJI_SUGGEST_BORDER_PX = 2;
 
 // key_type_e
 enum : uint8_t { KEY_CHAR = 0, KEY_ENTER = 1, KEY_BACKSPACE = 2,
@@ -769,6 +772,40 @@ static void test_emoji_suggest_excludes_big_tokens() {
 
     CHECK_EQ(dut->emoji_suggest_active, 0, "\\H does not match big tokens");
     CHECK_EQ(dut->emoji_suggest_count, 0, "\\H closes suggestion");
+}
+
+static void test_emoji_suggest_click_completes_token() {
+    printf("== test_emoji_suggest_click_completes_token\n");
+    reset();
+
+    for (char c : std::string("\\ha")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+    CHECK_EQ(dut->emoji_suggest_active, 1, "suggest active before click");
+    CHECK_EQ(dut->emoji_suggest_count, 1, "\\ha has one candidate");
+    CHECK_EQ(suggest_id(0), EMOJI_TOKEN_HAPPY, "\\ha candidate is happy");
+
+    send_mouse_click(EMOJI_SUGGEST_X_PX + 10,
+                     EMOJI_SUGGEST_Y_PX + EMOJI_SUGGEST_BORDER_PX + 8);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + 20), true, "completion render fires");
+    CHECK_EQ(r.cmd, RENDER_UPDATE_INPUT_LINE, "completion pushes full input");
+    CHECK_EQ(r.len, 6, "completion render len");
+    CHECK_EQ(r.cursor_pos, 6, "completion cursor");
+
+    const char expect[] = "\\happy";
+    for (int i = 0; i < 6; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "completion payload[%d]", i);
+        CHECK_EQ(payload_get_byte(r.payload, i), (uint8_t)expect[i], lbl);
+        snprintf(lbl, sizeof(lbl), "line_buf[%d]", i);
+        CHECK_EQ(read_buf(i), (uint8_t)expect[i], lbl);
+    }
+    CHECK_EQ(dut->line_len, 6, "line_len after completion");
+    CHECK_EQ(dut->cursor_pos, 6, "cursor_pos after completion");
+    CHECK_EQ(dut->emoji_suggest_active, 0, "suggest closes after completion");
+    CHECK_EQ(dut->emoji_suggest_count, 0, "suggest count clears after completion");
 }
 
 // Type "ab", LEFT, type "X" -> buffer "aXb", cursor=2, len=3.
@@ -2068,6 +2105,7 @@ int main(int argc, char** argv) {
     test_emoji_suggest_prefix_filters();
     test_emoji_suggest_no_match_closes();
     test_emoji_suggest_excludes_big_tokens();
+    test_emoji_suggest_click_completes_token();
     test_insert_in_middle();
     test_delete_in_middle();
     test_full_buffer_insert_dropped();

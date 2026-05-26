@@ -79,6 +79,11 @@ module fe_top
     input  logic [9:0]                 ui_popup_x,
     input  logic [9:0]                 ui_popup_y,
 
+    // Emoji suggestion overlay state (chat-clock domain; CDC'd below).
+    input  logic                       emoji_suggest_active,
+    input  logic [EMOJI_SUGGEST_COUNT_W-1:0] emoji_suggest_count,
+    input  logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] emoji_suggest_ids,
+
     // Observability read port (independent BRAM port, used by sim).
     input  logic [FE_ROW_W-1:0]        rd_row,
     input  logic [FE_COL_W-1:0]        rd_col,
@@ -218,6 +223,9 @@ module fe_top
     logic [1:0]                ui_popup_type_pix;
     logic [9:0]                ui_popup_x_pix;
     logic [9:0]                ui_popup_y_pix;
+    logic                      emoji_suggest_active_pix;
+    logic [EMOJI_SUGGEST_COUNT_W-1:0] emoji_suggest_count_pix;
+    logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] emoji_suggest_ids_pix;
 
     sync_2ff #(.RST_VAL(1'b0)) u_sync_cs0 (
         .clk(clk_pix), .rst_n(rst_n),
@@ -306,12 +314,31 @@ module fe_top
                 .sync_out(ui_popup_y_pix[gi])
             );
         end
+        for (gi = 0; gi < EMOJI_SUGGEST_COUNT_W; gi++) begin : g_sync_emoji_count
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_emoji_count (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(emoji_suggest_count[gi]),
+                .sync_out(emoji_suggest_count_pix[gi])
+            );
+        end
+        for (gi = 0; gi < EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W; gi++) begin : g_sync_emoji_ids
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_emoji_ids (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(emoji_suggest_ids[gi]),
+                .sync_out(emoji_suggest_ids_pix[gi])
+            );
+        end
     endgenerate
 
     sync_2ff #(.RST_VAL(1'b0)) u_sync_popup_active (
         .clk(clk_pix), .rst_n(rst_n),
         .async_in(ui_popup_active),
         .sync_out(ui_popup_active_pix)
+    );
+    sync_2ff #(.RST_VAL(1'b0)) u_sync_emoji_suggest_active (
+        .clk(clk_pix), .rst_n(rst_n),
+        .async_in(emoji_suggest_active),
+        .sync_out(emoji_suggest_active_pix)
     );
 
     fe_scan #(
@@ -346,6 +373,9 @@ module fe_top
         .popup_type         (ui_popup_type_pix),
         .popup_x            (ui_popup_x_pix),
         .popup_y            (ui_popup_y_pix),
+        .emoji_suggest_active(emoji_suggest_active_pix),
+        .emoji_suggest_count (emoji_suggest_count_pix),
+        .emoji_suggest_ids   (emoji_suggest_ids_pix),
         .video_red     (video_red),
         .video_green   (video_green),
         .video_blue    (video_blue),
