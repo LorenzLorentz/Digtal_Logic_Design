@@ -352,12 +352,57 @@ module fe_render_decoder
     // oldest stored row of history or the last typed input row.
     logic [SCROLL_W-1:0]       hist_scroll_max;
     logic [INPUT_SCROLL_W-1:0] input_scroll_max;
+    function automatic logic [HIST_W:0] hist_used_after_append(
+        input logic [HIST_W:0]       used_rows,
+        input logic [LINE_CNT_W-1:0] added_rows
+    );
+        automatic logic [HIST_W+1:0] sum;
+        begin
+            sum = {1'b0, used_rows} + (HIST_W+2)'(added_rows);
+            if (sum >= (HIST_W+2)'(N_HIST_STORED))
+                hist_used_after_append = (HIST_W+1)'(N_HIST_STORED);
+            else
+                hist_used_after_append = sum[HIST_W:0];
+        end
+    endfunction
+
+    function automatic logic [SCROLL_W-1:0] hist_scroll_max_for_used(
+        input logic [HIST_W:0] used_rows
+    );
+        begin
+            if (used_rows > (HIST_W+1)'(N_HIST_VISIBLE))
+                hist_scroll_max_for_used = SCROLL_W'(
+                    used_rows - (HIST_W+1)'(N_HIST_VISIBLE));
+            else
+                hist_scroll_max_for_used = '0;
+        end
+    endfunction
+
+    function automatic logic [SCROLL_W-1:0] hist_scroll_after_append(
+        input logic [SCROLL_W-1:0]    cur_scroll,
+        input logic [HIST_W:0]        next_used_rows,
+        input logic [LINE_CNT_W-1:0]  added_rows
+    );
+        automatic logic [SCROLL_W-1:0] next_scroll_max;
+        automatic logic [SCROLL_W:0]   wanted_scroll;
+        begin
+            next_scroll_max = hist_scroll_max_for_used(next_used_rows);
+            wanted_scroll   = {1'b0, cur_scroll} + (SCROLL_W+1)'(added_rows);
+
+            // scroll_offset==0 is the live bottom. Once the user has
+            // scrolled up, preserve the absolute history window while
+            // newly appended rows advance the ring head.
+            if (cur_scroll == '0)
+                hist_scroll_after_append = cur_scroll;
+            else if (wanted_scroll > {1'b0, next_scroll_max})
+                hist_scroll_after_append = next_scroll_max;
+            else
+                hist_scroll_after_append = wanted_scroll[SCROLL_W-1:0];
+        end
+    endfunction
+
     always_comb begin
-        if (used_hist_rows_q > (HIST_W+1)'(N_HIST_VISIBLE))
-            hist_scroll_max = SCROLL_W'(used_hist_rows_q
-                                         - (HIST_W+1)'(N_HIST_VISIBLE));
-        else
-            hist_scroll_max = '0;
+        hist_scroll_max = hist_scroll_max_for_used(used_hist_rows_q);
 
         if (input_n_lines_q > LINE_CNT_W'(N_INPUT_VISIBLE))
             input_scroll_max = INPUT_SCROLL_W'(input_n_lines_q
@@ -1379,6 +1424,11 @@ module fe_render_decoder
                           && (first_byte <  byte_t'(BIG_EMOJI_END_EXCL));
 
                     if (is_big) begin
+                        automatic logic [HIST_W:0] next_used_rows;
+                        next_used_rows = hist_used_after_append(
+                            used_hist_rows_q,
+                            LINE_CNT_W'(BIG_EMOJI_N_ROWS));
+
                         is_big_emoji_q     <= 1'b1;
                         big_emoji_anchor_q <= first_byte;
                         n_lines_q          <= LINE_CNT_W'(BIG_EMOJI_N_ROWS);
@@ -1402,17 +1452,16 @@ module fe_render_decoder
                         hist_wr_row_q <= (hist_wr_row_q
                             + HIST_W'(BIG_EMOJI_N_ROWS))
                             & HIST_W'(N_HIST_STORED - 1);
-                        if ({1'b0, used_hist_rows_q}
-                            + {1'b0, (HIST_W+1)'(BIG_EMOJI_N_ROWS)}
-                            >= (HIST_W+2)'(N_HIST_STORED))
-                            used_hist_rows_q <= (HIST_W+1)'(N_HIST_STORED);
-                        else
-                            used_hist_rows_q <= used_hist_rows_q
-                                + (HIST_W+1)'(BIG_EMOJI_N_ROWS);
+                        used_hist_rows_q <= next_used_rows;
+                        scroll_offset_q  <= hist_scroll_after_append(
+                            scroll_offset_q,
+                            next_used_rows,
+                            LINE_CNT_W'(BIG_EMOJI_N_ROWS));
                     end else begin
                         automatic logic [LINE_CNT_W-1:0] final_n_lines;
                         automatic msg_len_t             final_line_len;
                         automatic logic [LINE_SEL_W-1:0] final_last_sel;
+                        automatic logic [HIST_W:0]       next_used_rows;
                         is_big_emoji_q <= 1'b0;
                         final_n_lines = msg_parse_n_lines_q
                                         + (is_break ? LINE_CNT_W'(1)
@@ -1442,6 +1491,8 @@ module fe_render_decoder
                                               : BUBBLE_ATTR_NONE;
                             end
                         end
+                        next_used_rows = hist_used_after_append(
+                            used_hist_rows_q, final_n_lines);
                         // Advance hist write pointer by the (final) line
                         // count. & N_HIST_STORED-1 for ring wrap.
                         hist_wr_row_q <= (hist_wr_row_q
@@ -1450,13 +1501,11 @@ module fe_render_decoder
                         // Track total rows ever written for the current
                         // peer, capped at N_HIST_STORED. Drives the
                         // dynamic hist_scroll_max.
-                        if ({1'b0, used_hist_rows_q}
-                            + {1'b0, (HIST_W+1)'(final_n_lines)}
-                            >= (HIST_W+2)'(N_HIST_STORED))
-                            used_hist_rows_q <= (HIST_W+1)'(N_HIST_STORED);
-                        else
-                            used_hist_rows_q <= used_hist_rows_q
-                                + (HIST_W+1)'(final_n_lines);
+                        used_hist_rows_q <= next_used_rows;
+                        scroll_offset_q  <= hist_scroll_after_append(
+                            scroll_offset_q,
+                            next_used_rows,
+                            final_n_lines);
                     end
                 end else begin
                     byte_walk_idx_q <= byte_walk_idx_q + 1'b1;

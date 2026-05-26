@@ -753,6 +753,36 @@ static void test_scroll_up_down() {
              "scroll up clamps at used_hist_rows - N_HIST_VISIBLE");
 }
 
+static void test_append_while_scrolled_locks_history_window() {
+    printf("== test_append_while_scrolled_locks_history_window\n");
+    reset();
+    bring_up();
+
+    append_n_short_msgs(40);
+
+    RenderCmd su; su.cmd = RENDER_SCROLL_UP;
+    for (int i = 0; i < 5; i++) send_cmd(su);
+    CHECK_EQ((int)dut->scroll_offset_obs, 5, "manual scroll to 5");
+
+    const uint8_t one[] = {'R'};
+    RenderCmd c1;
+    c1.cmd = RENDER_APPEND_REMOTE; c1.msg_id = 100;
+    c1.side = MSG_REMOTE; c1.status = MSG_SUCCESS;
+    c1.payload = one; c1.payload_n = 1; c1.len = 1;
+    send_cmd(c1);
+    CHECK_EQ((int)dut->scroll_offset_obs, 6,
+             "one-row append keeps history window locked");
+
+    const uint8_t two_lines[] = {'a', 0x0A, 'b'};
+    RenderCmd c2;
+    c2.cmd = RENDER_APPEND_LOCAL_PENDING; c2.msg_id = 101;
+    c2.side = MSG_LOCAL; c2.status = MSG_PENDING;
+    c2.payload = two_lines; c2.payload_n = 3; c2.len = 3;
+    send_cmd(c2);
+    CHECK_EQ((int)dut->scroll_offset_obs, 8,
+             "two-row append keeps history window locked");
+}
+
 // With no history yet, RENDER_SCROLL_UP is a no-op (dynamic cap = 0).
 // Same for RENDER_INPUT_SCROLL_UP with input_n_lines = 1.
 static void test_scroll_clamps_when_empty() {
@@ -1883,6 +1913,7 @@ int main(int argc, char** argv) {
     test_move_cursor();
     test_peer_change_clears_hist();
     test_scroll_up_down();
+    test_append_while_scrolled_locks_history_window();
     test_scroll_clamps_when_empty();
     test_scroll_cap_tracks_content();
     test_peer_change_resets_scroll();
