@@ -41,6 +41,7 @@ static VerilatedVcdC*   tfp        = nullptr;
 static constexpr int MAX_LINE_LEN = 128;
 static constexpr int MAX_MSG_LEN  = 128;
 static constexpr int PAYLOAD_W    = MAX_MSG_LEN * 8 / 32;
+static constexpr int EMOJI_TOKEN_ID_W = 4;
 
 // key_type_e
 enum : uint8_t { KEY_CHAR = 0, KEY_ENTER = 1, KEY_BACKSPACE = 2,
@@ -91,6 +92,24 @@ enum : uint8_t {
     POPUP_MSG_MENU       = 1,
     POPUP_STICKER_PICKER = 2,
     KEY_CTRL_E           = 0x05,
+};
+// emoji_token_id_t (mirrors chat_pkg.sv)
+enum : uint8_t {
+    EMOJI_TOKEN_HAPPY       = 0,
+    EMOJI_TOKEN_SAD         = 1,
+    EMOJI_TOKEN_HEART       = 2,
+    EMOJI_TOKEN_OK          = 3,
+    EMOJI_TOKEN_LAUGH       = 4,
+    EMOJI_TOKEN_WINK        = 5,
+    EMOJI_TOKEN_ANGRY       = 6,
+    EMOJI_TOKEN_STAR        = 7,
+    EMOJI_TOKEN_FIRE        = 8,
+    EMOJI_TOKEN_YES         = 9,
+    EMOJI_TOKEN_NO          = 10,
+    EMOJI_TOKEN_UP          = 11,
+    EMOJI_TOKEN_DOWN        = 12,
+    EMOJI_TOKEN_DOGE        = 13,
+    EMOJI_TOKEN_MAIRUO      = 14,
 };
 
 // Default MY_NAME as built into be_top: "Alic" (4 bytes).
@@ -420,6 +439,11 @@ static StoreRead read_store(int idx) {
 static uint8_t store_payload_byte(int i) {
     return payload_get_byte(&dut->store_rd_payload[0], i);
 }
+static uint8_t suggest_id(int slot) {
+    int bit = slot * EMOJI_TOKEN_ID_W;
+    uint64_t v = ((uint64_t)dut->emoji_suggest_ids) >> bit;
+    return (uint8_t)(v & ((1u << EMOJI_TOKEN_ID_W) - 1u));
+}
 
 // ---- Assertion macro -------------------------------------------------
 #define CHECK_EQ(actual, expected, label) do {                            \
@@ -687,6 +711,64 @@ static void test_scroll_keys_emit_render() {
     // Scroll keys must not alter the input line.
     CHECK_EQ(dut->line_len,   0, "line_len untouched");
     CHECK_EQ(dut->cursor_pos, 0, "cursor_pos untouched");
+}
+
+static void test_emoji_suggest_backslash_opens_all() {
+    printf("== test_emoji_suggest_backslash_opens_all\n");
+    reset();
+    CHECK_EQ(dut->emoji_suggest_active, 0, "suggest inactive after reset");
+
+    send_key(KEY_CHAR, '\\');
+    drain_render();
+
+    CHECK_EQ(dut->emoji_suggest_active, 1, "suggest active after backslash");
+    CHECK_EQ(dut->emoji_suggest_count, 15, "all small tokens match bare backslash");
+    CHECK_EQ(dut->emoji_suggest_anchor_pos, 0, "anchor at slash");
+    CHECK_EQ(suggest_id(0), EMOJI_TOKEN_HAPPY, "first token id");
+    CHECK_EQ(suggest_id(14), EMOJI_TOKEN_MAIRUO, "last token id");
+}
+
+static void test_emoji_suggest_prefix_filters() {
+    printf("== test_emoji_suggest_prefix_filters\n");
+    reset();
+
+    send_key(KEY_CHAR, '\\'); drain_render();
+    send_key(KEY_CHAR, 'h');  drain_render();
+
+    CHECK_EQ(dut->emoji_suggest_active, 1, "suggest active for \\h");
+    CHECK_EQ(dut->emoji_suggest_count, 2, "\\h matches happy/heart");
+    CHECK_EQ(suggest_id(0), EMOJI_TOKEN_HAPPY, "first \\h candidate");
+    CHECK_EQ(suggest_id(1), EMOJI_TOKEN_HEART, "second \\h candidate");
+
+    send_key(KEY_CHAR, 'a'); drain_render();
+
+    CHECK_EQ(dut->emoji_suggest_active, 1, "suggest active for \\ha");
+    CHECK_EQ(dut->emoji_suggest_count, 1, "\\ha matches happy only");
+    CHECK_EQ(suggest_id(0), EMOJI_TOKEN_HAPPY, "\\ha candidate");
+}
+
+static void test_emoji_suggest_no_match_closes() {
+    printf("== test_emoji_suggest_no_match_closes\n");
+    reset();
+
+    for (char c : std::string("\\hz")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+
+    CHECK_EQ(dut->emoji_suggest_active, 0, "suggest closes on no match");
+    CHECK_EQ(dut->emoji_suggest_count, 0, "count clears on no match");
+}
+
+static void test_emoji_suggest_excludes_big_tokens() {
+    printf("== test_emoji_suggest_excludes_big_tokens\n");
+    reset();
+
+    send_key(KEY_CHAR, '\\'); drain_render();
+    send_key(KEY_CHAR, 'H');  drain_render();
+
+    CHECK_EQ(dut->emoji_suggest_active, 0, "\\H does not match big tokens");
+    CHECK_EQ(dut->emoji_suggest_count, 0, "\\H closes suggestion");
 }
 
 // Type "ab", LEFT, type "X" -> buffer "aXb", cursor=2, len=3.
@@ -1982,6 +2064,10 @@ int main(int argc, char** argv) {
     test_right_at_end_no_render();
     test_left_right_emit_move_cursor();
     test_scroll_keys_emit_render();
+    test_emoji_suggest_backslash_opens_all();
+    test_emoji_suggest_prefix_filters();
+    test_emoji_suggest_no_match_closes();
+    test_emoji_suggest_excludes_big_tokens();
     test_insert_in_middle();
     test_delete_in_middle();
     test_full_buffer_insert_dropped();

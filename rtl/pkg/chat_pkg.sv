@@ -171,6 +171,223 @@ package chat_pkg;
     localparam int POPUP_STICKER_PICKER_H_PX = 80;
 
     // -----------------------------------------------------------------
+    // Emoji backslash token metadata
+    // -----------------------------------------------------------------
+    localparam int EMOJI_TOKEN_COUNT   = 15;
+    localparam int EMOJI_TOKEN_ID_W    = $clog2(EMOJI_TOKEN_COUNT);
+    localparam int EMOJI_TOKEN_MAX_LEN = 7;   // longest token: "\mairuo"
+
+    localparam int EMOJI_SUGGEST_MAX     = EMOJI_TOKEN_COUNT;
+    localparam int EMOJI_SUGGEST_COUNT_W = $clog2(EMOJI_SUGGEST_MAX + 1);
+
+    typedef logic [EMOJI_TOKEN_ID_W-1:0] emoji_token_id_t;
+
+    localparam emoji_token_id_t EMOJI_TOKEN_HAPPY       = emoji_token_id_t'(0);
+    localparam emoji_token_id_t EMOJI_TOKEN_SAD         = emoji_token_id_t'(1);
+    localparam emoji_token_id_t EMOJI_TOKEN_HEART       = emoji_token_id_t'(2);
+    localparam emoji_token_id_t EMOJI_TOKEN_OK          = emoji_token_id_t'(3);
+    localparam emoji_token_id_t EMOJI_TOKEN_LAUGH       = emoji_token_id_t'(4);
+    localparam emoji_token_id_t EMOJI_TOKEN_WINK        = emoji_token_id_t'(5);
+    localparam emoji_token_id_t EMOJI_TOKEN_ANGRY       = emoji_token_id_t'(6);
+    localparam emoji_token_id_t EMOJI_TOKEN_STAR        = emoji_token_id_t'(7);
+    localparam emoji_token_id_t EMOJI_TOKEN_FIRE        = emoji_token_id_t'(8);
+    localparam emoji_token_id_t EMOJI_TOKEN_YES         = emoji_token_id_t'(9);
+    localparam emoji_token_id_t EMOJI_TOKEN_NO          = emoji_token_id_t'(10);
+    localparam emoji_token_id_t EMOJI_TOKEN_UP          = emoji_token_id_t'(11);
+    localparam emoji_token_id_t EMOJI_TOKEN_DOWN        = emoji_token_id_t'(12);
+    localparam emoji_token_id_t EMOJI_TOKEN_DOGE        = emoji_token_id_t'(13);
+    localparam emoji_token_id_t EMOJI_TOKEN_MAIRUO      = emoji_token_id_t'(14);
+
+    function automatic logic emoji_token_valid(input emoji_token_id_t token_id);
+        begin
+            emoji_token_valid = (int'(token_id) < EMOJI_TOKEN_COUNT);
+        end
+    endfunction
+
+    function automatic msg_len_t emoji_token_len(input emoji_token_id_t token_id);
+        begin
+            unique case (token_id)
+                EMOJI_TOKEN_HAPPY:       emoji_token_len = msg_len_t'(6);
+                EMOJI_TOKEN_SAD:         emoji_token_len = msg_len_t'(4);
+                EMOJI_TOKEN_HEART:       emoji_token_len = msg_len_t'(6);
+                EMOJI_TOKEN_OK:          emoji_token_len = msg_len_t'(3);
+                EMOJI_TOKEN_LAUGH:       emoji_token_len = msg_len_t'(6);
+                EMOJI_TOKEN_WINK:        emoji_token_len = msg_len_t'(5);
+                EMOJI_TOKEN_ANGRY:       emoji_token_len = msg_len_t'(6);
+                EMOJI_TOKEN_STAR:        emoji_token_len = msg_len_t'(5);
+                EMOJI_TOKEN_FIRE:        emoji_token_len = msg_len_t'(5);
+                EMOJI_TOKEN_YES:         emoji_token_len = msg_len_t'(4);
+                EMOJI_TOKEN_NO:          emoji_token_len = msg_len_t'(3);
+                EMOJI_TOKEN_UP:          emoji_token_len = msg_len_t'(3);
+                EMOJI_TOKEN_DOWN:        emoji_token_len = msg_len_t'(5);
+                EMOJI_TOKEN_DOGE:        emoji_token_len = msg_len_t'(5);
+                EMOJI_TOKEN_MAIRUO:      emoji_token_len = msg_len_t'(7);
+                default:                 emoji_token_len = '0;
+            endcase
+        end
+    endfunction
+
+    function automatic byte_t emoji_token_char(
+        input emoji_token_id_t token_id,
+        input logic [3:0]      char_idx
+    );
+        begin
+            emoji_token_char = 8'h20;
+            unique case (token_id)
+                EMOJI_TOKEN_HAPPY: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "h";
+                        4'd2: emoji_token_char = "a";
+                        4'd3: emoji_token_char = "p";
+                        4'd4: emoji_token_char = "p";
+                        4'd5: emoji_token_char = "y";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_SAD: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "s";
+                        4'd2: emoji_token_char = "a";
+                        4'd3: emoji_token_char = "d";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_HEART: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "h";
+                        4'd2: emoji_token_char = "e";
+                        4'd3: emoji_token_char = "a";
+                        4'd4: emoji_token_char = "r";
+                        4'd5: emoji_token_char = "t";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_OK: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "o";
+                        4'd2: emoji_token_char = "k";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_LAUGH: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "l";
+                        4'd2: emoji_token_char = "a";
+                        4'd3: emoji_token_char = "u";
+                        4'd4: emoji_token_char = "g";
+                        4'd5: emoji_token_char = "h";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_WINK: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "w";
+                        4'd2: emoji_token_char = "i";
+                        4'd3: emoji_token_char = "n";
+                        4'd4: emoji_token_char = "k";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_ANGRY: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "a";
+                        4'd2: emoji_token_char = "n";
+                        4'd3: emoji_token_char = "g";
+                        4'd4: emoji_token_char = "r";
+                        4'd5: emoji_token_char = "y";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_STAR: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "s";
+                        4'd2: emoji_token_char = "t";
+                        4'd3: emoji_token_char = "a";
+                        4'd4: emoji_token_char = "r";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_FIRE: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "f";
+                        4'd2: emoji_token_char = "i";
+                        4'd3: emoji_token_char = "r";
+                        4'd4: emoji_token_char = "e";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_YES: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "y";
+                        4'd2: emoji_token_char = "e";
+                        4'd3: emoji_token_char = "s";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_NO: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "n";
+                        4'd2: emoji_token_char = "o";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_UP: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "u";
+                        4'd2: emoji_token_char = "p";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_DOWN: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "d";
+                        4'd2: emoji_token_char = "o";
+                        4'd3: emoji_token_char = "w";
+                        4'd4: emoji_token_char = "n";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_DOGE: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "d";
+                        4'd2: emoji_token_char = "o";
+                        4'd3: emoji_token_char = "g";
+                        4'd4: emoji_token_char = "e";
+                        default: ;
+                    endcase
+                end
+                EMOJI_TOKEN_MAIRUO: begin
+                    unique case (char_idx)
+                        4'd0: emoji_token_char = 8'h5C;
+                        4'd1: emoji_token_char = "m";
+                        4'd2: emoji_token_char = "a";
+                        4'd3: emoji_token_char = "i";
+                        4'd4: emoji_token_char = "r";
+                        4'd5: emoji_token_char = "u";
+                        4'd6: emoji_token_char = "o";
+                        default: ;
+                    endcase
+                end
+                default: ;
+            endcase
+        end
+    endfunction
+
+    // -----------------------------------------------------------------
     // comm internal : link-layer frame types
     //   Width matches README: TYPE field is 3 bits
     // -----------------------------------------------------------------

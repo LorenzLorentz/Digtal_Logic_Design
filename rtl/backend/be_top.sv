@@ -117,6 +117,12 @@ module be_top
     output logic [9:0]                 ui_popup_x,
     output logic [9:0]                 ui_popup_y,
 
+    // ---- backend-owned emoji token suggestions ----
+    output logic                       emoji_suggest_active,
+    output logic [EMOJI_SUGGEST_COUNT_W-1:0] emoji_suggest_count,
+    output logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] emoji_suggest_ids,
+    output msg_len_t                   emoji_suggest_anchor_pos,
+
     // ---- comm -> backend : remote frame ----
     input  logic                       cm_rx_valid,
     output logic                       cm_rx_ready,
@@ -305,6 +311,13 @@ module be_top
     logic [9:0]                         popup_x_q;
     logic [9:0]                         popup_y_q;
 
+    logic                               emoji_suggest_tracking_q;
+    logic                               emoji_suggest_active_q;
+    logic [EMOJI_SUGGEST_COUNT_W-1:0]   emoji_suggest_count_q;
+    logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0]
+                                        emoji_suggest_ids_q;
+    msg_len_t                           emoji_suggest_anchor_q;
+
     localparam logic [9:0] STICKER_PICKER_X = 10'd240;
     localparam logic [9:0] STICKER_PICKER_Y = 10'd424;
 
@@ -347,6 +360,85 @@ module be_top
         && (click_popup_dx < 10'(POPUP_STICKER_PICKER_W_PX))
         && (click_popup_dy < 10'(POPUP_STICKER_PICKER_H_PX));
     assign click_sticker_anchor = sticker_anchor_for_col(click_sticker_col);
+
+    // Emoji suggestion matcher. This deliberately uses a fixed small token
+    // table instead of scanning the full 128-byte line. The only dynamic
+    // line_buf reads are the at-most-12 bytes in the active "\..." prefix.
+    logic                               suggest_recompute;
+    logic                               suggest_tracking_base;
+    msg_len_t                           suggest_anchor_base;
+    msg_len_t                           suggest_cursor_base;
+    msg_len_t                           suggest_prefix_len;
+    logic                               suggest_prefix_valid;
+    byte_t                              suggest_prefix_byte [EMOJI_TOKEN_MAX_LEN];
+    logic [EMOJI_SUGGEST_COUNT_W-1:0]   suggest_count_calc;
+    logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0]
+                                        suggest_ids_calc;
+    logic                               suggest_active_calc;
+
+    always_comb begin
+        suggest_recompute =
+            (state_q == S_RENDER_INSERT)
+         || (state_q == S_RENDER_DELETE)
+         || (state_q == S_RENDER_MOVE_CURSOR)
+         || ((state_q == S_MOUSE_CLICK) && click_walk_done_q);
+
+        suggest_tracking_base = emoji_suggest_tracking_q;
+        suggest_anchor_base   = emoji_suggest_anchor_q;
+        suggest_cursor_base   = cursor_pos_q;
+
+        if ((state_q == S_RENDER_INSERT)
+         && (last_event_ascii_q == 8'h5C)
+         && (cursor_pos_q != '0)) begin
+            suggest_tracking_base = 1'b1;
+            suggest_anchor_base   = cursor_pos_q - LEN_WIDTH'(1);
+        end
+
+        suggest_prefix_len = suggest_cursor_base - suggest_anchor_base;
+        suggest_prefix_valid =
+            suggest_tracking_base
+            && (suggest_cursor_base > suggest_anchor_base)
+            && (suggest_cursor_base <= len_q)
+            && (suggest_prefix_len <= LEN_WIDTH'(EMOJI_TOKEN_MAX_LEN));
+
+        for (int i = 0; i < EMOJI_TOKEN_MAX_LEN; i++) begin
+            if (suggest_prefix_valid
+             && (i < int'(suggest_prefix_len))) begin
+                suggest_prefix_byte[i] =
+                    line_buf[LINE_IDX_W'(suggest_anchor_base + LEN_WIDTH'(i))];
+            end else begin
+                suggest_prefix_byte[i] = 8'h00;
+            end
+        end
+
+        suggest_count_calc  = '0;
+        suggest_ids_calc    = '0;
+        suggest_active_calc = 1'b0;
+
+        for (int t = 0; t < EMOJI_TOKEN_COUNT; t++) begin
+            automatic emoji_token_id_t token_id;
+            automatic logic            token_match;
+            token_id    = emoji_token_id_t'(t);
+            token_match =
+                suggest_prefix_valid
+                && (emoji_token_valid(token_id))
+                && (suggest_prefix_len <= emoji_token_len(token_id));
+
+            for (int c = 0; c < EMOJI_TOKEN_MAX_LEN; c++) begin
+                if ((c < int'(suggest_prefix_len))
+                 && (suggest_prefix_byte[c] != emoji_token_char(token_id, 4'(c))))
+                    token_match = 1'b0;
+            end
+
+            if (token_match) begin
+                suggest_ids_calc[
+                    suggest_count_calc * EMOJI_TOKEN_ID_W +: EMOJI_TOKEN_ID_W
+                ] = token_id;
+                suggest_count_calc  = suggest_count_calc + 1'b1;
+                suggest_active_calc = 1'b1;
+            end
+        end
+    end
 
     // Token encoder: one byte per cycle, single-step.
     //
@@ -944,6 +1036,10 @@ module be_top
     assign ui_popup_type   = popup_type_q;
     assign ui_popup_x      = popup_x_q;
     assign ui_popup_y      = popup_y_q;
+    assign emoji_suggest_active     = emoji_suggest_active_q;
+    assign emoji_suggest_count      = emoji_suggest_count_q;
+    assign emoji_suggest_ids        = emoji_suggest_ids_q;
+    assign emoji_suggest_anchor_pos = emoji_suggest_anchor_q;
 
     // -----------------------------------------------------------------
     // Username latch + store_clear pulse
@@ -1000,6 +1096,11 @@ module be_top
             popup_type_q       <= 2'(POPUP_NONE);
             popup_x_q          <= '0;
             popup_y_q          <= '0;
+            emoji_suggest_tracking_q <= 1'b0;
+            emoji_suggest_active_q   <= 1'b0;
+            emoji_suggest_count_q    <= '0;
+            emoji_suggest_ids_q      <= '0;
+            emoji_suggest_anchor_q   <= '0;
             for (int i = 0; i < MAX_LINE_LEN; i++) line_buf[i]    <= 8'd0;
         end else begin
             state_q       <= state_d;
@@ -1275,9 +1376,36 @@ module be_top
                 end
             end
 
+            if (suggest_recompute) begin
+                emoji_suggest_active_q   <= suggest_active_calc;
+                emoji_suggest_count_q    <= suggest_count_calc;
+                emoji_suggest_ids_q      <= suggest_ids_calc;
+                emoji_suggest_tracking_q <= suggest_active_calc;
+                emoji_suggest_anchor_q   <= suggest_active_calc
+                                            ? suggest_anchor_base : '0;
+            end
+
+            if ((state_q == S_IDLE) && accept_io) begin
+                if ((key_type_e'(io_key_type) == KEY_ENTER)
+                 || (key_type_e'(io_key_type) == KEY_ESC)
+                 || ((key_type_e'(io_key_type) == KEY_CHAR)
+                  && (io_key_ascii == KEY_CTRL_E))) begin
+                    emoji_suggest_tracking_q <= 1'b0;
+                    emoji_suggest_active_q   <= 1'b0;
+                    emoji_suggest_count_q    <= '0;
+                    emoji_suggest_ids_q      <= '0;
+                    emoji_suggest_anchor_q   <= '0;
+                end
+            end
+
             if (state_q == S_STICKER_COMMIT) begin
                 wr_ptr_q      <= wr_ptr_q + 1'b1;
                 next_msg_id_q <= next_msg_id_q + 8'd1;
+                emoji_suggest_tracking_q <= 1'b0;
+                emoji_suggest_active_q   <= 1'b0;
+                emoji_suggest_count_q    <= '0;
+                emoji_suggest_ids_q      <= '0;
+                emoji_suggest_anchor_q   <= '0;
             end
 
             // -------------------------------------------------------------
@@ -1290,6 +1418,11 @@ module be_top
                 len_q        <= '0;
                 cursor_pos_q <= '0;
                 input_newline_count_q <= '0;
+                emoji_suggest_tracking_q <= 1'b0;
+                emoji_suggest_active_q   <= 1'b0;
+                emoji_suggest_count_q    <= '0;
+                emoji_suggest_ids_q      <= '0;
+                emoji_suggest_anchor_q   <= '0;
             end
 
         end

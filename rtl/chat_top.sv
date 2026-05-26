@@ -186,6 +186,10 @@ module chat_top
     msg_len_t                      be_store_rd_len;
     logic [MAX_MSG_LEN*8-1:0]      be_store_rd_payload;
     logic [1:0]                    be_conn_state;
+    logic                          be_emoji_suggest_active;
+    logic [EMOJI_SUGGEST_COUNT_W-1:0] be_emoji_suggest_count;
+    logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] be_emoji_suggest_ids;
+    msg_len_t                      be_emoji_suggest_anchor_pos;
     /* verilator lint_on UNUSEDSIGNAL */
 
     be_top #(
@@ -208,6 +212,10 @@ module chat_top
         .ui_popup_type          (ui_popup_type),
         .ui_popup_x             (ui_popup_x),
         .ui_popup_y             (ui_popup_y),
+        .emoji_suggest_active   (be_emoji_suggest_active),
+        .emoji_suggest_count    (be_emoji_suggest_count),
+        .emoji_suggest_ids      (be_emoji_suggest_ids),
+        .emoji_suggest_anchor_pos(be_emoji_suggest_anchor_pos),
         .cm_rx_valid            (cm_rx_valid),
         .cm_rx_ready            (cm_rx_ready),
         .cm_rx_frame_type       (cm_rx_frame_type),
