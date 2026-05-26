@@ -244,6 +244,31 @@ package fe_pkg;
     localparam logic [7:0] COL_SPLASH_FG_G  = 8'hF0;
     localparam logic [7:0] COL_SPLASH_FG_B  = 8'hF0;
 
+    // Popup overlay geometry. These are pixel units, not text cells.
+    localparam int POPUP_BORDER_PX      = 2;
+    localparam int POPUP_MSG_MENU_W_PX  = 112;
+    localparam int POPUP_MSG_ITEM_H_PX  = 24;
+    localparam int POPUP_MSG_MENU_H_PX  = POPUP_BORDER_PX * 2
+                                          + POPUP_MSG_ITEM_H_PX * 2;
+    localparam int POPUP_MSG_TEXT_X_PX  = 12;
+    localparam int POPUP_MSG_TEXT_Y_PX  = 4;
+    localparam int POPUP_STICKER_W_PX   = 320;
+    localparam int POPUP_STICKER_H_PX   = 80;
+
+    // Popup overlay colours.
+    localparam logic [7:0] COL_POPUP_BG_R     = 8'h18;
+    localparam logic [7:0] COL_POPUP_BG_G     = 8'h1C;
+    localparam logic [7:0] COL_POPUP_BG_B     = 8'h24;
+    localparam logic [7:0] COL_POPUP_BORDER_R = 8'hC8;
+    localparam logic [7:0] COL_POPUP_BORDER_G = 8'hD0;
+    localparam logic [7:0] COL_POPUP_BORDER_B = 8'hD8;
+    localparam logic [7:0] COL_POPUP_HOVER_R  = 8'h2B;
+    localparam logic [7:0] COL_POPUP_HOVER_G  = 8'h51;
+    localparam logic [7:0] COL_POPUP_HOVER_B  = 8'h7A;
+    localparam logic [7:0] COL_POPUP_TEXT_R   = 8'hF4;
+    localparam logic [7:0] COL_POPUP_TEXT_G   = 8'hF7;
+    localparam logic [7:0] COL_POPUP_TEXT_B   = 8'hFB;
+
     // -----------------------------------------------------------------
     // Font ROM file path
     // ---

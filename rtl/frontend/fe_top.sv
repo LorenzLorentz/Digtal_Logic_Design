@@ -73,6 +73,12 @@ module fe_top
     input  logic [9:0]                 mouse_x,
     input  logic [9:0]                 mouse_y,
 
+    // Popup overlay state (chat-clock domain; CDC'd to pixel clock below).
+    input  logic                       ui_popup_active,
+    input  logic [1:0]                 ui_popup_type,
+    input  logic [9:0]                 ui_popup_x,
+    input  logic [9:0]                 ui_popup_y,
+
     // Observability read port (independent BRAM port, used by sim).
     input  logic [FE_ROW_W-1:0]        rd_row,
     input  logic [FE_COL_W-1:0]        rd_col,
@@ -206,6 +212,10 @@ module fe_top
     logic [INPUT_SCROLL_W-1:0] input_scroll_offset_pix;
     logic [9:0]                mouse_x_pix;
     logic [9:0]                mouse_y_pix;
+    logic                      ui_popup_active_pix;
+    logic [1:0]                ui_popup_type_pix;
+    logic [9:0]                ui_popup_x_pix;
+    logic [9:0]                ui_popup_y_pix;
 
     sync_2ff #(.RST_VAL(1'b0)) u_sync_cs0 (
         .clk(clk_pix), .rst_n(rst_n),
@@ -273,7 +283,34 @@ module fe_top
                 .sync_out(mouse_y_pix[gi])
             );
         end
+        for (gi = 0; gi < 2; gi++) begin : g_sync_popup_type
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_popup_type (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(ui_popup_type[gi]),
+                .sync_out(ui_popup_type_pix[gi])
+            );
+        end
+        for (gi = 0; gi < 10; gi++) begin : g_sync_popup_x
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_popup_x (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(ui_popup_x[gi]),
+                .sync_out(ui_popup_x_pix[gi])
+            );
+        end
+        for (gi = 0; gi < 10; gi++) begin : g_sync_popup_y
+            sync_2ff #(.RST_VAL(1'b0)) u_sync_popup_y (
+                .clk(clk_pix), .rst_n(rst_n),
+                .async_in(ui_popup_y[gi]),
+                .sync_out(ui_popup_y_pix[gi])
+            );
+        end
     endgenerate
+
+    sync_2ff #(.RST_VAL(1'b0)) u_sync_popup_active (
+        .clk(clk_pix), .rst_n(rst_n),
+        .async_in(ui_popup_active),
+        .sync_out(ui_popup_active_pix)
+    );
 
     fe_scan #(
         .ENABLE_SRAM_ASSETS(ENABLE_SRAM_ASSETS)
@@ -303,6 +340,10 @@ module fe_top
         .input_scroll_offset(input_scroll_offset_pix),
         .mouse_x            (mouse_x_pix),
         .mouse_y            (mouse_y_pix),
+        .popup_active       (ui_popup_active_pix),
+        .popup_type         (ui_popup_type_pix),
+        .popup_x            (ui_popup_x_pix),
+        .popup_y            (ui_popup_y_pix),
         .video_red     (video_red),
         .video_green   (video_green),
         .video_blue    (video_blue),

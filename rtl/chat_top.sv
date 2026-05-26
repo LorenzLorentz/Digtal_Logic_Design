@@ -167,6 +167,10 @@ module chat_top
     msg_len_t                      be_render_peer_name_len;
     logic [MAX_NAME_LEN*8-1:0]     be_render_peer_name;
 
+    logic                          ui_popup_active;
+    logic [1:0]                    ui_popup_type;
+    logic [9:0]                    ui_popup_x, ui_popup_y;
+
     // -----------------------------------------------------------------
     // be_top observability ports -- unused at chip top level. Tied off
     // so the chip-level netlist stays clean. lint_off so verilator
@@ -199,6 +203,10 @@ module chat_top
         .io_mouse_click_x       (mouse_x),
         .io_mouse_click_y       (mouse_y),
         .fe_input_scroll_offset (fe_input_scroll_offset_obs),
+        .ui_popup_active        (ui_popup_active),
+        .ui_popup_type          (ui_popup_type),
+        .ui_popup_x             (ui_popup_x),
+        .ui_popup_y             (ui_popup_y),
         .cm_rx_valid            (cm_rx_valid),
         .cm_rx_ready            (cm_rx_ready),
         .cm_rx_frame_type       (cm_rx_frame_type),
@@ -327,6 +335,10 @@ module chat_top
         .asset_sram_data         (asset_sram_data),
         .mouse_x                 (mouse_x),
         .mouse_y                 (mouse_y),
+        .ui_popup_active         (ui_popup_active),
+        .ui_popup_type           (ui_popup_type),
+        .ui_popup_x              (ui_popup_x),
+        .ui_popup_y              (ui_popup_y),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (fe_rd_code),

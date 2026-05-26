@@ -25,6 +25,21 @@ static constexpr uint8_t LOCAL_B  = 0x23;
 static constexpr uint8_t FG_R = 0xFF;
 static constexpr uint8_t FG_G = 0xFF;
 static constexpr uint8_t FG_B = 0xFF;
+static constexpr uint8_t POPUP_BG_R     = 0x18;
+static constexpr uint8_t POPUP_BG_G     = 0x1C;
+static constexpr uint8_t POPUP_BG_B     = 0x24;
+static constexpr uint8_t POPUP_BORDER_R = 0xC8;
+static constexpr uint8_t POPUP_BORDER_G = 0xD0;
+static constexpr uint8_t POPUP_BORDER_B = 0xD8;
+static constexpr uint8_t POPUP_HOVER_R  = 0x2B;
+static constexpr uint8_t POPUP_HOVER_G  = 0x51;
+static constexpr uint8_t POPUP_HOVER_B  = 0x7A;
+static constexpr uint8_t POPUP_TEXT_R   = 0xF4;
+static constexpr uint8_t POPUP_TEXT_G   = 0xF7;
+static constexpr uint8_t POPUP_TEXT_B   = 0xFB;
+
+static constexpr uint8_t POPUP_NONE = 0;
+static constexpr uint8_t POPUP_MSG_MENU = 1;
 
 static constexpr uint8_t SPRITE_BL = 0xF3;
 static constexpr uint8_t SPRITE_BR = 0xF4;
@@ -86,6 +101,10 @@ static void reset() {
     dut->input_scroll_offset = 0;
     dut->mouse_x = 1023;
     dut->mouse_y = 1023;
+    dut->popup_active = 0;
+    dut->popup_type = POPUP_NONE;
+    dut->popup_x = 0;
+    dut->popup_y = 0;
     clear_avatar_attrs();
 
     tick();
@@ -206,6 +225,56 @@ static void test_avatar_request_only_first_row() {
              "local next row bg addr");
 }
 
+static void test_popup_menu_overlay() {
+    printf("== test_popup_menu_overlay\n");
+    reset();
+
+    dut->popup_active = 1;
+    dut->popup_type = POPUP_MSG_MENU;
+    dut->popup_x = 100;
+    dut->popup_y = 120;
+    dut->mouse_x = 1023;
+    dut->mouse_y = 1023;
+
+    drive_visible_pixel(100, 120, BUBBLE_ATTR_NONE);
+    CHECK_EQ(dut->video_red,   POPUP_BORDER_R, "popup border red");
+    CHECK_EQ(dut->video_green, POPUP_BORDER_G, "popup border green");
+    CHECK_EQ(dut->video_blue,  POPUP_BORDER_B, "popup border blue");
+
+    drive_visible_pixel(108, 132, BUBBLE_ATTR_NONE);
+    CHECK_EQ(dut->video_red,   POPUP_BG_R, "popup bg red");
+    CHECK_EQ(dut->video_green, POPUP_BG_G, "popup bg green");
+    CHECK_EQ(dut->video_blue,  POPUP_BG_B, "popup bg blue");
+
+    dut->mouse_x = 108;
+    dut->mouse_y = 150;  // inside item 1, away from the checked pixel
+    drive_visible_pixel(180, 150, BUBBLE_ATTR_NONE);
+    CHECK_EQ(dut->video_red,   POPUP_HOVER_R, "popup hover red");
+    CHECK_EQ(dut->video_green, POPUP_HOVER_G, "popup hover green");
+    CHECK_EQ(dut->video_blue,  POPUP_HOVER_B, "popup hover blue");
+}
+
+static void test_popup_menu_text_uses_glyph_rom_bus() {
+    printf("== test_popup_menu_text_uses_glyph_rom_bus\n");
+    reset();
+
+    dut->popup_active = 1;
+    dut->popup_type = POPUP_MSG_MENU;
+    dut->popup_x = 100;
+    dut->popup_y = 120;
+    dut->mouse_x = 1023;
+    dut->mouse_y = 1023;
+
+    // First item text starts at x+12, y+2+4. With gx=0 and glyph_row[7]
+    // set, the popup text colour should be selected and glyph_code should
+    // request "Q".
+    drive_visible_pixel(112, 126, BUBBLE_ATTR_NONE, ' ', 0x80);
+    CHECK_EQ(dut->glyph_code, (uint8_t)'Q', "popup first label glyph");
+    CHECK_EQ(dut->video_red,   POPUP_TEXT_R, "popup text red");
+    CHECK_EQ(dut->video_green, POPUP_TEXT_G, "popup text green");
+    CHECK_EQ(dut->video_blue,  POPUP_TEXT_B, "popup text blue");
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vfe_scan d;
@@ -214,6 +283,8 @@ int main(int argc, char** argv) {
     test_bubble_background_attr();
     test_bubble_fill_clips_to_edge_outline();
     test_avatar_request_only_first_row();
+    test_popup_menu_overlay();
+    test_popup_menu_text_uses_glyph_rom_bus();
 
     if (g_failures == 0) { printf("\nPASS  (all checks)\n"); return 0; }
     printf("\nFAIL  %d check(s) failed\n", g_failures);

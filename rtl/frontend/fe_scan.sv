@@ -82,6 +82,12 @@ module fe_scan
     input  logic [9:0]                mouse_x,
     input  logic [9:0]                mouse_y,
 
+    // ---- Popup overlay (pixel-clock domain) ----
+    input  logic                      popup_active,
+    input  logic [1:0]                popup_type,
+    input  logic [9:0]                popup_x,
+    input  logic [9:0]                popup_y,
+
     // ---- RGB / sync out ----
     output logic [7:0]             video_red,
     output logic [7:0]             video_green,
@@ -135,6 +141,35 @@ module fe_scan
     assign s0_screen_col = hdata >> 3;
     assign s0_gy         = vdata[3:0];
     assign s0_gx         = hdata[2:0];
+
+    function automatic byte_t popup_msg_menu_char(
+        input logic       item_sel,
+        input logic [3:0] char_idx
+    );
+        begin
+            popup_msg_menu_char = 8'h20;
+            if (!item_sel) begin
+                unique case (char_idx)
+                    4'd0: popup_msg_menu_char = "Q";
+                    4'd1: popup_msg_menu_char = "u";
+                    4'd2: popup_msg_menu_char = "o";
+                    4'd3: popup_msg_menu_char = "t";
+                    4'd4: popup_msg_menu_char = "e";
+                    default: popup_msg_menu_char = 8'h20;
+                endcase
+            end else begin
+                unique case (char_idx)
+                    4'd0: popup_msg_menu_char = "R";
+                    4'd1: popup_msg_menu_char = "e";
+                    4'd2: popup_msg_menu_char = "c";
+                    4'd3: popup_msg_menu_char = "a";
+                    4'd4: popup_msg_menu_char = "l";
+                    4'd5: popup_msg_menu_char = "l";
+                    default: popup_msg_menu_char = 8'h20;
+                endcase
+            end
+        end
+    endfunction
 
     // Map screen row -> text_ram physical row.
     // History rows are mapped through the ring+scroll formula:
@@ -210,6 +245,135 @@ module fe_scan
 
     assign rd_row = s0_text_ram_row;
     assign rd_col = FE_COL_W'(s0_screen_col);
+
+    // -----------------------------------------------------------------
+    // Popup overlay decode (stage 0)
+    // -----------------------------------------------------------------
+    logic [HWIDTH-1:0] popup_w_s0;
+    logic [HWIDTH-1:0] popup_h_s0;
+    logic [HWIDTH-1:0] popup_dx_s0;
+    logic [HWIDTH-1:0] popup_dy_s0;
+    logic [HWIDTH-1:0] popup_mouse_dx;
+    logic [HWIDTH-1:0] popup_mouse_dy;
+    logic              popup_is_msg_menu_s0;
+    logic              popup_is_sticker_s0;
+    logic              popup_in_region_s0;
+    logic              popup_border_s0;
+    logic              popup_grid_line_s0;
+    logic              popup_item0_s0;
+    logic              popup_item1_s0;
+    logic              popup_hover0;
+    logic              popup_hover1;
+    logic              popup_item_hover_s0;
+    logic              popup_text0_s0;
+    logic              popup_text1_s0;
+    logic              popup_label_active_s0;
+    byte_t             popup_label_char_s0;
+    logic [2:0]        popup_label_gx_s0;
+    logic [3:0]        popup_label_gy_s0;
+    logic [3:0]        popup_label_col_s0;
+    logic [HWIDTH-1:0] popup_label_dx_s0;
+
+    always_comb begin
+        popup_w_s0 = '0;
+        popup_h_s0 = '0;
+        unique case (popup_type_e'(popup_type))
+            POPUP_MSG_MENU: begin
+                popup_w_s0 = HWIDTH'(POPUP_MSG_MENU_W_PX);
+                popup_h_s0 = HWIDTH'(POPUP_MSG_MENU_H_PX);
+            end
+            POPUP_STICKER_PICKER: begin
+                popup_w_s0 = HWIDTH'(POPUP_STICKER_W_PX);
+                popup_h_s0 = HWIDTH'(POPUP_STICKER_H_PX);
+            end
+            default: begin
+                popup_w_s0 = '0;
+                popup_h_s0 = '0;
+            end
+        endcase
+    end
+
+    assign popup_dx_s0 = hdata - HWIDTH'(popup_x);
+    assign popup_dy_s0 = vdata - HWIDTH'(popup_y);
+    assign popup_mouse_dx = HWIDTH'(mouse_x) - HWIDTH'(popup_x);
+    assign popup_mouse_dy = HWIDTH'(mouse_y) - HWIDTH'(popup_y);
+    assign popup_is_msg_menu_s0 =
+        popup_active && (popup_type == 2'(POPUP_MSG_MENU));
+    assign popup_is_sticker_s0 =
+        popup_active && (popup_type == 2'(POPUP_STICKER_PICKER));
+    assign popup_in_region_s0 =
+        popup_active
+        && (popup_type != 2'(POPUP_NONE))
+        && (popup_dx_s0 < popup_w_s0)
+        && (popup_dy_s0 < popup_h_s0);
+    assign popup_border_s0 =
+        popup_in_region_s0
+        && ((popup_dx_s0 < HWIDTH'(POPUP_BORDER_PX))
+         || (popup_dy_s0 < HWIDTH'(POPUP_BORDER_PX))
+         || (popup_dx_s0 >= popup_w_s0 - HWIDTH'(POPUP_BORDER_PX))
+         || (popup_dy_s0 >= popup_h_s0 - HWIDTH'(POPUP_BORDER_PX)));
+
+    assign popup_item0_s0 =
+        popup_is_msg_menu_s0
+        && (popup_dx_s0 >= HWIDTH'(POPUP_BORDER_PX))
+        && (popup_dx_s0 <  HWIDTH'(POPUP_MSG_MENU_W_PX - POPUP_BORDER_PX))
+        && (popup_dy_s0 >= HWIDTH'(POPUP_BORDER_PX))
+        && (popup_dy_s0 <  HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX));
+    assign popup_item1_s0 =
+        popup_is_msg_menu_s0
+        && (popup_dx_s0 >= HWIDTH'(POPUP_BORDER_PX))
+        && (popup_dx_s0 <  HWIDTH'(POPUP_MSG_MENU_W_PX - POPUP_BORDER_PX))
+        && (popup_dy_s0 >= HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX))
+        && (popup_dy_s0 <  HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX * 2));
+
+    assign popup_hover0 =
+        popup_is_msg_menu_s0
+        && (popup_mouse_dx >= HWIDTH'(POPUP_BORDER_PX))
+        && (popup_mouse_dx <  HWIDTH'(POPUP_MSG_MENU_W_PX - POPUP_BORDER_PX))
+        && (popup_mouse_dy >= HWIDTH'(POPUP_BORDER_PX))
+        && (popup_mouse_dy <  HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX));
+    assign popup_hover1 =
+        popup_is_msg_menu_s0
+        && (popup_mouse_dx >= HWIDTH'(POPUP_BORDER_PX))
+        && (popup_mouse_dx <  HWIDTH'(POPUP_MSG_MENU_W_PX - POPUP_BORDER_PX))
+        && (popup_mouse_dy >= HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX))
+        && (popup_mouse_dy <  HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX * 2));
+    assign popup_item_hover_s0 =
+        (popup_item0_s0 && popup_hover0) || (popup_item1_s0 && popup_hover1);
+
+    assign popup_grid_line_s0 =
+        popup_is_sticker_s0
+        && popup_in_region_s0
+        && !popup_border_s0
+        && ((popup_dx_s0[5:0] < 6'(POPUP_BORDER_PX))
+         || (popup_dy_s0[5:0] < 6'(POPUP_BORDER_PX)));
+
+    assign popup_text0_s0 =
+        popup_is_msg_menu_s0
+        && (popup_dx_s0 >= HWIDTH'(POPUP_MSG_TEXT_X_PX))
+        && (popup_dx_s0 <  HWIDTH'(POPUP_MSG_TEXT_X_PX + 6 * 8))
+        && (popup_dy_s0 >= HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_TEXT_Y_PX))
+        && (popup_dy_s0 <  HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_TEXT_Y_PX + 16));
+    assign popup_text1_s0 =
+        popup_is_msg_menu_s0
+        && (popup_dx_s0 >= HWIDTH'(POPUP_MSG_TEXT_X_PX))
+        && (popup_dx_s0 <  HWIDTH'(POPUP_MSG_TEXT_X_PX + 6 * 8))
+        && (popup_dy_s0 >= HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX
+                                    + POPUP_MSG_TEXT_Y_PX))
+        && (popup_dy_s0 <  HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX
+                                    + POPUP_MSG_TEXT_Y_PX + 16));
+    assign popup_label_active_s0 = popup_text0_s0 || popup_text1_s0;
+    assign popup_label_dx_s0 =
+        popup_dx_s0 - HWIDTH'(POPUP_MSG_TEXT_X_PX);
+    assign popup_label_col_s0 =
+        4'(popup_label_dx_s0 >> 3);
+    assign popup_label_char_s0 =
+        popup_msg_menu_char(popup_text1_s0, popup_label_col_s0);
+    assign popup_label_gx_s0 = popup_label_dx_s0[2:0];
+    assign popup_label_gy_s0 = popup_text1_s0
+        ? 4'(popup_dy_s0 - HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX
+                                    + POPUP_MSG_TEXT_Y_PX))
+        : 4'(popup_dy_s0 - HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_TEXT_Y_PX));
 
     // True for the leftover 8 px past the last input row -- used to blank
     // the glyph so this strip renders as a solid titlebar-blue band.
@@ -329,6 +493,14 @@ module fe_scan
     logic [31:0]       s1_asset_sram_data;
     logic [1:0]        s1_rd_attr;
     logic              s1_mouse_pointer_on;
+    logic              s1_popup_in_region;
+    logic              s1_popup_border;
+    logic              s1_popup_grid_line;
+    logic              s1_popup_item_hover;
+    logic              s1_popup_label_active;
+    byte_t             s1_popup_label_char;
+    logic [2:0]        s1_popup_label_gx;
+    logic [3:0]        s1_popup_label_gy;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -351,6 +523,14 @@ module fe_scan
             s1_asset_sram_data     <= 32'h0000_0000;
             s1_rd_attr             <= BUBBLE_ATTR_NONE;
             s1_mouse_pointer_on    <= 1'b0;
+            s1_popup_in_region     <= 1'b0;
+            s1_popup_border        <= 1'b0;
+            s1_popup_grid_line     <= 1'b0;
+            s1_popup_item_hover    <= 1'b0;
+            s1_popup_label_active  <= 1'b0;
+            s1_popup_label_char    <= 8'h20;
+            s1_popup_label_gx      <= '0;
+            s1_popup_label_gy      <= '0;
         end else begin
             s1_gy               <= s0_gy;
             s1_gx               <= s0_gx;
@@ -371,6 +551,14 @@ module fe_scan
             s1_asset_sram_data     <= asset_sram_data;
             s1_rd_attr             <= rd_attr;
             s1_mouse_pointer_on    <= mouse_pointer_on_s0;
+            s1_popup_in_region     <= popup_in_region_s0;
+            s1_popup_border        <= popup_border_s0;
+            s1_popup_grid_line     <= popup_grid_line_s0;
+            s1_popup_item_hover    <= popup_item_hover_s0;
+            s1_popup_label_active  <= popup_label_active_s0;
+            s1_popup_label_char    <= popup_label_char_s0;
+            s1_popup_label_gx      <= popup_label_gx_s0;
+            s1_popup_label_gy      <= popup_label_gy_s0;
         end
     end
 
@@ -395,14 +583,28 @@ module fe_scan
     logic in_connected;
     assign in_connected = (conn_state == 2'(CONN_CONNECTED));
 
-    assign glyph_code = in_connected
-                          ? (s1_in_bottom_strip ? 8'h20 : rd_code)
-                          : (s1_splash_in_region ? s1_splash_char : 8'h20);
-    assign glyph_gy   = in_connected ? s1_gy : s1_splash_gy;
+    byte_t      base_glyph_code;
+    logic [3:0] base_glyph_gy;
+    assign base_glyph_code = in_connected
+                              ? (s1_in_bottom_strip ? 8'h20 : rd_code)
+                              : (s1_splash_in_region ? s1_splash_char : 8'h20);
+    assign base_glyph_gy   = in_connected ? s1_gy : s1_splash_gy;
+
+    assign glyph_code = s1_popup_label_active
+                        ? s1_popup_label_char : base_glyph_code;
+    assign glyph_gy   = s1_popup_label_active
+                        ? s1_popup_label_gy : base_glyph_gy;
 
     logic pixel_on;
+    logic popup_text_pixel_on;
+    assign popup_text_pixel_on =
+        s1_popup_label_active
+        && glyph_row[3'd7 - s1_popup_label_gx];
+
     always_comb begin
-        if (in_connected)
+        if (s1_popup_label_active)
+            pixel_on = popup_text_pixel_on;
+        else if (in_connected)
             pixel_on = glyph_row[3'd7 - s1_gx];
         else if (s1_splash_in_region)
             pixel_on = glyph_row[3'd7 - s1_splash_gx];
@@ -705,6 +907,29 @@ module fe_scan
             video_red   = splash_bg_r;
             video_green = splash_bg_g;
             video_blue  = splash_bg_b;
+        end
+
+        // Popup overlay sits above the regular UI/splash but below the
+        // mouse pointer. The popup state is owned in the chat clock
+        // domain and synchronised into this scan pipeline by fe_top.
+        if (s1_de && s1_popup_in_region) begin
+            if (s1_popup_border || s1_popup_grid_line) begin
+                video_red   = COL_POPUP_BORDER_R;
+                video_green = COL_POPUP_BORDER_G;
+                video_blue  = COL_POPUP_BORDER_B;
+            end else if (popup_text_pixel_on) begin
+                video_red   = COL_POPUP_TEXT_R;
+                video_green = COL_POPUP_TEXT_G;
+                video_blue  = COL_POPUP_TEXT_B;
+            end else if (s1_popup_item_hover) begin
+                video_red   = COL_POPUP_HOVER_R;
+                video_green = COL_POPUP_HOVER_G;
+                video_blue  = COL_POPUP_HOVER_B;
+            end else begin
+                video_red   = COL_POPUP_BG_R;
+                video_green = COL_POPUP_BG_G;
+                video_blue  = COL_POPUP_BG_B;
+            end
         end
 
         // Mouse pointer overlay  --  topmost, applied after all the

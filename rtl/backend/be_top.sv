@@ -110,6 +110,12 @@ module be_top
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [3:0]                 fe_input_scroll_offset,
 
+    // ---- backend -> frontend : transient popup overlay state ----
+    output logic                       ui_popup_active,
+    output logic [1:0]                 ui_popup_type,
+    output logic [9:0]                 ui_popup_x,
+    output logic [9:0]                 ui_popup_y,
+
     // ---- comm -> backend : remote frame ----
     input  logic                       cm_rx_valid,
     output logic                       cm_rx_ready,
@@ -280,6 +286,13 @@ module be_top
     logic [3:0]                         click_vis_row_q;
     logic [6:0]                         click_vis_col_q;
     logic                               click_walk_done_q;
+
+    // Popup overlay state. Opening/closing actions will be wired in the
+    // interaction pass; this pass only owns and exposes the stable state.
+    logic                               popup_active_q;
+    logic [1:0]                         popup_type_q;
+    logic [9:0]                         popup_x_q;
+    logic [9:0]                         popup_y_q;
 
     // -----------------------------------------------------------------
     // Combinational helpers
@@ -868,6 +881,10 @@ module be_top
     assign line_len        = len_q;
     assign cursor_pos      = cursor_pos_q;
     assign enter_committed = enter_pulse_q;
+    assign ui_popup_active = popup_active_q;
+    assign ui_popup_type   = popup_type_q;
+    assign ui_popup_x      = popup_x_q;
+    assign ui_popup_y      = popup_y_q;
 
     // -----------------------------------------------------------------
     // Username latch + store_clear pulse
@@ -916,6 +933,10 @@ module be_top
             click_vis_row_q    <= '0;
             click_vis_col_q    <= '0;
             click_walk_done_q  <= 1'b0;
+            popup_active_q     <= 1'b0;
+            popup_type_q       <= 2'(POPUP_NONE);
+            popup_x_q          <= '0;
+            popup_y_q          <= '0;
             for (int i = 0; i < MAX_LINE_LEN; i++) line_buf[i]    <= 8'd0;
         end else begin
             state_q       <= state_d;

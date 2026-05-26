@@ -93,6 +93,10 @@ module io_be_integration
     byte_t       io_key_ascii;
     /* verilator lint_off UNUSEDSIGNAL */
     logic        io_mouse_click_ready_unused;
+    logic        ui_popup_active_unused;
+    logic [1:0]  ui_popup_type_unused;
+    logic [9:0]  ui_popup_x_unused;
+    logic [9:0]  ui_popup_y_unused;
     /* verilator lint_on UNUSEDSIGNAL */
 
     io_top u_io (
@@ -125,6 +129,10 @@ module io_be_integration
         .io_mouse_click_x        (10'd0),
         .io_mouse_click_y        (10'd0),
         .fe_input_scroll_offset  ('0),
+        .ui_popup_active         (ui_popup_active_unused),
+        .ui_popup_type           (ui_popup_type_unused),
+        .ui_popup_x              (ui_popup_x_unused),
+        .ui_popup_y              (ui_popup_y_unused),
 
         .cm_rx_valid             (cm_rx_valid),
         .cm_rx_ready             (cm_rx_ready),

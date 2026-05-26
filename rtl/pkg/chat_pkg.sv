@@ -149,6 +149,15 @@ package chat_pkg;
     } conn_state_e;
 
     // -----------------------------------------------------------------
+    // UI popup overlay state
+    // -----------------------------------------------------------------
+    typedef enum logic [1:0] {
+        POPUP_NONE           = 2'd0,
+        POPUP_MSG_MENU       = 2'd1,
+        POPUP_STICKER_PICKER = 2'd2
+    } popup_type_e;
+
+    // -----------------------------------------------------------------
     // comm internal : link-layer frame types
     //   Width matches README: TYPE field is 3 bits
     // -----------------------------------------------------------------

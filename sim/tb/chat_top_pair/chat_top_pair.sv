@@ -114,6 +114,9 @@ module chat_top_pair
     logic [LEN_WIDTH-1:0]          a_line_len, a_cursor_pos;
     logic                          a_enter_committed;
     logic                          a_mouse_click_ready_unused;
+    logic                          a_ui_popup_active;
+    logic [1:0]                    a_ui_popup_type;
+    logic [9:0]                    a_ui_popup_x, a_ui_popup_y;
     /* verilator lint_on UNUSEDSIGNAL */
 
     be_top #(
@@ -131,6 +134,10 @@ module chat_top_pair
         .io_mouse_click_x       (10'd0),
         .io_mouse_click_y       (10'd0),
         .fe_input_scroll_offset ('0),
+        .ui_popup_active        (a_ui_popup_active),
+        .ui_popup_type          (a_ui_popup_type),
+        .ui_popup_x             (a_ui_popup_x),
+        .ui_popup_y             (a_ui_popup_y),
         .cm_rx_valid            (a_cm_rx_valid),
         .cm_rx_ready            (a_cm_rx_ready),
         .cm_rx_frame_type       (a_cm_rx_frame_type),
@@ -246,6 +253,10 @@ module chat_top_pair
         .asset_sram_data         (32'h0000_0000),
         .mouse_x                 (10'd0),
         .mouse_y                 (10'd0),
+        .ui_popup_active         (a_ui_popup_active),
+        .ui_popup_type           (a_ui_popup_type),
+        .ui_popup_x              (a_ui_popup_x),
+        .ui_popup_y              (a_ui_popup_y),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (a_fe_rd_code),
@@ -300,6 +311,9 @@ module chat_top_pair
     logic [LEN_WIDTH-1:0]          b_line_len, b_cursor_pos;
     logic                          b_enter_committed;
     logic                          b_mouse_click_ready_unused;
+    logic                          b_ui_popup_active;
+    logic [1:0]                    b_ui_popup_type;
+    logic [9:0]                    b_ui_popup_x, b_ui_popup_y;
     /* verilator lint_on UNUSEDSIGNAL */
 
     be_top #(
@@ -317,6 +331,10 @@ module chat_top_pair
         .io_mouse_click_x       (10'd0),
         .io_mouse_click_y       (10'd0),
         .fe_input_scroll_offset ('0),
+        .ui_popup_active        (b_ui_popup_active),
+        .ui_popup_type          (b_ui_popup_type),
+        .ui_popup_x             (b_ui_popup_x),
+        .ui_popup_y             (b_ui_popup_y),
         .cm_rx_valid            (b_cm_rx_valid),
         .cm_rx_ready            (b_cm_rx_ready),
         .cm_rx_frame_type       (b_cm_rx_frame_type),
@@ -431,6 +449,10 @@ module chat_top_pair
         .asset_sram_data         (32'h0000_0000),
         .mouse_x                 (10'd0),
         .mouse_y                 (10'd0),
+        .ui_popup_active         (b_ui_popup_active),
+        .ui_popup_type           (b_ui_popup_type),
+        .ui_popup_x              (b_ui_popup_x),
+        .ui_popup_y              (b_ui_popup_y),
         .rd_row                  ('0),
         .rd_col                  ('0),
         .rd_code                 (b_fe_rd_code),
