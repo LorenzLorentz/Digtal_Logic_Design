@@ -30,6 +30,7 @@
 //  19.  test_shift_make_release_cycle   -- shift state correctly toggled
 //  20.  test_shift_enter_is_newline     -- Shift+Enter -> KEY_CHAR 0x0A
 //  21.  test_newline_char_roundtrip     -- Shift+Enter then plain Enter
+//  22.  test_ctrl_e_control_code        -- Ctrl+E -> KEY_CHAR 0x05
 // =====================================================================
 
 #include "Vio_ps2_decoder.h"
@@ -397,6 +398,32 @@ static void test_shift_make_release_cycle() {
     Event e3 = feed_byte(0x1C); CHECK_EQ(e3.ascii, (uint8_t)'A', "A again");
 }
 
+static void test_ctrl_e_control_code() {
+    printf("== test_ctrl_e_control_code\n");
+    reset();
+
+    feed_byte(0x14);                 // Left Ctrl make
+    Event e1 = feed_byte(0x24);      // E make
+    CHECK_EQ(e1.valid, 1,            "Ctrl+E fires");
+    CHECK_EQ(e1.type,  KEY_CHAR,     "Ctrl+E uses KEY_CHAR");
+    CHECK_EQ(e1.ascii, 0x05,         "Ctrl+E ascii 0x05");
+    feed_byte(0xF0); feed_byte(0x14); // Left Ctrl release
+
+    Event e2 = feed_byte(0x24);
+    CHECK_EQ(e2.valid, 1,              "E after Ctrl release fires");
+    CHECK_EQ(e2.type,  KEY_CHAR,       "E after release KEY_CHAR");
+    CHECK_EQ(e2.ascii, (uint8_t)'e',   "E after release ascii 'e'");
+
+    feed_byte(0xE0); feed_byte(0x14);  // Right Ctrl make
+    Event e3 = feed_byte(0x24);
+    CHECK_EQ(e3.valid, 1,            "Right Ctrl+E fires");
+    CHECK_EQ(e3.ascii, 0x05,         "Right Ctrl+E ascii 0x05");
+    feed_byte(0xE0); feed_byte(0xF0); feed_byte(0x14);
+
+    Event e4 = feed_byte(0x24);
+    CHECK_EQ(e4.ascii, (uint8_t)'e', "E after right Ctrl release");
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Verilated::traceEverOn(true);
@@ -427,6 +454,7 @@ int main(int argc, char** argv) {
     test_shift_make_release_cycle();
     test_shift_enter_is_newline();
     test_newline_char_roundtrip();
+    test_ctrl_e_control_code();
 
     tfp->close();
     delete tfp;

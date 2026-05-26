@@ -23,6 +23,8 @@
 package fe_pkg;
 
     import chat_pkg::byte_t;
+    import chat_pkg::POPUP_STICKER_PICKER_W_PX;
+    import chat_pkg::POPUP_STICKER_PICKER_H_PX;
 
     // -----------------------------------------------------------------
     // text_ram dimensions
@@ -252,8 +254,8 @@ package fe_pkg;
                                           + POPUP_MSG_ITEM_H_PX * 2;
     localparam int POPUP_MSG_TEXT_X_PX  = 12;
     localparam int POPUP_MSG_TEXT_Y_PX  = 4;
-    localparam int POPUP_STICKER_W_PX   = 320;
-    localparam int POPUP_STICKER_H_PX   = 80;
+    localparam int POPUP_STICKER_W_PX   = POPUP_STICKER_PICKER_W_PX;
+    localparam int POPUP_STICKER_H_PX   = POPUP_STICKER_PICKER_H_PX;
 
     // Popup overlay colours.
     localparam logic [7:0] COL_POPUP_BG_R     = 8'h18;

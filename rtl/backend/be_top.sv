@@ -211,7 +211,10 @@ module be_top
         S_LINE_ENCODE              = 5'd24,
         // Mouse click in input area: multi-cycle 2D→linear cursor
         // position conversion. Walks line_buf tracking visual rows.
-        S_MOUSE_CLICK              = 5'd25
+        S_MOUSE_CLICK              = 5'd25,
+        // Sticker picker selection: one-cycle local-message commit for
+        // a single big-emoji anchor byte.
+        S_STICKER_COMMIT           = 5'd26
     } state_e;
 
     state_e state_q, state_d;
@@ -273,6 +276,8 @@ module be_top
     // make the cursor teleport through every click in order, which is
     // not what anybody wants).
     logic                               click_pending_q;
+    logic [9:0]                         click_x_q;
+    logic [9:0]                         click_y_q;
     logic [6:0]                         click_raw_col_q;     // io_mouse_click_x[9:3]
     logic [5:0]                         click_screen_row_q;  // io_mouse_click_y[9:4]
 
@@ -294,9 +299,41 @@ module be_top
     logic [9:0]                         popup_x_q;
     logic [9:0]                         popup_y_q;
 
+    localparam logic [9:0] STICKER_PICKER_X = 10'd240;
+    localparam logic [9:0] STICKER_PICKER_Y = 10'd424;
+
     // -----------------------------------------------------------------
     // Combinational helpers
     // -----------------------------------------------------------------
+
+    function automatic byte_t sticker_anchor_for_col(input logic [3:0] col);
+        begin
+            unique case (col)
+                4'd0: sticker_anchor_for_col = 8'h80; // Heartbroken
+                4'd1: sticker_anchor_for_col = 8'h92; // Hissing
+                4'd2: sticker_anchor_for_col = 8'hA4; // Shrug
+                4'd3: sticker_anchor_for_col = 8'hB6; // Sweat
+                4'd4: sticker_anchor_for_col = 8'hC8; // Xiucai
+                default: sticker_anchor_for_col = 8'h80;
+            endcase
+        end
+    endfunction
+
+    logic [9:0] click_popup_dx;
+    logic [9:0] click_popup_dy;
+    logic [3:0] click_sticker_col;
+    logic       click_in_sticker_picker;
+    byte_t      click_sticker_anchor;
+
+    assign click_popup_dx = click_x_q - popup_x_q;
+    assign click_popup_dy = click_y_q - popup_y_q;
+    assign click_sticker_col = click_popup_dx[9:6];
+    assign click_in_sticker_picker =
+        popup_active_q
+        && (popup_type_q == 2'(POPUP_STICKER_PICKER))
+        && (click_popup_dx < 10'(POPUP_STICKER_PICKER_W_PX))
+        && (click_popup_dy < 10'(POPUP_STICKER_PICKER_H_PX));
+    assign click_sticker_anchor = sticker_anchor_for_col(click_sticker_col);
 
     // Token encoder: one byte per cycle, single-step.
     //
@@ -597,8 +634,11 @@ module be_top
                         // The subsequent S_RENDER_INSERT / _DELETE
                         // emit the BE->FE render command unchanged.
                         KEY_CHAR: begin
-                            state_d = (len_q < LEN_WIDTH'(MAX_LINE_LEN))
-                                      ? S_LINE_INSERT : S_IDLE;
+                            if (io_key_ascii == KEY_CTRL_E)
+                                state_d = S_IDLE;
+                            else
+                                state_d = (len_q < LEN_WIDTH'(MAX_LINE_LEN))
+                                          ? S_LINE_INSERT : S_IDLE;
                         end
                         KEY_BACKSPACE: begin
                             state_d = (cursor_pos_q != 0)
@@ -620,7 +660,7 @@ module be_top
                                       ? S_LINE_ENCODE : S_IDLE;
                         end
                         KEY_ESC: begin
-                            state_d = S_TX_GOODBYE;
+                            state_d = popup_active_q ? S_IDLE : S_TX_GOODBYE;
                         end
                         // Shift+Up/Down scroll the input area (multi-row
                         // input buffer); plain Up/Down scroll history.
@@ -633,14 +673,19 @@ module be_top
                         default: state_d = S_IDLE;
                     endcase
                 end else if (accept_mouse_click) begin
-                    // Only transition if click falls within the input area
-                    // (screen rows 32..36, i.e. pixel Y 512..591). Clicks
-                    // outside the input area still consume the pending
-                    // latch (BE returns to S_IDLE next cycle) so they
-                    // don't stick around.
-                    if (click_screen_row_q >= 6'd32 &&
-                        click_screen_row_q <= 6'd36)
+                    if (popup_active_q) begin
+                        // Popup clicks are consumed here. A hit in the
+                        // sticker row commits one big-emoji anchor; any
+                        // miss just closes the popup in the sequential block.
+                        if (click_in_sticker_picker)
+                            state_d = S_STICKER_COMMIT;
+                    end else if (click_screen_row_q >= 6'd32 &&
+                                 click_screen_row_q <= 6'd36) begin
+                        // Only transition if click falls within the input
+                        // area (screen rows 32..36, i.e. pixel Y 512..591).
+                        // Clicks outside still consume the pending latch.
                         state_d = S_MOUSE_CLICK;
+                    end
                 end
             end
 
@@ -673,6 +718,7 @@ module be_top
             // Stay in S_MOUSE_CLICK while the walk progresses; only emit
             // the render command once cursor_pos_q has been resolved.
             S_MOUSE_CLICK: if (click_walk_done_q && be_render_ready) state_d = S_IDLE;
+            S_STICKER_COMMIT: state_d = S_ENTER_RENDER_LOCAL;
             S_ENTER_RENDER_LOCAL:       if (be_render_ready) state_d = S_ENTER_SEND_COMM;
             S_ENTER_SEND_COMM:          if (be_tx_ready)     state_d = S_ENTER_RENDER_INPUT_CLEAR;
             S_ENTER_RENDER_INPUT_CLEAR: if (be_render_ready) state_d = S_IDLE;
@@ -926,6 +972,8 @@ module be_top
             peer_name_len_q    <= '0;
             peer_name_q        <= '0;
             click_pending_q    <= 1'b0;
+            click_x_q          <= '0;
+            click_y_q          <= '0;
             click_raw_col_q    <= '0;
             click_screen_row_q <= '0;
             click_target_row_q <= '0;
@@ -1089,6 +1137,8 @@ module be_top
             // dropped on the floor.
             // -------------------------------------------------------------
             if (io_mouse_click_valid) begin
+                click_x_q          <= io_mouse_click_x;
+                click_y_q          <= io_mouse_click_y;
                 click_raw_col_q    <= io_mouse_click_x[9:3];
                 click_screen_row_q <= io_mouse_click_y[9:4];
                 click_pending_q    <= 1'b1;
@@ -1130,12 +1180,17 @@ module be_top
                     unique case (key_type_e'(io_key_type))
 
                         KEY_CHAR: begin
+                            if (io_key_ascii == KEY_CTRL_E) begin
+                                popup_active_q <= 1'b1;
+                                popup_type_q   <= 2'(POPUP_STICKER_PICKER);
+                                popup_x_q      <= STICKER_PICKER_X;
+                                popup_y_q      <= STICKER_PICKER_Y;
                             // Just latch the ASCII byte for the
                             // sequential walk in S_LINE_INSERT. shift
                             // counter init happens via entering_new_state
                             // below; len_q / cursor_pos_q update on
                             // the LAST cycle of S_LINE_INSERT.
-                            if (len_q < LEN_WIDTH'(MAX_LINE_LEN)) begin
+                            end else if (len_q < LEN_WIDTH'(MAX_LINE_LEN)) begin
                                 last_event_ascii_q <= io_key_ascii;
                             end
                         end
@@ -1173,11 +1228,33 @@ module be_top
                             end
                         end
 
-                        // ESC and other keys: no buffer update; FSM
-                        // transition handled by next-state logic.
+                        KEY_ESC: begin
+                            if (popup_active_q) begin
+                                popup_active_q <= 1'b0;
+                                popup_type_q   <= 2'(POPUP_NONE);
+                            end
+                        end
+
+                        // Other keys: no buffer update; FSM transition
+                        // handled by next-state logic.
                         default: ;
                     endcase
                 end
+                else if (accept_mouse_click && popup_active_q) begin
+                    if (click_in_sticker_picker) begin
+                        pending_msg_id_q     <= next_msg_id_q;
+                        pending_len_q        <= msg_len_t'(1);
+                        pending_payload_q    <= '0;
+                        pending_payload_q[7:0] <= click_sticker_anchor;
+                    end
+                    popup_active_q <= 1'b0;
+                    popup_type_q   <= 2'(POPUP_NONE);
+                end
+            end
+
+            if (state_q == S_STICKER_COMMIT) begin
+                wr_ptr_q      <= wr_ptr_q + 1'b1;
+                next_msg_id_q <= next_msg_id_q + 8'd1;
             end
 
             // -------------------------------------------------------------
@@ -1185,7 +1262,8 @@ module be_top
             // (so reconnect doesn't show stale typing).
             // -------------------------------------------------------------
             if ((state_q == S_IDLE) && accept_io
-              && (key_type_e'(io_key_type) == KEY_ESC)) begin
+              && (key_type_e'(io_key_type) == KEY_ESC)
+              && !popup_active_q) begin
                 len_q        <= '0;
                 cursor_pos_q <= '0;
             end
@@ -1233,6 +1311,15 @@ module be_top
             store_wr_side    = 2'(MSG_LOCAL);
             store_wr_status  = 2'(MSG_PENDING);
             store_wr_len     = enc_dst_q;
+            store_wr_payload = pending_payload_q;
+        end else if (state_q == S_STICKER_COMMIT) begin
+            // Sticker picker selections are already encoded as one
+            // big-emoji anchor byte.
+            store_wr_en      = 1'b1;
+            store_wr_msg_id  = pending_msg_id_q;
+            store_wr_side    = 2'(MSG_LOCAL);
+            store_wr_status  = 2'(MSG_PENDING);
+            store_wr_len     = pending_len_q;
             store_wr_payload = pending_payload_q;
         end
     end

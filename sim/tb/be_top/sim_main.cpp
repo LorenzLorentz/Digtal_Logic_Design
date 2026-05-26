@@ -85,6 +85,13 @@ enum : uint8_t {
     CONN_CONNECTED    = 2,
     CONN_DISCONNECTED = 3,
 };
+// popup_type_e / control keys
+enum : uint8_t {
+    POPUP_NONE           = 0,
+    POPUP_MSG_MENU       = 1,
+    POPUP_STICKER_PICKER = 2,
+    KEY_CTRL_E           = 0x05,
+};
 
 // Default MY_NAME as built into be_top: "Alic" (4 bytes).
 static constexpr int      MY_NAME_LEN_DEFAULT = 4;
@@ -200,6 +207,9 @@ static void clear_inputs() {
     dut->io_key_valid      = 0;
     dut->io_key_type       = 0;
     dut->io_key_ascii      = 0;
+    dut->io_mouse_click_valid = 0;
+    dut->io_mouse_click_x     = 0;
+    dut->io_mouse_click_y     = 0;
     dut->cm_rx_valid       = 0;
     dut->cm_rx_frame_type  = 0;
     dut->cm_rx_seq         = 0;
@@ -301,6 +311,14 @@ static void send_key(uint8_t kt, uint8_t a, int timeout = 200) {
     printf("  [FAIL @ %lluns] send_key: io_key_ready never asserted\n",
            (unsigned long long)g_time_ns);
     dut->io_key_valid = 0;
+}
+
+static void send_mouse_click(uint16_t x, uint16_t y) {
+    dut->io_mouse_click_x = x;
+    dut->io_mouse_click_y = y;
+    dut->io_mouse_click_valid = 1;
+    tick();
+    dut->io_mouse_click_valid = 0;
 }
 
 static void inject_rx_frame(uint8_t frame_type, uint8_t seq, uint16_t len,
@@ -902,6 +920,47 @@ static void test_big_emoji_tokens_encoded_on_commit() {
         char lbl[48]; snprintf(lbl, sizeof(lbl), "store big-emoji payload[%d]", i);
         CHECK_EQ(store_payload_byte(i), expected[i], lbl);
     }
+}
+
+static void test_ctrl_e_sticker_picker_sends_big_emoji() {
+    printf("== test_ctrl_e_sticker_picker_sends_big_emoji\n");
+    reset();
+
+    send_key(KEY_CHAR, KEY_CTRL_E);
+    CHECK_EQ(dut->ui_popup_active, 1, "sticker picker active");
+    CHECK_EQ(dut->ui_popup_type, POPUP_STICKER_PICKER, "sticker picker type");
+    CHECK_EQ(dut->ui_popup_x, 240, "sticker picker x");
+    CHECK_EQ(dut->ui_popup_y, 424, "sticker picker y");
+    CHECK_EQ(dut->line_len, 0, "Ctrl+E not inserted into input");
+    CHECK_EQ(no_render_for(3), true, "opening picker emits no render");
+
+    // Column 2 in the 5-cell picker row is Shrug (0xA4).
+    send_mouse_click(240 + 2 * 64 + 10, 424 + 10);
+
+    RenderEvent r1;
+    CHECK_EQ(wait_render(r1), true, "got sticker append render");
+    CHECK_EQ(r1.cmd, RENDER_APPEND_LOCAL_PENDING, "sticker render append");
+    CHECK_EQ(r1.len, 1, "sticker render len");
+    CHECK_EQ(payload_get_byte(r1.payload, 0),
+             (uint8_t)BIG_EMOJI_SHRUG_ANCHOR, "sticker render anchor");
+    CHECK_EQ(dut->ui_popup_active, 0, "picker closes after selection");
+
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx), true, "got sticker DATA tx");
+    CHECK_EQ(tx.frame_type, FRAME_DATA, "sticker tx frame type");
+    CHECK_EQ(tx.len, 1, "sticker tx len");
+    CHECK_EQ(payload_get_byte(tx.payload, 0),
+             (uint8_t)BIG_EMOJI_SHRUG_ANCHOR, "sticker tx anchor");
+
+    RenderEvent clear;
+    CHECK_EQ(wait_render(clear), true, "got input clear render");
+    CHECK_EQ(clear.cmd, RENDER_UPDATE_INPUT_LINE, "sticker clear render");
+
+    StoreRead s = read_store(0);
+    CHECK_EQ(s.valid, 1, "sticker store valid");
+    CHECK_EQ(s.len, 1, "sticker store len");
+    CHECK_EQ(store_payload_byte(0),
+             (uint8_t)BIG_EMOJI_SHRUG_ANCHOR, "sticker store anchor");
 }
 
 // An unmatched capitalized token (no such big emoji) must fall through
@@ -1832,6 +1891,7 @@ int main(int argc, char** argv) {
     test_payload_packed_correctly();
     test_emoji_tokens_encoded_on_commit();
     test_big_emoji_tokens_encoded_on_commit();
+    test_ctrl_e_sticker_picker_sends_big_emoji();
     test_big_emoji_unknown_token_passthrough();
     test_commit_full_pipeline_order();
     test_commit_blocked_by_render_backpressure();

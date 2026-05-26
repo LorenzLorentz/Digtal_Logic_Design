@@ -157,6 +157,19 @@ package chat_pkg;
         POPUP_STICKER_PICKER = 2'd2
     } popup_type_e;
 
+    // Ctrl+E is carried through the existing KEY_CHAR path as the
+    // conventional ASCII control code for E (0x05).
+    localparam byte_t KEY_CTRL_E = 8'h05;
+
+    // Sticker picker hit-test geometry. The frontend can style/draw the
+    // picker however it wants, but backend selection uses this stable
+    // 5-cell row layout.
+    localparam int POPUP_STICKER_COUNT       = 5;
+    localparam int POPUP_STICKER_CELL_W_PX   = 64;
+    localparam int POPUP_STICKER_PICKER_W_PX = POPUP_STICKER_COUNT
+                                                * POPUP_STICKER_CELL_W_PX;
+    localparam int POPUP_STICKER_PICKER_H_PX = 80;
+
     // -----------------------------------------------------------------
     // comm internal : link-layer frame types
     //   Width matches README: TYPE field is 3 bits

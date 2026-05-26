@@ -14,6 +14,11 @@
 //                     while the other is still held does not drop the
 //                     modifier. The effective shift used for ASCII
 //                     translation is lshift_held_q | rshift_held_q.
+//   lctrl_held_q   :  set by Left Ctrl make (0x14), cleared by F0 14.
+//   rctrl_held_q   :  set by Right Ctrl make (E0 14), cleared by
+//                     E0 F0 14. Ctrl+E is emitted as KEY_CHAR 0x05
+//                     (ASCII control-E) so the existing io FIFO width
+//                     does not need a modifier sideband.
 //   caps_locked_q  :  toggled on each CapsLock make (0x58); release of
 //                     CapsLock is ignored (LED is host-managed in real
 //                     PS/2; we don't drive the LED -- agreed up-front
@@ -44,10 +49,10 @@
 //
 // Bytes that do NOT produce a key event:
 //   - 0xE0 / 0xF0 prefix bytes
-//   - Shift make/release (only updates shift_held_q)
+//   - Shift/Ctrl make/release (only updates modifier state)
 //   - CapsLock make (toggles caps_locked_q); CapsLock release dropped
 //   - 0xAA (Basic Assurance Test result) and any unmapped scancode
-//   - Releases of non-Shift keys
+//   - Releases of non-modifier keys
 //
 // Bytes that DO produce a key event:
 //   - 0x5A make           -> KEY_ENTER
@@ -86,12 +91,16 @@ module io_ps2_decoder
     // -----------------------------------------------------------------
     logic lshift_held_q;
     logic rshift_held_q;
+    logic lctrl_held_q;
+    logic rctrl_held_q;
     logic caps_locked_q;
     logic seen_e0_q;
     logic seen_f0_q;
 
     logic shift_held;
+    logic ctrl_held;
     assign shift_held = lshift_held_q | rshift_held_q;
+    assign ctrl_held  = lctrl_held_q  | rctrl_held_q;
 
     // Prefix watchdog counter.
     localparam int PT_W = $clog2(PREFIX_TIMEOUT_CYCLES + 1);
@@ -196,8 +205,11 @@ module io_ps2_decoder
     //   - Right Shift release = F0 59 or E0 F0 59 (treat both identically)
     // -----------------------------------------------------------------
     logic is_lshift_release, is_rshift_release;
+    logic is_lctrl_release, is_rctrl_release;
     assign is_lshift_release = !seen_e0_q && (byte_data == 8'h12);
     assign is_rshift_release =                (byte_data == 8'h59);
+    assign is_lctrl_release  = !seen_e0_q && (byte_data == 8'h14);
+    assign is_rctrl_release  =  seen_e0_q && (byte_data == 8'h14);
 
     // -----------------------------------------------------------------
     // Sequential state machine.
@@ -206,6 +218,8 @@ module io_ps2_decoder
         if (!rst_n) begin
             lshift_held_q    <= 1'b0;
             rshift_held_q    <= 1'b0;
+            lctrl_held_q     <= 1'b0;
+            rctrl_held_q     <= 1'b0;
             caps_locked_q    <= 1'b0;
             seen_e0_q        <= 1'b0;
             seen_f0_q        <= 1'b0;
@@ -244,14 +258,17 @@ module io_ps2_decoder
 
                         // Decode based on PRE-edge prefix state.
                         if (seen_f0_q) begin
-                            // Release. Only Shift releases are meaningful;
+                            // Release. Only modifier releases are meaningful;
                             // every other release is dropped.
                             if (is_lshift_release) lshift_held_q <= 1'b0;
                             if (is_rshift_release) rshift_held_q <= 1'b0;
+                            if (is_lctrl_release)  lctrl_held_q  <= 1'b0;
+                            if (is_rctrl_release)  rctrl_held_q  <= 1'b0;
                         end else if (seen_e0_q) begin
                             // Extended make.
                             unique case (byte_data)
                                 8'h59: rshift_held_q <= 1'b1;  // Right Shift
+                                8'h14: rctrl_held_q  <= 1'b1;  // Right Ctrl
                                 // Arrow keys piggy-back the Shift-held
                                 // state on ev_ascii bit 0 (see chat_pkg
                                 // KEY_SHIFT_MASK). Backend uses it to
@@ -283,6 +300,7 @@ module io_ps2_decoder
                             unique case (byte_data)
                                 8'h12:        lshift_held_q <= 1'b1;
                                 8'h59:        rshift_held_q <= 1'b1;
+                                8'h14:        lctrl_held_q  <= 1'b1;
                                 8'h58:        caps_locked_q <= ~caps_locked_q;
                                 8'h5A: begin
                                     ev_valid <= 1'b1;
@@ -305,7 +323,11 @@ module io_ps2_decoder
                                     ev_ascii <= 8'h00;
                                 end
                                 default: begin
-                                    if (decoded_ascii != 8'h00) begin
+                                    if (ctrl_held && (byte_data == 8'h24)) begin
+                                        ev_valid <= 1'b1;
+                                        ev_type  <= 3'(KEY_CHAR);
+                                        ev_ascii <= KEY_CTRL_E;
+                                    end else if (decoded_ascii != 8'h00) begin
                                         ev_valid <= 1'b1;
                                         ev_type  <= 3'(KEY_CHAR);
                                         ev_ascii <= decoded_ascii;
