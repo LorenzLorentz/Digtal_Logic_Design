@@ -170,6 +170,7 @@ module be_top
     output logic [1:0]                 be_render_conn_state,
     output msg_len_t                   be_render_peer_name_len,
     output logic [MAX_NAME_LEN*8-1:0]  be_render_peer_name,
+    output logic                       be_has_quote,
 
     // ---- Observability for tests ----
     input  logic [LINE_IDX_W-1:0]      line_rd_idx,
@@ -238,11 +239,10 @@ module be_top
         S_EMOJI_COMPLETE_INSERT    = 6'd27,
         S_EMOJI_COMPLETE_PACK      = 6'd28,
         S_EMOJI_COMPLETE_RENDER    = 6'd29,
-        // Message context menu actions.
-        S_QUOTE_SHIFT              = 6'd30,
-        S_QUOTE_WRITE              = 6'd31,
-        S_QUOTE_PACK               = 6'd32,
-        S_QUOTE_RENDER             = 6'd33,
+        // Quote: build display payload for rendering (multi-cycle).
+        // Runs after S_LINE_ENCODE (or rx accept) when payload carries
+        // a QUOTE_MARKER prefix.
+        S_BUILD_QUOTE_DISP         = 6'd30,
         S_RECALL_RENDER            = 6'd34,
         S_RECALL_SEND_COMM         = 6'd35
     } state_e;
@@ -338,13 +338,25 @@ module be_top
     logic [9:0]                         popup_y_q;
     logic [STORE_IDX_W-1:0]             menu_store_idx_q;
 
-    // Quote action scratch. Quote inserts "> <payload><sep>" at the
-    // current cursor, where sep is newline when the input has line room
-    // and a space otherwise.
-    logic [MAX_MSG_LEN*8-1:0]           quote_payload_q;
-    msg_len_t                           quote_insert_len_q;
-    msg_len_t                           quote_write_idx_q;
-    byte_t                              quote_sep_byte_q;
+    // Quote state: set on right-click Quote, cleared on send / Esc.
+    // The input box is NOT modified; instead a ">" indicator is drawn
+    // by the frontend and the wire payload carries a QUOTE_MARKER prefix.
+    logic                               has_quote_q;
+    msg_id_t                            quoted_msg_id_q;
+    logic [1:0]                         quoted_side_q;
+
+    // Display-payload builder for quote messages. Filled byte-by-byte
+    // in S_BUILD_QUOTE_DISP before the render command.
+    logic [MAX_MSG_LEN*8-1:0]           disp_payload_q;
+    msg_len_t                           disp_len_q;
+    msg_len_t                           disp_build_idx_q;
+    logic                               disp_for_remote_q;
+
+    // Quote lookup: combinational read ports for the quoted message.
+    logic [STORE_IDX_W-1:0]             quoted_store_idx;
+    logic                               quoted_store_valid;
+    msg_len_t                           quoted_store_len;
+    logic [MAX_MSG_LEN*8-1:0]           quoted_store_payload;
 
     msg_id_t                            recall_msg_id_q;
     logic [STORE_IDX_W-1:0]             recall_store_idx_q;
@@ -423,11 +435,6 @@ module be_top
     logic [FE_COL_W-1:0] click_hist_bubble_left;
     logic [FE_COL_W-1:0] click_hist_bubble_right;
     logic       click_in_hist_bubble;
-    msg_len_t   quote_room;
-    msg_len_t   quote_src_room;
-    msg_len_t   quote_src_len_calc;
-    msg_len_t   quote_insert_len_calc;
-    logic       quote_can_insert;
 
     assign click_popup_dx = click_x_q - popup_x_q;
     assign click_popup_dy = click_y_q - popup_y_q;
@@ -512,16 +519,30 @@ module be_top
         && (click_hist_col >= click_hist_bubble_left)
         && (click_hist_col <= click_hist_bubble_right);
 
-    assign store_ui_rd_idx = menu_store_idx_q;
-    assign quote_room = LEN_WIDTH'(MAX_LINE_LEN) - len_q;
-    assign quote_src_room = (quote_room > msg_len_t'(3))
-                            ? (quote_room - msg_len_t'(3)) : '0;
-    assign quote_src_len_calc =
-        (store_ui_rd_len > quote_src_room) ? quote_src_room : store_ui_rd_len;
-    assign quote_insert_len_calc =
-        quote_can_insert ? (quote_src_len_calc + msg_len_t'(3)) : '0;
-    assign quote_can_insert =
-        store_ui_rd_valid && (quote_room >= msg_len_t'(3));
+    // store_ui_rd_idx for quote/recall menu: points at the message
+    // under the right-click popup. Also reused by S_BUILD_QUOTE_DISP
+    // to read the quoted message payload.
+    always_comb begin
+        if (state_q == S_BUILD_QUOTE_DISP)
+            store_ui_rd_idx = quoted_store_idx;
+        else
+            store_ui_rd_idx = menu_store_idx_q;
+    end
+
+    // Quote lookup: drive combinational read of the quoted message.
+    // quoted_side_q is latched when the user clicks "Quote" in the
+    // context menu. quoted_msg_id_q comes from the quoted message.
+    logic [1:0]    quote_lkup_side;
+    msg_id_t       quote_lkup_msg_id;
+    logic          quote_lkup_hit;
+    logic [STORE_IDX_W-1:0] quote_lkup_idx;
+
+    assign quote_lkup_side   = quoted_side_q;
+    assign quote_lkup_msg_id = quoted_msg_id_q;
+    assign quoted_store_idx  = quote_lkup_idx;
+    assign quoted_store_valid = quote_lkup_hit && store_ui_rd_valid;
+    assign quoted_store_len   = store_ui_rd_len;
+    assign quoted_store_payload = store_ui_rd_payload;
 
     // Emoji suggestion matcher. This deliberately uses a fixed small token
     // table instead of scanning the full 128-byte line. The only dynamic
@@ -884,7 +905,8 @@ module be_top
                     state_d = S_STATUS_RENDER;
                 end else if (accept_rx) begin
                     if (rx_is_data) begin
-                        state_d = S_RX_RENDER;
+                        state_d = (cm_rx_payload[7:0] == QUOTE_MARKER)
+                                  ? S_BUILD_QUOTE_DISP : S_RX_RENDER;
                     end else if (rx_is_recall) begin
                         state_d = store_lookup_hit ? S_RECALL_RENDER : S_IDLE;
                     end else if (rx_is_hello) begin
@@ -931,7 +953,12 @@ module be_top
                                       ? S_LINE_ENCODE : S_IDLE;
                         end
                         KEY_ESC: begin
-                            state_d = popup_active_q ? S_IDLE : S_TX_GOODBYE;
+                            if (popup_active_q)
+                                state_d = S_IDLE;
+                            else if (has_quote_q)
+                                state_d = S_RENDER_MOVE_CURSOR;
+                            else
+                                state_d = S_TX_GOODBYE;
                         end
                         // Shift+Up/Down scroll the input area (multi-row
                         // input buffer); plain Up/Down scroll history.
@@ -951,9 +978,8 @@ module be_top
                         // sticker row commits one big-emoji anchor; any
                         // miss just closes the popup in the sequential block.
                         if (click_in_msg_menu && click_msg_menu_quote
-                            && quote_can_insert) begin
-                            state_d = (cursor_pos_q < len_q)
-                                      ? S_QUOTE_SHIFT : S_QUOTE_WRITE;
+                            && store_ui_rd_valid) begin
+                            state_d = S_RENDER_MOVE_CURSOR;
                         end else if (click_in_msg_menu && click_msg_menu_recall
                             && store_ui_rd_valid
                             && (store_ui_rd_side == 2'(MSG_LOCAL))
@@ -995,7 +1021,9 @@ module be_top
                 // Stay here while bytes remain to encode; exit on the
                 // cycle that finds enc_src_q already caught up to len_q
                 // (that's the cycle store_wr fires, see below).
-                if (enc_src_q >= len_q) state_d = S_ENTER_RENDER_LOCAL;
+                if (enc_src_q >= len_q)
+                    state_d = has_quote_q ? S_BUILD_QUOTE_DISP
+                                          : S_ENTER_RENDER_LOCAL;
             end
             S_RENDER_MOVE_CURSOR:       if (be_render_ready) state_d = S_IDLE;
             S_RENDER_INSERT:            if (be_render_ready) state_d = S_IDLE;
@@ -1019,19 +1047,14 @@ module be_top
                     state_d = S_EMOJI_COMPLETE_RENDER;
             end
             S_EMOJI_COMPLETE_RENDER: if (be_render_ready) state_d = S_IDLE;
-            S_QUOTE_SHIFT: begin
-                if (shift_idx_q == cursor_pos_q)
-                    state_d = S_QUOTE_WRITE;
+            S_BUILD_QUOTE_DISP: begin
+                // Multi-cycle display-payload builder.
+                // disp_build_idx_q advances each cycle; done when it
+                // reaches disp_len_q (latched on entry, see seq block).
+                if (disp_build_idx_q + LEN_WIDTH'(1) >= disp_len_q)
+                    state_d = disp_for_remote_q ? S_RX_RENDER
+                                                : S_ENTER_RENDER_LOCAL;
             end
-            S_QUOTE_WRITE: begin
-                if (quote_write_idx_q + LEN_WIDTH'(1) >= quote_insert_len_q)
-                    state_d = S_QUOTE_PACK;
-            end
-            S_QUOTE_PACK: begin
-                if (shift_idx_q >= len_q)
-                    state_d = S_QUOTE_RENDER;
-            end
-            S_QUOTE_RENDER: if (be_render_ready) state_d = S_IDLE;
             S_RECALL_RENDER: begin
                 if (be_render_ready)
                     state_d = recall_send_q ? S_RECALL_SEND_COMM : S_IDLE;
@@ -1163,8 +1186,13 @@ module be_top
                 be_render_store_idx = pending_store_idx_q;
                 be_render_side    = 2'(MSG_LOCAL);
                 be_render_status  = 2'(MSG_PENDING);
-                be_render_len     = pending_len_q;
-                be_render_payload = pending_payload_q;
+                if (disp_len_q != '0) begin
+                    be_render_len     = disp_len_q;
+                    be_render_payload = disp_payload_q;
+                end else begin
+                    be_render_len     = pending_len_q;
+                    be_render_payload = pending_payload_q;
+                end
             end
             S_ENTER_RENDER_INPUT_CLEAR: begin
                 be_render_valid      = 1'b1;
@@ -1190,8 +1218,13 @@ module be_top
                 be_render_store_idx = rx_store_idx_q;
                 be_render_side    = 2'(MSG_REMOTE);
                 be_render_status  = 2'(MSG_SUCCESS);
-                be_render_len     = rx_len_q;
-                be_render_payload = rx_payload_q;
+                if (disp_len_q != '0) begin
+                    be_render_len     = disp_len_q;
+                    be_render_payload = disp_payload_q;
+                end else begin
+                    be_render_len     = rx_len_q;
+                    be_render_payload = rx_payload_q;
+                end
             end
             S_STATUS_RENDER: begin
                 be_render_valid   = 1'b1;
@@ -1200,15 +1233,6 @@ module be_top
                 be_render_side    = 2'(MSG_LOCAL);
                 be_render_status  = status_status_q;
                 be_render_len     = '0;
-            end
-            S_QUOTE_RENDER: begin
-                be_render_valid      = 1'b1;
-                be_render_cmd        = 4'(RENDER_UPDATE_INPUT_LINE);
-                be_render_side       = 2'(MSG_LOCAL);
-                be_render_status     = 2'(MSG_PENDING);
-                be_render_len        = len_q;
-                be_render_payload    = pending_payload_q;
-                be_render_cursor_pos = cursor_pos_q;
             end
             S_RECALL_RENDER: begin
                 be_render_valid   = 1'b1;
@@ -1271,6 +1295,7 @@ module be_top
     assign be_render_peer_name     = peer_name_q;
     assign be_render_peer_name_len = peer_name_len_q;
     assign conn_state_obs          = be_render_conn_state;
+    assign be_has_quote            = has_quote_q;
 
     // -----------------------------------------------------------------
     // Observability
@@ -1347,10 +1372,13 @@ module be_top
             popup_x_q          <= '0;
             popup_y_q          <= '0;
             menu_store_idx_q   <= '0;
-            quote_payload_q    <= '0;
-            quote_insert_len_q <= '0;
-            quote_write_idx_q  <= '0;
-            quote_sep_byte_q   <= 8'h20;
+            has_quote_q       <= 1'b0;
+            quoted_msg_id_q   <= '0;
+            quoted_side_q     <= 2'd0;
+            disp_payload_q    <= '0;
+            disp_len_q        <= '0;
+            disp_build_idx_q  <= '0;
+            disp_for_remote_q <= 1'b0;
             recall_msg_id_q    <= '0;
             recall_store_idx_q <= '0;
             recall_side_q      <= 2'(MSG_LOCAL);
@@ -1567,6 +1595,22 @@ module be_top
                     rx_len_q     <= rx_len_clamped;
                     rx_payload_q <= cm_rx_payload;
                     wr_ptr_q     <= wr_ptr_q + 1'b1;
+                    if (cm_rx_payload[7:0] == QUOTE_MARKER) begin
+                        // Remote quote: set up the display-payload
+                        // builder. pending_payload_q holds the wire-
+                        // format payload (user text starts at byte 2).
+                        // The sender quoted OUR message, so on our side
+                        // the quoted message is MSG_LOCAL.
+                        pending_payload_q <= cm_rx_payload;
+                        pending_len_q     <= rx_len_clamped;
+                        quoted_msg_id_q   <= cm_rx_payload[15:8];
+                        quoted_side_q     <= 2'(MSG_LOCAL);
+                        disp_for_remote_q <= 1'b1;
+                        disp_len_q        <= '0;
+                    end else begin
+                        disp_len_q        <= '0;
+                        disp_for_remote_q <= 1'b0;
+                    end
                 end
                 else if (accept_rx && rx_is_recall && store_lookup_hit) begin
                     recall_msg_id_q    <= msg_id_t'(cm_rx_seq);
@@ -1615,17 +1659,27 @@ module be_top
                             if (len_q != 0) begin
                                 // Kick off the encoder. pending_payload_q
                                 // is cleared so bytes past the encoded
-                                // length stay 0 (test_payload_packed_
-                                // correctly relies on this). The actual
-                                // line clear, wr_ptr / msg_id advance,
-                                // and store_wr all happen in the
+                                // length stay 0. When has_quote_q is set,
+                                // pre-fill the QUOTE_MARKER prefix before
+                                // the encoder starts (enc_dst_q = 2 so
+                                // user text lands at byte 2+).
+                                // The actual line clear, wr_ptr / msg_id
+                                // advance, and store_wr all happen in the
                                 // encoder's done cycle (state_q ==
                                 // S_LINE_ENCODE && enc_src_q >= len_q).
                                 pending_msg_id_q    <= next_msg_id_q;
                                 pending_store_idx_q <= wr_ptr_q;
                                 pending_payload_q   <= '0;
                                 enc_src_q           <= '0;
-                                enc_dst_q           <= '0;
+                                if (has_quote_q) begin
+                                    pending_payload_q[7:0]
+                                        <= QUOTE_MARKER;
+                                    pending_payload_q[15:8]
+                                        <= quoted_msg_id_q;
+                                    enc_dst_q <= LEN_WIDTH'(QUOTE_MARKER_LEN);
+                                end else begin
+                                    enc_dst_q <= '0;
+                                end
                                 enter_pulse_q       <= 1'b1;
                             end
                         end
@@ -1634,6 +1688,12 @@ module be_top
                             if (popup_active_q) begin
                                 popup_active_q <= 1'b0;
                                 popup_type_q   <= 2'(POPUP_NONE);
+                            end else if (has_quote_q) begin
+                                // First Esc clears the quote; next Esc
+                                // triggers goodbye (via next-state).
+                                has_quote_q     <= 1'b0;
+                                quoted_msg_id_q <= '0;
+                                quoted_side_q   <= 2'd0;
                             end
                         end
 
@@ -1660,16 +1720,10 @@ module be_top
                         end
                     end else if (popup_active_q) begin
                         if (click_in_msg_menu && click_msg_menu_quote
-                            && quote_can_insert) begin
-                            quote_payload_q    <= store_ui_rd_payload;
-                            quote_insert_len_q <= quote_insert_len_calc;
-                            quote_write_idx_q  <= '0;
-                            quote_sep_byte_q   <=
-                                (input_newline_count_q
-                                 < INPUT_NL_COUNT_W'(INPUT_NEWLINE_LIMIT))
-                                ? 8'h0A : 8'h20;
-                            if (cursor_pos_q < len_q)
-                                shift_idx_q <= len_q - LEN_WIDTH'(1);
+                            && store_ui_rd_valid) begin
+                            has_quote_q     <= 1'b1;
+                            quoted_msg_id_q <= store_ui_rd_msg_id;
+                            quoted_side_q   <= store_ui_rd_side;
                         end else if (click_in_msg_menu && click_msg_menu_recall
                             && store_ui_rd_valid
                             && (store_ui_rd_side == 2'(MSG_LOCAL))
@@ -1735,53 +1789,70 @@ module be_top
                 end
             end
 
-            if (state_q == S_QUOTE_SHIFT) begin
-                line_buf[LINE_IDX_W'(shift_idx_q + quote_insert_len_q)]
-                    <= line_buf[shift_idx_q[LINE_IDX_W-1:0]];
-                if (shift_idx_q != cursor_pos_q)
-                    shift_idx_q <= shift_idx_q - LEN_WIDTH'(1);
+            // S_BUILD_QUOTE_DISP: multi-cycle display-payload builder.
+            // Writes ">", then up to QUOTE_DISP_MAX bytes of quoted
+            // text, then "\n", then user text (skipping the 2-byte
+            // QUOTE_MARKER prefix in pending_payload_q).
+            if ((state_q != S_BUILD_QUOTE_DISP)
+             && (state_d == S_BUILD_QUOTE_DISP)) begin
+                automatic msg_len_t src_len;
+                automatic msg_len_t copy_max;
+                automatic msg_len_t user_start;
+                automatic msg_len_t user_len;
+                // Source: pending_payload_q holds the wire-format payload
+                // (QUOTE_MARKER + msg_id + user text for local, or the
+                // raw rx_payload for remote after copy below).
+                src_len    = pending_len_q;
+                user_start = msg_len_t'(QUOTE_MARKER_LEN);  // skip 0x01 + msg_id
+                user_len   = (src_len > user_start)
+                             ? (src_len - user_start) : '0;
+                // Truncate quoted text so total fits in MAX_MSG_LEN.
+                // If quoted message not found in store, show no text.
+                copy_max   = quoted_store_valid
+                             ? LEN_WIDTH'(QUOTE_DISP_MAX) : '0;
+                if (quoted_store_valid && (msg_len_t'(1) + copy_max
+                    + msg_len_t'(1) + user_len)
+                    > LEN_WIDTH'(MAX_MSG_LEN)) begin
+                    copy_max = LEN_WIDTH'(MAX_MSG_LEN)
+                               - msg_len_t'(1) - msg_len_t'(1) - user_len;
+                end
+                if (quoted_store_valid && (quoted_store_len < copy_max))
+                    copy_max = quoted_store_len;
+                disp_len_q        <= msg_len_t'(1) + copy_max
+                                    + msg_len_t'(1) + user_len;
+                disp_build_idx_q  <= '0;
             end
-
-            if (state_q == S_QUOTE_WRITE) begin
-                automatic byte_t quote_byte;
-                automatic msg_len_t quote_payload_idx;
-                quote_payload_idx = quote_write_idx_q - msg_len_t'(2);
-                quote_byte = 8'h20;
-                if (quote_write_idx_q == msg_len_t'(0)) begin
-                    quote_byte = ">";
-                end else if (quote_write_idx_q == msg_len_t'(1)) begin
-                    quote_byte = " ";
-                end else if (quote_write_idx_q + msg_len_t'(1)
-                             >= quote_insert_len_q) begin
-                    quote_byte = quote_sep_byte_q;
+            if (state_q == S_BUILD_QUOTE_DISP) begin
+                automatic msg_len_t src_len;
+                automatic msg_len_t copy_len;
+                automatic msg_len_t user_start;
+                automatic msg_len_t user_len;
+                automatic byte_t    wr_byte;
+                src_len    = pending_len_q;
+                user_start = msg_len_t'(QUOTE_MARKER_LEN);
+                user_len   = (src_len > user_start)
+                             ? (src_len - user_start) : '0;
+                copy_len   = disp_len_q - msg_len_t'(2) - user_len;
+                wr_byte    = 8'h20;
+                if (disp_build_idx_q == msg_len_t'(0)) begin
+                    // Phase A: ">"
+                    wr_byte = ">";
+                end else if (disp_build_idx_q <= copy_len) begin
+                    // Phase B: quoted text
+                    wr_byte = quoted_store_payload[
+                        ((disp_build_idx_q - msg_len_t'(1))*8) +: 8];
+                    if (wr_byte == 8'h0A) wr_byte = 8'h20;  // flatten newlines
+                end else if (disp_build_idx_q == copy_len + msg_len_t'(1)) begin
+                    // Phase C: "\n" separator
+                    wr_byte = 8'h0A;
                 end else begin
-                    quote_byte = quote_payload_q[quote_payload_idx*8 +: 8];
-                    if (quote_byte == 8'h0A)
-                        quote_byte = 8'h20;
+                    // Phase D: user text (skip QUOTE_MARKER prefix)
+                    wr_byte = pending_payload_q[
+                        ((disp_build_idx_q - copy_len - msg_len_t'(2)
+                          + user_start)*8) +: 8];
                 end
-
-                line_buf[LINE_IDX_W'(cursor_pos_q + quote_write_idx_q)]
-                    <= quote_byte;
-                if (quote_write_idx_q + LEN_WIDTH'(1) >= quote_insert_len_q) begin
-                    len_q        <= len_q + quote_insert_len_q;
-                    cursor_pos_q <= cursor_pos_q + quote_insert_len_q;
-                    if ((quote_sep_byte_q == 8'h0A)
-                     && (input_newline_count_q
-                         < INPUT_NL_COUNT_W'(INPUT_NEWLINE_LIMIT)))
-                        input_newline_count_q <= input_newline_count_q + 1'b1;
-                    pending_payload_q <= '0;
-                    shift_idx_q       <= '0;
-                end else begin
-                    quote_write_idx_q <= quote_write_idx_q + LEN_WIDTH'(1);
-                end
-            end
-
-            if (state_q == S_QUOTE_PACK) begin
-                if (shift_idx_q < len_q) begin
-                    pending_payload_q[shift_idx_q*8 +: 8]
-                        <= line_buf[shift_idx_q[LINE_IDX_W-1:0]];
-                    shift_idx_q <= shift_idx_q + LEN_WIDTH'(1);
-                end
+                disp_payload_q[disp_build_idx_q*8 +: 8] <= wr_byte;
+                disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
             end
 
             if (suggest_recompute) begin
@@ -1817,15 +1888,34 @@ module be_top
             end
 
             // -------------------------------------------------------------
+            // After send: clear quote state (has_quote_q, display
+            // payload) so the next message is a plain one.
+            // -------------------------------------------------------------
+            if ((state_d != state_q)
+             && (state_d == S_ENTER_RENDER_INPUT_CLEAR)) begin
+                has_quote_q       <= 1'b0;
+                quoted_msg_id_q   <= '0;
+                quoted_side_q     <= 2'd0;
+                disp_len_q        <= '0;
+                disp_for_remote_q <= 1'b0;
+            end
+
+            // -------------------------------------------------------------
             // ESC -> S_TX_GOODBYE: also clear the in-flight input line
             // (so reconnect doesn't show stale typing).
             // -------------------------------------------------------------
             if ((state_q == S_IDLE) && accept_io
               && (key_type_e'(io_key_type) == KEY_ESC)
-              && !popup_active_q) begin
+              && !popup_active_q
+              && !has_quote_q) begin
                 len_q        <= '0;
                 cursor_pos_q <= '0;
                 input_newline_count_q <= '0;
+                has_quote_q       <= 1'b0;
+                quoted_msg_id_q   <= '0;
+                quoted_side_q     <= 2'd0;
+                disp_len_q        <= '0;
+                disp_for_remote_q <= 1'b0;
                 emoji_suggest_tracking_q <= 1'b0;
                 emoji_suggest_active_q   <= 1'b0;
                 emoji_suggest_count_q    <= '0;
@@ -1898,10 +1988,16 @@ module be_top
     logic [STORE_IDX_W-1:0]     store_upd_idx;
     logic [1:0]                 store_upd_status;
 
-    assign store_lookup_side   = (accept_rx && rx_is_recall)
-                                 ? 2'(MSG_REMOTE) : 2'(MSG_LOCAL);
-    assign store_lookup_msg_id = (accept_rx && rx_is_recall)
-                                 ? msg_id_t'(cm_rx_seq) : cm_status_msg_id;
+    assign store_lookup_side   = (state_q == S_BUILD_QUOTE_DISP) ? quote_lkup_side
+                               : (accept_rx && rx_is_recall) ? 2'(MSG_REMOTE)
+                               : 2'(MSG_LOCAL);
+    assign store_lookup_msg_id = (state_q == S_BUILD_QUOTE_DISP) ? quote_lkup_msg_id
+                               : (accept_rx && rx_is_recall) ? msg_id_t'(cm_rx_seq)
+                               : cm_status_msg_id;
+
+    // Capture store lookup result for quote display builder use.
+    assign quote_lkup_hit = (state_q == S_BUILD_QUOTE_DISP) ? store_lookup_hit : 1'b0;
+    assign quote_lkup_idx = (state_q == S_BUILD_QUOTE_DISP) ? store_lookup_idx : '0;
 
     assign store_upd_en     = ((state_q == S_IDLE) && accept_status && store_lookup_hit)
                            || (state_q == S_RECALL_RENDER);

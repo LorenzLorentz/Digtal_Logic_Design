@@ -169,6 +169,7 @@ module chat_top
     logic [1:0]                    be_render_conn_state;
     msg_len_t                      be_render_peer_name_len;
     logic [MAX_NAME_LEN*8-1:0]     be_render_peer_name;
+    logic                          be_has_quote;
 
     logic                          ui_popup_active;
     logic [1:0]                    ui_popup_type;
@@ -261,6 +262,7 @@ module chat_top
         .be_render_conn_state   (be_render_conn_state),
         .be_render_peer_name_len(be_render_peer_name_len),
         .be_render_peer_name    (be_render_peer_name),
+        .be_has_quote           (be_has_quote),
         .line_rd_idx            ({$clog2(MAX_LINE_LEN){1'b0}}),
         .line_rd_data           (be_line_rd_data),
         .line_len               (be_line_len),
@@ -355,6 +357,7 @@ module chat_top
         .be_render_conn_state    (be_render_conn_state),
         .be_render_peer_name_len (be_render_peer_name_len),
         .be_render_peer_name     (be_render_peer_name),
+        .be_has_quote            (be_has_quote),
         .video_red               (video_red),
         .video_green             (video_green),
         .video_blue              (video_blue),

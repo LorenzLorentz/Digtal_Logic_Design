@@ -55,6 +55,7 @@ module fe_top
     input  logic [1:0]                 be_render_conn_state,
     input  msg_len_t                   be_render_peer_name_len,
     input  logic [MAX_NAME_LEN*8-1:0]  be_render_peer_name,
+    input  logic                       be_has_quote,
 
     // Pixel-side video out (to ip_rgb2dvi or equivalent)
     output logic [7:0]                 video_red,
@@ -166,6 +167,7 @@ module fe_top
         .be_render_conn_state   (be_render_conn_state),
         .be_render_peer_name_len(be_render_peer_name_len),
         .be_render_peer_name    (be_render_peer_name),
+        .has_quote              (be_has_quote),
         .wr_en                  (wr_en),
         .wr_row                 (wr_row),
         .wr_col                 (wr_col),

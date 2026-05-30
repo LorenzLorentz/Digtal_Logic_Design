@@ -109,6 +109,7 @@ module chat_top_pair
     logic [1:0]                    a_be_render_conn_state;
     msg_len_t                      a_be_render_peer_name_len;
     logic [MAX_NAME_LEN*8-1:0]     a_be_render_peer_name;
+    logic                          a_be_has_quote;
 
     /* verilator lint_off UNUSEDSIGNAL */
     byte_t                         a_line_rd_data;
@@ -189,6 +190,7 @@ module chat_top_pair
         .be_render_conn_state   (a_be_render_conn_state),
         .be_render_peer_name_len(a_be_render_peer_name_len),
         .be_render_peer_name    (a_be_render_peer_name),
+        .be_has_quote           (a_be_has_quote),
         .line_rd_idx            ({$clog2(MAX_LINE_LEN){1'b0}}),
         .line_rd_data           (a_line_rd_data),
         .line_len               (a_line_len),
@@ -271,6 +273,7 @@ module chat_top_pair
         .be_render_conn_state    (a_be_render_conn_state),
         .be_render_peer_name_len (a_be_render_peer_name_len),
         .be_render_peer_name     (a_be_render_peer_name),
+        .be_has_quote            (a_be_has_quote),
         .video_red               (a_video_red),
         .video_green             (a_video_green),
         .video_blue              (a_video_blue),
@@ -342,6 +345,7 @@ module chat_top_pair
     logic [1:0]                    b_be_render_conn_state;
     msg_len_t                      b_be_render_peer_name_len;
     logic [MAX_NAME_LEN*8-1:0]     b_be_render_peer_name;
+    logic                          b_be_has_quote;
 
     /* verilator lint_off UNUSEDSIGNAL */
     byte_t                         b_line_rd_data;
@@ -422,6 +426,7 @@ module chat_top_pair
         .be_render_conn_state   (b_be_render_conn_state),
         .be_render_peer_name_len(b_be_render_peer_name_len),
         .be_render_peer_name    (b_be_render_peer_name),
+        .be_has_quote           (b_be_has_quote),
         .line_rd_idx            ({$clog2(MAX_LINE_LEN){1'b0}}),
         .line_rd_data           (b_line_rd_data),
         .line_len               (b_line_len),
@@ -503,6 +508,7 @@ module chat_top_pair
         .be_render_conn_state    (b_be_render_conn_state),
         .be_render_peer_name_len (b_be_render_peer_name_len),
         .be_render_peer_name     (b_be_render_peer_name),
+        .be_has_quote            (b_be_has_quote),
         .video_red               (b_video_red),
         .video_green             (b_video_green),
         .video_blue              (b_video_blue),

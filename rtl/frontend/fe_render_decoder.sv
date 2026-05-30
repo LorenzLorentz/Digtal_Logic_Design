@@ -103,7 +103,10 @@ module fe_render_decoder
     output logic [INPUT_LINE_W-1:0]    input_cursor_row_obs,
     output msg_len_t                   input_cursor_col_obs,
     output logic [INPUT_N_LINES_W-1:0] input_n_lines_obs,
-    output logic [INPUT_SCROLL_W-1:0]  input_scroll_offset_obs
+    output logic [INPUT_SCROLL_W-1:0]  input_scroll_offset_obs,
+
+    // Quote indicator: 1 = active quote, show ">" marker
+    input  logic                       has_quote
 );
 
     // -----------------------------------------------------------------
@@ -696,6 +699,11 @@ module fe_render_decoder
          && (input_row_cnt_q == INPUT_LINE_W'(MAX_INPUT_LINES - 1))
          && (col_cnt_q == FE_COL_W'(INPUT_LIMIT_MARK_COL))) begin
             input_cell = "!";
+        end
+        if (has_quote
+         && (input_row_cnt_q == INPUT_LINE_W'(MAX_INPUT_LINES - 1))
+         && (col_cnt_q == FE_COL_W'(QUOTE_MARK_COL))) begin
+            input_cell = ">";
         end
     end
 

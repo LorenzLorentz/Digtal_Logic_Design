@@ -410,6 +410,18 @@ package chat_pkg;
         FRAME_RECALL   = 3'd7   // recall msg_id in SEQ; no payload
     } frame_type_e;
 
+    // -----------------------------------------------------------------
+    // Quote wire-format marker. Payload for a quoted message is:
+    //   [0] = QUOTE_MARKER (0x01)
+    //   [1] = quoted_msg_id
+    //   [2..N-1] = user text
+    // The marker cannot appear in user-typed text because the PS/2
+    // input path only admits printable ASCII (0x20..0x7E) and LF (0x0A).
+    // -----------------------------------------------------------------
+    localparam byte_t QUOTE_MARKER     = 8'h01;
+    localparam int    QUOTE_MARKER_LEN = 2;          // marker + msg_id
+    localparam int    QUOTE_DISP_MAX   = 60;         // max quoted chars to show
+
 endpackage : chat_pkg
 
 `endif  // CHAT_PKG_SV

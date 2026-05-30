@@ -67,6 +67,7 @@ module io_be_integration
     output logic [1:0]                 be_render_conn_state,
     output msg_len_t                   be_render_peer_name_len,
     output logic [MAX_NAME_LEN*8-1:0]  be_render_peer_name,
+    output logic                       be_has_quote,
 
     // ---- backend observability ----
     input  logic [LINE_IDX_W-1:0]      line_rd_idx,
@@ -184,6 +185,7 @@ module io_be_integration
         .be_render_conn_state    (be_render_conn_state),
         .be_render_peer_name_len (be_render_peer_name_len),
         .be_render_peer_name     (be_render_peer_name),
+        .be_has_quote            (be_has_quote),
 
         .line_rd_idx             (line_rd_idx),
         .line_rd_data            (line_rd_data),

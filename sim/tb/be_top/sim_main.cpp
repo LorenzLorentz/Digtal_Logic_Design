@@ -2200,8 +2200,8 @@ static void test_right_click_message_opens_context_menu() {
     CHECK_EQ(no_render_for(3), true, "opening message menu emits no render");
 }
 
-static void test_context_menu_quote_inserts_input_prefix() {
-    printf("== test_context_menu_quote_inserts_input_prefix\n");
+static void test_context_menu_quote_sets_quote_state() {
+    printf("== test_context_menu_quote_sets_quote_state\n");
     reset();
     commit_hi_and_expose_hist_owner();
 
@@ -2211,16 +2211,13 @@ static void test_context_menu_quote_inserts_input_prefix() {
 
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + 30), true, "quote render fires");
-    CHECK_EQ(r.cmd, RENDER_UPDATE_INPUT_LINE, "quote updates full input");
-    CHECK_EQ(r.len, 5, "quote input len");
-    CHECK_EQ(r.cursor_pos, 5, "quote cursor");
-    const uint8_t expect[] = {'>',' ','h','i',0x0A};
-    for (int i = 0; i < 5; i++) {
-        char lbl[48]; snprintf(lbl, sizeof(lbl), "quote payload[%d]", i);
-        CHECK_EQ(payload_get_byte(r.payload, i), expect[i], lbl);
-        snprintf(lbl, sizeof(lbl), "quote line_buf[%d]", i);
-        CHECK_EQ(read_buf(i), expect[i], lbl);
-    }
+    // Quote no longer modifies input; it emits RENDER_MOVE_CURSOR to
+    // trigger a frontend redraw so the ">" indicator appears.
+    CHECK_EQ(r.cmd, RENDER_MOVE_CURSOR, "quote emits move cursor");
+    CHECK_EQ(dut->be_has_quote, 1, "has_quote is set");
+    // Input buffer is NOT modified by quote.
+    CHECK_EQ(dut->line_len, 0, "input len unchanged");
+    CHECK_EQ(dut->cursor_pos, 0, "cursor unchanged");
     CHECK_EQ(dut->ui_popup_active, 0, "menu closes after quote");
 }
 
@@ -2298,7 +2295,7 @@ int main(int argc, char** argv) {
     test_big_emoji_tokens_encoded_on_commit();
     test_ctrl_e_sticker_picker_sends_big_emoji();
     test_right_click_message_opens_context_menu();
-    test_context_menu_quote_inserts_input_prefix();
+    test_context_menu_quote_sets_quote_state();
     test_context_menu_recall_marks_local_message();
     test_big_emoji_tokens_mixed_text_passthrough();
     test_big_emoji_unknown_token_passthrough();
