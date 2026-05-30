@@ -203,7 +203,10 @@ module io_be_integration
         .store_rd_byte_idx       (store_rd_byte_idx),
         .store_rd_byte           (store_rd_byte),
 
-        .conn_state_obs          (conn_state_obs)
+        .conn_state_obs          (conn_state_obs),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .store_wr_busy_obs      ()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
 endmodule

@@ -193,7 +193,6 @@ module chat_top
     msg_id_t                       be_store_rd_msg_id;
     logic [1:0]                    be_store_rd_side, be_store_rd_status;
     msg_len_t                      be_store_rd_len;
-    logic [$clog2(MAX_MSG_LEN)-1:0] be_store_rd_byte_idx;
     byte_t                         be_store_rd_byte;
     logic [1:0]                    be_conn_state;
     logic                          be_emoji_suggest_active;
@@ -275,9 +274,12 @@ module chat_top
         .store_rd_side          (be_store_rd_side),
         .store_rd_status        (be_store_rd_status),
         .store_rd_len           (be_store_rd_len),
-        .store_rd_byte_idx      (be_store_rd_byte_idx),
+        .store_rd_byte_idx      ('0),
         .store_rd_byte          (be_store_rd_byte),
-        .conn_state_obs         (be_conn_state)
+        .conn_state_obs         (be_conn_state),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .store_wr_busy_obs      ()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     comm_top #(

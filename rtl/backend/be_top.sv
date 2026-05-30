@@ -189,7 +189,8 @@ module be_top
     input  logic [$clog2(MAX_MSG_LEN)-1:0] store_rd_byte_idx,
     output byte_t                      store_rd_byte,
 
-    output logic [1:0]                 conn_state_obs
+    output logic [1:0]                 conn_state_obs,
+    output logic                       store_wr_busy_obs
 );
 
     // -----------------------------------------------------------------
@@ -1073,7 +1074,10 @@ module be_top
                 // Stay here while bytes remain to encode; exit on the
                 // cycle that finds enc_src_q already caught up to len_q
                 // (that's the cycle store_wr fires, see below).
-                if (enc_src_q >= len_q)
+                // Also wait for !store_wr_busy so the store write isn't
+                // silently dropped when a previous write is still
+                // streaming its payload to BRAM (up to 128 cycles).
+                if (enc_src_q >= len_q && !store_wr_busy)
                     state_d = has_quote_q ? S_BUILD_QUOTE_DISP
                                           : S_ENTER_RENDER_LOCAL;
             end
@@ -1087,7 +1091,7 @@ module be_top
             // Stay in S_MOUSE_CLICK while the walk progresses; only emit
             // the render command once cursor_pos_q has been resolved.
             S_MOUSE_CLICK: if (click_walk_done_q && be_render_ready) state_d = S_IDLE;
-            S_STICKER_COMMIT: state_d = S_ENTER_RENDER_LOCAL;
+            S_STICKER_COMMIT: if (!store_wr_busy) state_d = S_ENTER_RENDER_LOCAL;
             S_EMOJI_COMPLETE_INSERT: begin
                 if ((shift_idx_q == cursor_pos_q)
                  && (emoji_complete_char_idx_q + LEN_WIDTH'(1)
@@ -1347,6 +1351,7 @@ module be_top
     assign be_render_peer_name     = peer_name_q;
     assign be_render_peer_name_len = peer_name_len_q;
     assign conn_state_obs          = be_render_conn_state;
+    assign store_wr_busy_obs       = store_wr_busy;
     assign be_has_quote            = has_quote_q;
 
     // -----------------------------------------------------------------
@@ -1513,7 +1518,7 @@ module be_top
                     pending_payload_q[enc_dst_q*8 +: 8] <= enc_emit_byte;
                     enc_src_q <= enc_src_q + LEN_WIDTH'(enc_src_delta);
                     enc_dst_q <= enc_dst_q + LEN_WIDTH'(1);
-                end else begin
+                end else if (!store_wr_busy) begin
                     pending_len_q <= enc_dst_q;
                     len_q         <= '0;
                     cursor_pos_q  <= '0;

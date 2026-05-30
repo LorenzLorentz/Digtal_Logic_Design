@@ -206,7 +206,10 @@ module chat_top_pair
         .store_rd_len           (a_store_rd_len),
         .store_rd_byte_idx      (a_store_rd_byte_idx),
         .store_rd_byte          (a_store_rd_byte),
-        .conn_state_obs         (a_conn_state)
+        .conn_state_obs         (a_conn_state),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .store_wr_busy_obs      ()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     // A-side comm: tx -> line_a_to_b, rx <- line_b_to_a
@@ -443,7 +446,10 @@ module chat_top_pair
         .store_rd_len           (b_store_rd_len),
         .store_rd_byte_idx      (b_store_rd_byte_idx),
         .store_rd_byte          (b_store_rd_byte),
-        .conn_state_obs         (b_conn_state)
+        .conn_state_obs         (b_conn_state),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .store_wr_busy_obs      ()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     // B-side comm: tx -> line_b_to_a, rx <- line_a_to_b

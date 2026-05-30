@@ -466,16 +466,35 @@ static void drain_render(int timeout = MAX_LINE_LEN + 10) {
     }
 }
 
+// Wait for the BRAM-backed message store to finish streaming its
+// current payload write (if any).  Call before reading store payload
+// bytes with store_payload_byte() to guarantee the data is present.
+static void wait_store_idle(int timeout = MAX_MSG_LEN + 20) {
+    for (int i = 0; i < timeout; i++) {
+        dut->eval();
+        if (!dut->store_wr_busy_obs) return;
+        tick();
+    }
+    ++g_failures;
+    printf("  [FAIL @ %lluns] wait_store_idle: still busy after %d cycles\n",
+           (unsigned long long)g_time_ns, timeout);
+}
+
 // Drain the full commit pipeline: APPEND_LOCAL_PENDING -> be_tx ->
 // UPDATE_INPUT_LINE. Use after send_key(KEY_ENTER) when the test only
 // cares about the post-commit state (not the pipeline contents).
+// After draining, waits for the BRAM-backed store to finish streaming
+// its payload so subsequent store_payload_byte reads see complete data.
 static void drain_commit_pipeline() {
     // First render comes after the multi-cycle encoder finishes, so
     // its timeout has to cover the full encoder walk (worst case
-    // ~MAX_LINE_LEN cycles for a buffer of pure literal bytes).
-    RenderEvent r1; wait_render(r1, MAX_LINE_LEN + 20);
+    // ~MAX_LINE_LEN cycles for a buffer of pure literal bytes) plus
+    // a possible wait for a previous store write to finish streaming
+    // to BRAM (up to MAX_MSG_LEN cycles).
+    RenderEvent r1; wait_render(r1, MAX_LINE_LEN + MAX_MSG_LEN + 40);
     TxEvent t;      wait_tx(t, 10);
     RenderEvent r2; wait_render(r2, 10);
+    wait_store_idle();
 }
 
 // ---- Read helpers ---------------------------------------------------
@@ -493,7 +512,9 @@ static StoreRead read_store(int idx) {
             (uint16_t)dut->store_rd_len};
 }
 static uint8_t store_payload_byte(int i) {
-    // BRAM-backed payload (1-cycle read latency).
+    // BRAM-backed payload (1-cycle read latency). Wait for any
+    // in-flight store write to finish streaming before reading.
+    wait_store_idle();
     dut->store_rd_byte_idx = i;
     tick();
     return (uint8_t)dut->store_rd_byte;
