@@ -81,6 +81,7 @@ enum : uint8_t {
     FRAME_REHELLO  = 4,
     FRAME_USERNAME = 5,
     FRAME_GOODBYE  = 6,
+    FRAME_RECALL   = 7,
 };
 // conn_state_e
 enum : uint8_t {
@@ -1359,6 +1360,31 @@ static void test_cm_rx_len_passthrough_when_small() {
     CHECK_EQ(r.len, 5, "store len pass-through");
 }
 
+static void test_rx_recall_marks_remote_message() {
+    printf("== test_rx_recall_marks_remote_message\n");
+    reset();
+    inject_rx_frame(FRAME_DATA, /*seq=*/42, /*len=*/2, {'o','k'}, 200);
+    RenderEvent append;
+    CHECK_EQ(wait_render(append, 5), true, "remote append render fires");
+
+    auto pre = read_store(0);
+    CHECK_EQ(pre.valid, 1, "remote store valid");
+    CHECK_EQ(pre.msg_id, 42, "remote msg_id");
+    CHECK_EQ(pre.side, MSG_REMOTE, "remote side");
+    CHECK_EQ(pre.status, MSG_SUCCESS, "remote starts success");
+
+    inject_rx_frame(FRAME_RECALL, /*seq=*/42, /*len=*/0, {}, 200);
+    RenderEvent recalled;
+    CHECK_EQ(wait_render(recalled, 10), true, "remote recall render fires");
+    CHECK_EQ(recalled.cmd, RENDER_UPDATE_STATUS, "remote recall render cmd");
+    CHECK_EQ(recalled.msg_id, 42, "remote recall msg_id");
+    CHECK_EQ(recalled.side, MSG_REMOTE, "remote recall side");
+    CHECK_EQ(recalled.status, MSG_RECALLED, "remote recall status");
+
+    auto post = read_store(0);
+    CHECK_EQ(post.status, MSG_RECALLED, "remote store recalled");
+}
+
 // =====================================================================
 // (D) STATUS path
 // =====================================================================
@@ -1403,6 +1429,26 @@ static void test_status_unknown_msg_id() {
     CHECK_EQ(e.msg_id, 99,                   "render carries the offered msg_id");
     auto r = read_store(0);
     CHECK_EQ(r.valid, 0, "no slot magically appeared");
+}
+
+static void test_status_updates_local_when_msg_id_collides_with_remote() {
+    printf("== test_status_updates_local_when_msg_id_collides_with_remote\n");
+    reset();
+    inject_rx_frame(FRAME_DATA, /*seq=*/0, /*len=*/1, {'r'}, 200);
+    drain_render();
+
+    send_key(KEY_CHAR, 'l'); drain_render();
+    send_key(KEY_ENTER, 0);  drain_commit_pipeline();
+
+    inject_status(0, TX_SUCCESS); drain_render();
+
+    auto remote = read_store(0);
+    auto local  = read_store(1);
+    CHECK_EQ(remote.side, MSG_REMOTE, "slot 0 is remote");
+    CHECK_EQ(remote.status, MSG_SUCCESS, "remote status unchanged");
+    CHECK_EQ(local.side, MSG_LOCAL, "slot 1 is local");
+    CHECK_EQ(local.msg_id, 0, "local has colliding msg_id");
+    CHECK_EQ(local.status, MSG_SUCCESS, "status hit local side");
 }
 
 // =====================================================================
@@ -2194,10 +2240,16 @@ static void test_context_menu_recall_marks_local_message() {
     CHECK_EQ(r.status, MSG_RECALLED, "recall status");
     CHECK_EQ(dut->ui_popup_active, 0, "menu closes after recall");
 
-    StoreRead s = read_store(0);
-    CHECK_EQ(s.valid, 1, "recall store valid");
-    CHECK_EQ(s.status, MSG_RECALLED, "store status recalled");
-}
+	    StoreRead s = read_store(0);
+	    CHECK_EQ(s.valid, 1, "recall store valid");
+	    CHECK_EQ(s.status, MSG_RECALLED, "store status recalled");
+
+	    TxEvent tx;
+	    CHECK_EQ(wait_tx(tx, 20), true, "recall tx fires");
+	    CHECK_EQ(tx.frame_type, FRAME_RECALL, "recall tx frame");
+	    CHECK_EQ(tx.msg_id, 0, "recall tx msg_id");
+	    CHECK_EQ(tx.len, 0, "recall tx len");
+	}
 
 // =====================================================================
 int main(int argc, char** argv) {
@@ -2260,10 +2312,12 @@ int main(int argc, char** argv) {
     test_rx_does_not_consume_local_msg_id();
     test_cm_rx_len_clamped();
     test_cm_rx_len_passthrough_when_small();
+    test_rx_recall_marks_remote_message();
     // (D) STATUS
     test_status_updates_store();
     test_status_emits_render();
     test_status_unknown_msg_id();
+    test_status_updates_local_when_msg_id_collides_with_remote();
     // (G) Arbitration
     test_arbitration_priority();
     // (H) Sanity

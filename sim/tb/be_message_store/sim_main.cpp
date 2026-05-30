@@ -104,7 +104,7 @@ static void clear_all_inputs() {
 
     dut->upd_en = 0; dut->upd_idx = 0; dut->upd_status = 0;
     dut->clear_en = 0;
-    dut->rd_idx = 0; dut->lookup_msg_id = 0;
+    dut->rd_idx = 0; dut->lookup_side = 0; dut->lookup_msg_id = 0;
     dut->rd2_idx = 0;
 }
 static void reset(int cycles = 4) {
@@ -163,7 +163,8 @@ static ReadResult do_read(int idx) {
 
 // --- Helper: lookup msg_id (combinational) ---------------------------
 struct LookupResult { uint8_t hit; uint8_t idx; };
-static LookupResult do_lookup(uint8_t msg_id) {
+static LookupResult do_lookup(uint8_t side, uint8_t msg_id) {
+    dut->lookup_side = side;
     dut->lookup_msg_id = msg_id;
     dut->eval();
     return {(uint8_t)dut->lookup_hit, (uint8_t)dut->lookup_idx};
@@ -194,7 +195,7 @@ static void test_reset_invalidates_all() {
         char label[40]; snprintf(label, sizeof(label), "slot[%d].valid", i);
         CHECK_EQ(r.valid, 0, label);
     }
-    auto l = do_lookup(0);
+    auto l = do_lookup(MSG_LOCAL, 0);
     CHECK_EQ(l.hit, 0, "lookup miss on empty store");
 }
 
@@ -273,7 +274,7 @@ static void test_status_update_invalid_slot() {
     do_status_update(10, MSG_SUCCESS);
     auto r = do_read(10);
     CHECK_EQ(r.valid, 0, "slot stays invalid after upd-only");
-    auto l = do_lookup(0);  // also confirms no spurious hits
+    auto l = do_lookup(MSG_LOCAL, 0);  // also confirms no spurious hits
     CHECK_EQ(l.hit, 0, "no lookup hits on invalid slot");
 }
 
@@ -298,7 +299,7 @@ static void test_lookup_hit() {
     printf("== test_lookup_hit\n");
     reset();
     do_write(3, 17, MSG_LOCAL, MSG_PENDING, 1, {'x'});
-    auto l = do_lookup(17);
+    auto l = do_lookup(MSG_LOCAL, 17);
     CHECK_EQ(l.hit, 1, "lookup hit on existing msg_id");
     CHECK_EQ(l.idx, 3, "lookup idx is the right slot");
 }
@@ -308,7 +309,7 @@ static void test_lookup_miss() {
     printf("== test_lookup_miss\n");
     reset();
     do_write(3, 17, MSG_LOCAL, MSG_PENDING, 1, {'x'});
-    auto l = do_lookup(99);
+    auto l = do_lookup(MSG_LOCAL, 99);
     CHECK_EQ(l.hit, 0, "lookup miss for absent msg_id");
 }
 
@@ -320,9 +321,12 @@ static void test_lookup_collision_lowest_idx() {
     reset();
     do_write(7,  5, MSG_LOCAL,  MSG_PENDING, 1, {'a'});
     do_write(20, 5, MSG_REMOTE, MSG_SUCCESS, 1, {'b'});
-    auto l = do_lookup(5);
+    auto l = do_lookup(MSG_LOCAL, 5);
     CHECK_EQ(l.hit, 1, "lookup hit on collision");
     CHECK_EQ(l.idx, 7, "lowest matching idx wins");
+    auto r = do_lookup(MSG_REMOTE, 5);
+    CHECK_EQ(r.hit, 1, "remote lookup hit on same msg_id");
+    CHECK_EQ(r.idx, 20, "remote side disambiguates msg_id");
 }
 
 // 10) wr_en and upd_en hit the SAME slot in the same cycle. The write
@@ -407,8 +411,8 @@ static void test_clear_en_invalidates_all() {
         char lbl[40]; snprintf(lbl, sizeof(lbl), "slot[%d] cleared", i);
         CHECK_EQ(r.valid, 0, lbl);
     }
-    auto l1 = do_lookup(1); CHECK_EQ(l1.hit, 0, "msg_id 1 gone after clear");
-    auto l2 = do_lookup(2); CHECK_EQ(l2.hit, 0, "msg_id 2 gone after clear");
+    auto l1 = do_lookup(MSG_LOCAL, 1); CHECK_EQ(l1.hit, 0, "msg_id 1 gone after clear");
+    auto l2 = do_lookup(MSG_REMOTE, 2); CHECK_EQ(l2.hit, 0, "msg_id 2 gone after clear");
 }
 
 // 13b) clear_en wins over wr_en in the same cycle.
@@ -465,8 +469,8 @@ static void test_reset_after_writes() {
         char label[40]; snprintf(label, sizeof(label), "slot[%d] cleared", i);
         CHECK_EQ(r.valid, 0, label);
     }
-    auto l1 = do_lookup(1); CHECK_EQ(l1.hit, 0, "msg_id 1 gone after reset");
-    auto l2 = do_lookup(2); CHECK_EQ(l2.hit, 0, "msg_id 2 gone after reset");
+    auto l1 = do_lookup(MSG_LOCAL, 1); CHECK_EQ(l1.hit, 0, "msg_id 1 gone after reset");
+    auto l2 = do_lookup(MSG_REMOTE, 2); CHECK_EQ(l2.hit, 0, "msg_id 2 gone after reset");
 }
 
 // =====================================================================

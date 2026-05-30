@@ -29,8 +29,9 @@
 //   rd_idx     : combinational read; outputs reflect the slot at rd_idx.
 //                Caller should also gate on rd_valid before trusting data.
 //
-//   lookup     : combinational find of the LOWEST valid idx whose msg_id
-//                matches lookup_msg_id. lookup_hit is 1 if a match exists.
+//   lookup     : combinational find of the LOWEST valid idx whose side and
+//                msg_id match lookup_side / lookup_msg_id. lookup_hit is 1
+//                if a match exists.
 //
 // Conflict policy:
 //   If wr_en and upd_en target the SAME slot in the same cycle, the
@@ -90,7 +91,8 @@ module be_message_store
     output msg_len_t                      rd2_len,
     output logic [MAX_MSG_LEN*8-1:0]      rd2_payload,
 
-    // Combinational lookup by msg_id (lowest matching idx)
+    // Combinational lookup by side + msg_id (lowest matching idx)
+    input  logic [1:0]                    lookup_side,
     input  msg_id_t                       lookup_msg_id,
     output logic                          lookup_hit,
     output logic [IDX_W-1:0]              lookup_idx
@@ -154,7 +156,7 @@ module be_message_store
     assign rd2_payload = store[rd2_idx].payload;
 
     // -----------------------------------------------------------------
-    // Combinational lookup by msg_id (lowest valid match wins).
+    // Combinational lookup by side + msg_id (lowest valid match wins).
     // Forward iteration with a "found" flag so the FIRST valid match
     // sticks and later matches are ignored.
     // -----------------------------------------------------------------
@@ -163,6 +165,7 @@ module be_message_store
         lookup_idx = '0;
         for (int i = 0; i < MAX_MSG_NUM; i++) begin
             if (!lookup_hit && store[i].valid &&
+                (store[i].side == lookup_side) &&
                 (store[i].msg_id == lookup_msg_id)) begin
                 lookup_hit = 1'b1;
                 lookup_idx = i[IDX_W-1:0];

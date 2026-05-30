@@ -406,7 +406,8 @@ package chat_pkg;
         FRAME_HELLO    = 3'd3,  // boot / SPACE-reconnect; payload = sender's name
         FRAME_REHELLO  = 3'd4,  // mid-chat re-confirm; payload = sender's name
         FRAME_USERNAME = 3'd5,  // response; payload = sender's name
-        FRAME_GOODBYE  = 3'd6   // ESC; no payload
+        FRAME_GOODBYE  = 3'd6,  // ESC; no payload
+        FRAME_RECALL   = 3'd7   // recall msg_id in SEQ; no payload
     } frame_type_e;
 
 endpackage : chat_pkg

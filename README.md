@@ -173,15 +173,16 @@ KEY_UP        = 6    KEY_DOWN     = 7    // 历史滚动
 
 ### 3.2 `be_top → comm_top` (TX 请求)
 
-发送一帧, 类型可以是 DATA 或四种控制帧 (HELLO / REHELLO / USERNAME / GOODBYE).
+发送一帧, 类型可以是 DATA 或控制帧
+(HELLO / REHELLO / USERNAME / GOODBYE / RECALL).
 
 | 信号                       | 方向            | 含义                              |
 | -------------------------- | --------------- | --------------------------------- |
 | `be_tx_valid`              | backend → comm  | backend 要发一帧                  |
 | `be_tx_ready`              | comm → backend  | comm 空闲, 可接                   |
 | `be_tx_frame_type[2:0]`    | backend → comm  | `frame_type_e`                    |
-| `be_tx_msg_id[7:0]`        | backend → comm  | 仅 DATA 用; 用于状态回报          |
-| `be_tx_len[7:0]`           | backend → comm  | payload 字节数                    |
+| `be_tx_msg_id[7:0]`        | backend → comm  | DATA 的业务消息号; RECALL 时为目标消息号 |
+| `be_tx_len[15:0]`          | backend → comm  | payload 字节数                    |
 | `be_tx_payload[MAX*8-1:0]` | backend → comm  | DATA 内容 / 用户名 / 空           |
 
 `frame_type_e`:
@@ -191,9 +192,10 @@ FRAME_DATA     = 0   FRAME_HELLO    = 3
 FRAME_ACK      = 1   FRAME_REHELLO  = 4
 FRAME_NAK      = 2   FRAME_USERNAME = 5
                      FRAME_GOODBYE  = 6
+                     FRAME_RECALL   = 7
 ```
 
-所有 backend 发出的帧都走 ARQ (重传到 MAX_RETRY=4 次), 只有 DATA 帧会经由 `cm_status_*` 回报最终结果, 其它控制帧是 fire-and-forget.
+所有 backend 发出的帧都走 link-level ARQ (重传到 MAX_RETRY=4 次), 但只有 DATA 帧会经由 `cm_status_*` 回报最终结果. 控制帧没有 backend 状态回报; RECALL 是 best-effort UI 事件, payload 为空, 目标消息号放在 `be_tx_msg_id`/wire `SEQ`.
 
 ### 3.3 `comm_top → be_top` (RX 帧 + TX 状态)
 
@@ -204,8 +206,8 @@ FRAME_NAK      = 2   FRAME_USERNAME = 5
 | `cm_rx_valid`              | comm → backend  | 收到一帧                   |
 | `cm_rx_ready`              | backend → comm  | backend 可消化             |
 | `cm_rx_frame_type[2:0]`    | comm → backend  | 与 be_tx_frame_type 同表   |
-| `cm_rx_seq[7:0]`           | comm → backend  | 对端帧序号                 |
-| `cm_rx_len[7:0]`           | comm → backend  | payload 字节数             |
+| `cm_rx_seq[7:0]`           | comm → backend  | wire `SEQ`; DATA/RECALL 时是对端业务 msg_id |
+| `cm_rx_len[15:0]`          | comm → backend  | payload 字节数             |
 | `cm_rx_payload[MAX*8-1:0]` | comm → backend  | 帧载荷 (长度 ≤ MAX_MSG_LEN)|
 
 ACK / NAK 由 comm 自己消化, 不上送 backend.
@@ -262,8 +264,7 @@ CONN_HANDSHAKE    = 1   CONN_DISCONNECTED = 3
 鼠标上下文菜单使用 frontend 暴露的历史行 owner 元数据完成 hit-test:
 `hist_wr_row_obs` / `scroll_offset_obs` 定位可见历史行, 每个历史物理行再提供
 `hist_owner_valid/store_idx/side/width`. backend 右键命中消息气泡后打开
-`POPUP_MSG_MENU`; Quote 将 `> <payload><newline>` 插入输入框, Recall 将本地消息状态
-更新为 `MSG_RECALLED` 并通过 `RENDER_UPDATE_STATUS` 重绘.
+`POPUP_MSG_MENU`; Quote 将 `> <payload><newline>` 插入输入框. Recall 只允许从菜单撤回本地消息: backend 先将本机 `LOCAL+msg_id` 记录更新为 `MSG_RECALLED`, 再发送 `FRAME_RECALL(msg_id)`. 对端收到后只查找并撤回 `REMOTE+msg_id`; 找不到时 no-op.
 
 ### 3.5 关键尺寸参数 (`chat_pkg.sv`)
 
@@ -356,20 +357,21 @@ flowchart LR
 ### 5.1 帧格式
 
 ```text
-+------+------+------+------+----------+--------+--------+
-| SOF  | TYPE | SEQ  | LEN  | PAYLOAD  | CRC_HI | CRC_LO |
-+------+------+------+------+----------+--------+--------+
- 8 bit  3 bit  8 bit  8 bit   LEN byte   8 bit    8 bit
++------+------+------+------+------+----------+--------+--------+
+| SOF  | TYPE | SEQ  | LEN_H| LEN_L| PAYLOAD  | CRC_HI | CRC_LO |
++------+------+------+------+------+----------+--------+--------+
+ 8 bit  8 bit  8 bit  8 bit  8 bit  LEN byte   8 bit    8 bit
 ```
 
 - `SOF = 0x7E`, 固定起始字节. 无字节填充 (payload 中允许 0x7E, 靠 LEN 定边界).
-- `TYPE` 3 bit, 高 5 bit 在编码时被零填充为完整字节.
+- `TYPE[7]` 是 link-level ARQ 交替位; `TYPE[2:0]` 是 `frame_type_e`; `TYPE[6:3]` 保留为 0.
+- `SEQ[7:0]` 是业务层 `msg_id`, 不是 ARQ 序号. DATA 用它标识消息; RECALL 用它标识要撤回的消息.
 - `CRC16` CCITT, 多项式 `0x1021`, 初值 `0xFFFF`, 校验范围 = TYPE..PAYLOAD (不含 SOF 与 CRC 本身), 大端发送.
-- 控制帧 (HELLO / REHELLO / USERNAME) 用 payload 携带发送方用户名; ACK / NAK / GOODBYE 的 LEN=0, 无 payload.
+- 控制帧 (HELLO / REHELLO / USERNAME) 用 payload 携带发送方用户名; ACK / NAK / GOODBYE / RECALL 的 LEN=0, 无 payload.
 
 ### 5.2 TX FSM (stop-and-wait, alternating bit)
 
-`comm_tx_fsm` 只用 SEQ 的最低位 (`tx_seq_q[0]`) 做交替位. SUCCESS 时翻转, FAIL 时不翻转 (因为对端的 expected 也没动).
+`comm_tx_fsm` 用 `TYPE[7]` 承载交替位. DATA 收到匹配 ACK 后翻转; DATA 最终 FAIL 时不翻转. 控制帧也等待 ACK/重传, 但成功后不推进 DATA duplicate-filter 的交替位.
 
 ```mermaid
 stateDiagram-v2
@@ -385,7 +387,7 @@ stateDiagram-v2
     S_REPORT_FAIL --> S_IDLE: cm_status_ready
 ```
 
-控制帧成功后不上报 (fire-and-forget), 失败也不上报 — 上层不为之做任何 retry/超时逻辑, 双方靠 HELLO 的反复重发自然收敛.
+控制帧成功后不上报 (fire-and-forget), 失败也不上报. HELLO/USERNAME 这类连接控制靠后续握手自然收敛; RECALL 没有应用层 ACK, 因此语义是 link-level best-effort.
 
 `TIMEOUT_CYCLES` 默认 `2_000_000` (100 MHz × 20 ms). testbench 用更小值缩短仿真.
 
@@ -525,7 +527,7 @@ wr_ptr_q                           // 循环写指针
 next_msg_id_q                      // 单调分配的本地 msg_id
 ```
 
-消息存储支持原子写 (`wr_en`), 状态-only 更新 (`upd_en` 改 PENDING → SUCCESS/FAIL), 单周期全清 (`clear_en`, 切换对端时), 以及组合 lookup (按 msg_id 找最低有效行). 切换对端时 wr_ptr / next_msg_id 一并复位.
+消息存储支持原子写 (`wr_en`), 状态-only 更新 (`upd_en` 改 PENDING → SUCCESS/FAIL/RECALLED), 单周期全清 (`clear_en`, 切换对端时), 以及组合 lookup (按 `side+msg_id` 找最低有效行). 切换对端时 wr_ptr / next_msg_id 一并复位.
 
 ### 6.6 三段 Enter 提交
 

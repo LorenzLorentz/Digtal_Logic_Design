@@ -32,8 +32,8 @@
 //   hist_wr_row_q       next slot in history ring. Wraps; v1 has no
 //                       scrolling -- oldest message gets overwritten
 //                       in place. TODO: add scrolling.
-//   msg_id_row_q[]      256-deep lookup so RENDER_UPDATE_STATUS can
-//                       find the row that owns a given msg_id.
+//   msg_key_row_q[]     {side,msg_id} lookup so RENDER_UPDATE_STATUS can
+//                       find the row that owns a specific local/remote msg.
 //
 // REDRAW_ALL is a near no-op (text_ram already inits to spaces); it
 // just latches conn_state_curr_q. Scan side picks the layout based on
@@ -246,15 +246,20 @@ module fe_render_decoder
     // (== 1 << HIST_W) fits without wrapping back to 0.
     logic [HIST_W:0]                  used_hist_rows_q;
 
-    // msg_id -> ring slot lookup (small: 256 entries, HIST_W+1 bits each)
-    logic [HIST_W-1:0]                msg_id_row_q      [256];
-    logic                             msg_id_valid_q    [256];
+    // {side,msg_id} -> ring slot lookup. Both peers allocate msg_id from 0,
+    // so side is part of the key to avoid LOCAL/REMOTE collisions.
+    localparam int MSG_LOOKUP_KEY_W = 2 + MSG_ID_WIDTH;
+    localparam int MSG_LOOKUP_N     = 1 << MSG_LOOKUP_KEY_W;
+    logic [HIST_W-1:0]                msg_key_row_q      [MSG_LOOKUP_N];
+    logic                             msg_key_valid_q    [MSG_LOOKUP_N];
 
     // Per-ring-slot metadata used by RENDER_UPDATE_STATUS to redraw the
     // entire bubble row. side and len are kept as register arrays
     // (small: 2-bit and 16-bit per slot); the payload moved into BRAM
     // (fe_msg_payload_ram) to free the LUTs.
     logic [1:0]                       slot_side_q     [N_HIST_STORED];
+    msg_id_t                          slot_msg_id_q   [N_HIST_STORED];
+    logic                             slot_msg_valid_q[N_HIST_STORED];
     msg_len_t                         slot_len_q      [N_HIST_STORED];
     logic [LINE_CNT_W-1:0]            slot_n_lines_q  [N_HIST_STORED];
     logic [1:0]                       slot_avatar_attr_q [N_HIST_STORED];
@@ -804,7 +809,9 @@ module fe_render_decoder
                         // back into payload_q (also re-parses newlines)
                         // before rewriting the bubble row.
                         RENDER_UPDATE_STATUS:
-                            state_d = msg_id_valid_q[be_render_msg_id]
+                            state_d = msg_key_valid_q[
+                                          {be_render_side, be_render_msg_id}
+                                      ]
                                       ? ((be_render_status == 2'(MSG_RECALLED))
                                          ? S_UPDATE_STATUS : S_HIST_LOAD)
                                       : S_IDLE;
@@ -990,12 +997,14 @@ module fe_render_decoder
             hist_wr_row_q     <= '0;
             scroll_offset_q   <= '0;
             used_hist_rows_q  <= '0;
-            for (int i = 0; i < 256; i++) begin
-                msg_id_row_q[i]   <= '0;
-                msg_id_valid_q[i] <= 1'b0;
+            for (int i = 0; i < MSG_LOOKUP_N; i++) begin
+                msg_key_row_q[i]   <= '0;
+                msg_key_valid_q[i] <= 1'b0;
             end
             for (int i = 0; i < N_HIST_STORED; i++) begin
                 slot_side_q[i]        <= 2'(MSG_LOCAL);
+                slot_msg_id_q[i]      <= '0;
+                slot_msg_valid_q[i]   <= 1'b0;
                 slot_len_q[i]         <= '0;
                 slot_n_lines_q[i]     <= LINE_CNT_W'(1);
                 slot_avatar_attr_q[i] <= BUBBLE_ATTR_NONE;
@@ -1102,10 +1111,12 @@ module fe_render_decoder
                                 hist_wr_row_q    <= '0;
                                 scroll_offset_q  <= '0;
                                 used_hist_rows_q <= '0;
-                                for (int i = 0; i < 256; i++)
-                                    msg_id_valid_q[i] <= 1'b0;
+                                for (int i = 0; i < MSG_LOOKUP_N; i++)
+                                    msg_key_valid_q[i] <= 1'b0;
                                 for (int i = 0; i < N_HIST_STORED; i++) begin
                                     slot_side_q[i]        <= 2'(MSG_LOCAL);
+                                    slot_msg_id_q[i]      <= '0;
+                                    slot_msg_valid_q[i]   <= 1'b0;
                                     slot_len_q[i]         <= '0;
                                     slot_n_lines_q[i]     <= LINE_CNT_W'(1);
                                     slot_avatar_attr_q[i] <= BUBBLE_ATTR_NONE;
@@ -1140,21 +1151,35 @@ module fe_render_decoder
                         payload_q     <= be_render_payload;
                         target_row_q  <= FE_ROW_W'(HIST_ROW_START)
                                          + FE_ROW_W'(hist_wr_row_q);
-                        msg_id_row_q[be_render_msg_id]   <= hist_wr_row_q;
-                        msg_id_valid_q[be_render_msg_id] <= 1'b1;
+                        if (slot_msg_valid_q[hist_wr_row_q]) begin
+                            msg_key_valid_q[
+                                {slot_side_q[hist_wr_row_q],
+                                 slot_msg_id_q[hist_wr_row_q]}
+                            ] <= 1'b0;
+                        end
+                        msg_key_row_q[{be_render_side, be_render_msg_id}]
+                            <= hist_wr_row_q;
+                        msg_key_valid_q[{be_render_side, be_render_msg_id}]
+                            <= 1'b1;
                         slot_side_q[hist_wr_row_q]       <= be_render_side;
+                        slot_msg_id_q[hist_wr_row_q]     <= be_render_msg_id;
+                        slot_msg_valid_q[hist_wr_row_q]  <= 1'b1;
                         slot_len_q[hist_wr_row_q]        <= be_render_len;
                         msg_total_len_q                  <= be_render_len;
                         msg_target_slot_q                <= hist_wr_row_q;
                     end
 
                     RENDER_UPDATE_STATUS: begin
-                        if (msg_id_valid_q[be_render_msg_id]) begin
+                        if (msg_key_valid_q[
+                            {be_render_side, be_render_msg_id}
+                        ]) begin
                             // Snapshot the ring slot owning this msg_id
                             // and latch its meta; payload load happens
                             // in S_HIST_LOAD (BRAM walk + parse).
                             automatic logic [HIST_W-1:0] slot;
-                            slot = msg_id_row_q[be_render_msg_id];
+                            slot = msg_key_row_q[
+                                {be_render_side, be_render_msg_id}
+                            ];
 
                             status_q          <= be_render_status;
                             target_row_q      <= FE_ROW_W'(HIST_ROW_START)

@@ -30,7 +30,7 @@ static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;
 enum : uint8_t {
     FRAME_DATA     = 0, FRAME_ACK      = 1, FRAME_NAK      = 2,
     FRAME_HELLO    = 3, FRAME_REHELLO  = 4, FRAME_USERNAME = 5,
-    FRAME_GOODBYE  = 6,
+    FRAME_GOODBYE  = 6, FRAME_RECALL   = 7,
 };
 
 // Captured events.
@@ -43,9 +43,11 @@ struct Events {
 
     bool    ack_q;
     uint8_t ack_q_seq;
+    uint8_t ack_q_arq;
 
     bool    tx_ack;
     uint8_t tx_ack_seq;
+    uint8_t tx_ack_arq;
 };
 static Events ev;
 
@@ -73,6 +75,7 @@ static void sample_outputs() {
     if (dut->tx_ack_valid && !ev.tx_ack) {
         ev.tx_ack     = true;
         ev.tx_ack_seq = (uint8_t)dut->tx_ack_seq;
+        ev.tx_ack_arq = (uint8_t)dut->tx_ack_arq;
     }
     if (dut->cm_rx_valid && dut->cm_rx_ready && !ev.cm_rx) {
         ev.cm_rx       = true;
@@ -85,6 +88,7 @@ static void sample_outputs() {
     if (dut->ack_q_valid && dut->ack_q_ready && !ev.ack_q) {
         ev.ack_q     = true;
         ev.ack_q_seq = (uint8_t)dut->ack_q_seq;
+        ev.ack_q_arq = (uint8_t)dut->ack_q_arq;
     }
 }
 
@@ -103,6 +107,7 @@ static void reset() {
     dut->rst_n          = 0;
     dut->frame_in_valid = 0;
     dut->frame_in_type  = 0;
+    dut->frame_in_arq   = 0;
     dut->frame_in_seq   = 0;
     dut->frame_in_len   = 0;
     payload_clear(dut->frame_in_payload);
@@ -126,10 +131,12 @@ static void reset() {
 } while (0)
 
 // Inject one frame; loop ticks until the FSM returns to IDLE.
-static void inject_and_drain(uint8_t ftype, uint8_t seq,
+// arq = ARQ alternating bit, seq = msg_id (full 8 bits).
+static void inject_and_drain(uint8_t ftype, uint8_t arq, uint8_t seq,
                              const std::vector<uint8_t>& payload) {
     while (!dut->frame_in_ready) tick();
     dut->frame_in_type = ftype;
+    dut->frame_in_arq  = arq;
     dut->frame_in_seq  = seq;
     dut->frame_in_len  = (uint8_t)payload.size();
     payload_load(dut->frame_in_payload, payload);
@@ -149,7 +156,7 @@ static void inject_and_drain(uint8_t ftype, uint8_t seq,
 static void test_ack_frame() {
     printf("== test_ack_frame\n");
     reset();
-    inject_and_drain(FRAME_ACK, 0x55, {});
+    inject_and_drain(FRAME_ACK, 0, 0x55, {});
     CHECK_EQ(ev.tx_ack ? 1 : 0,    1,    "tx_ack pulsed");
     CHECK_EQ((int)ev.tx_ack_seq,   0x55, "tx_ack seq");
     CHECK_EQ(ev.cm_rx  ? 1 : 0,    0,    "no cm_rx");
@@ -160,7 +167,7 @@ static void test_ack_frame() {
 static void test_data_match_first() {
     printf("== test_data_match_first\n");
     reset();
-    inject_and_drain(FRAME_DATA, 0x00, {'h','i'});
+    inject_and_drain(FRAME_DATA, 0, 0x00, {'h','i'});
     CHECK_EQ(ev.cm_rx  ? 1 : 0,    1,        "cm_rx delivered");
     CHECK_EQ((int)ev.cm_rx_type,   FRAME_DATA, "cm_rx type");
     CHECK_EQ((int)ev.cm_rx_seq,    0x00,     "cm_rx seq");
@@ -177,11 +184,11 @@ static void test_data_duplicate() {
     printf("== test_data_duplicate\n");
     reset();
     // First, deliver DATA seq=0 to advance expected.
-    inject_and_drain(FRAME_DATA, 0x00, {'a'});
+    inject_and_drain(FRAME_DATA, 0, 0x00, {'a'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "first DATA delivered");
     clear_events();
     // Now resend DATA seq=0 -- duplicate (expected is now 1).
-    inject_and_drain(FRAME_DATA, 0x00, {'a'});
+    inject_and_drain(FRAME_DATA, 0, 0x00, {'a'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 0, "dup not delivered");
     CHECK_EQ(ev.ack_q ? 1 : 0, 1, "dup still ACKs");
     CHECK_EQ((int)ev.ack_q_seq, 0x00, "ack_q echoes seq");
@@ -191,18 +198,18 @@ static void test_data_duplicate() {
 static void test_data_alternating() {
     printf("== test_data_alternating\n");
     reset();
-    inject_and_drain(FRAME_DATA, 0x00, {'a'});
+    inject_and_drain(FRAME_DATA, 0, 0x00, {'a'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "seq=0 delivered");
     clear_events();
-    inject_and_drain(FRAME_DATA, 0x01, {'b'});
+    inject_and_drain(FRAME_DATA, 1, 0x01, {'b'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "seq=1 delivered");
     CHECK_EQ((int)ev.cm_rx_payload[0], 'b', "payload");
     clear_events();
-    inject_and_drain(FRAME_DATA, 0x01, {'b'});
+    inject_and_drain(FRAME_DATA, 1, 0x01, {'b'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 0, "second seq=1 dup");
     CHECK_EQ(ev.ack_q ? 1 : 0, 1, "still ACKs");
     clear_events();
-    inject_and_drain(FRAME_DATA, 0x00, {'c'});
+    inject_and_drain(FRAME_DATA, 0, 0x00, {'c'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "seq=0 again delivered");
     CHECK_EQ((int)ev.cm_rx_payload[0], 'c', "payload");
 }
@@ -212,10 +219,10 @@ static void test_control_always_delivers() {
     printf("== test_control_always_delivers\n");
     reset();
     // Advance expected by delivering one DATA seq=0.
-    inject_and_drain(FRAME_DATA, 0x00, {'x'});
+    inject_and_drain(FRAME_DATA, 0, 0x00, {'x'});
     clear_events();
     // Now HELLO with seq=0 (would be a DATA "duplicate") still delivers.
-    inject_and_drain(FRAME_HELLO, 0x00, {'A','l','i','c'});
+    inject_and_drain(FRAME_HELLO, 0, 0x00, {'A','l','i','c'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "HELLO delivered (no dup filter)");
     CHECK_EQ((int)ev.cm_rx_type,   FRAME_HELLO, "type=HELLO");
     CHECK_EQ((int)ev.cm_rx_payload[0], 'A',     "payload[0]");
@@ -224,13 +231,22 @@ static void test_control_always_delivers() {
     // expected_rx_seq should NOT have toggled by control delivery.
     // Verify by sending DATA seq=1 next -- if expected was 1, this is
     // valid (matches); if HELLO had toggled it to 0, this would dup.
-    inject_and_drain(FRAME_DATA, 0x01, {'y'});
+    inject_and_drain(FRAME_DATA, 1, 0x01, {'y'});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "DATA seq=1 still treated as match");
 
     // GOODBYE always delivers too.
     clear_events();
-    inject_and_drain(FRAME_GOODBYE, 0x77, {});
+    inject_and_drain(FRAME_GOODBYE, 0, 0x77, {});
     CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "GOODBYE delivered");
+
+    // RECALL is also a control frame: always delivered and ACKed, and
+    // its seq byte carries the business msg_id to recall.
+    clear_events();
+    inject_and_drain(FRAME_RECALL, 1, 0x42, {});
+    CHECK_EQ(ev.cm_rx ? 1 : 0, 1, "RECALL delivered");
+    CHECK_EQ((int)ev.cm_rx_type, FRAME_RECALL, "type=RECALL");
+    CHECK_EQ((int)ev.cm_rx_seq, 0x42, "recall msg_id in seq");
+    CHECK_EQ(ev.ack_q ? 1 : 0, 1, "RECALL ACK enqueued");
 }
 
 // 6) cm_rx back-pressure: held until ready.
@@ -240,6 +256,7 @@ static void test_cm_rx_backpressure() {
     dut->cm_rx_ready = 0;
     while (!dut->frame_in_ready) tick();
     dut->frame_in_type = FRAME_DATA;
+    dut->frame_in_arq  = 0;
     dut->frame_in_seq  = 0;
     dut->frame_in_len  = 1;
     payload_load(dut->frame_in_payload, {'q'});
@@ -264,6 +281,7 @@ static void test_ack_q_backpressure() {
     dut->ack_q_ready = 0;
     while (!dut->frame_in_ready) tick();
     dut->frame_in_type = FRAME_DATA;
+    dut->frame_in_arq  = 0;
     dut->frame_in_seq  = 0;
     dut->frame_in_len  = 1;
     payload_load(dut->frame_in_payload, {'r'});

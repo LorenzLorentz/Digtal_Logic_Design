@@ -25,11 +25,13 @@ module comm_tx_arbiter
     input  logic                          ack_q_valid,
     output logic                          ack_q_ready,
     input  seq_t                          ack_q_seq,
+    input  logic                          ack_q_arq,
 
     // ---- tx_fsm (regular source) ----
     input  logic                          tx_req_valid,
     output logic                          tx_req_ready,
     input  logic [2:0]                    tx_req_type,
+    input  logic                          tx_req_arq,
     input  seq_t                          tx_req_seq,
     input  msg_len_t                      tx_req_len,
     input  logic [MAX_MSG_LEN*8-1:0]      tx_req_payload,
@@ -38,6 +40,7 @@ module comm_tx_arbiter
     output logic                          enc_valid,
     input  logic                          enc_ready,
     output logic [2:0]                    enc_type,
+    output logic                          enc_arq,
     output seq_t                          enc_seq,
     output msg_len_t                      enc_len,
     output logic [MAX_MSG_LEN*8-1:0]      enc_payload
@@ -49,6 +52,7 @@ module comm_tx_arbiter
     // Drive encoder request.
     assign enc_valid    = ack_wins ? 1'b1 : tx_req_valid;
     assign enc_type     = ack_wins ? 3'(FRAME_ACK)        : tx_req_type;
+    assign enc_arq      = ack_wins ? ack_q_arq            : tx_req_arq;
     assign enc_seq      = ack_wins ? ack_q_seq            : tx_req_seq;
     assign enc_len      = ack_wins ? '0                   : tx_req_len;
     assign enc_payload  = ack_wins ? '0                   : tx_req_payload;

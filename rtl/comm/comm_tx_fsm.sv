@@ -7,12 +7,12 @@
 // silently to IDLE (control frames are fire-and-forget per the
 // agreed protocol).
 //
-// SEQ usage:
-//   - SEQ_WIDTH is 8 bits but only bit[0] is alternated (stop-and-wait).
-//   - tx_seq_q tracks the current alternating bit. On a successful ACK,
-//     bit[0] toggles; on max-retry FAIL, bit[0] is NOT toggled (the
-//     receiver hasn't moved its expected_seq either, since none of our
-//     frames were delivered).
+// SEQ / ARQ usage:
+//   - frame_req_seq carries the full 8-bit msg_id on the wire.
+//   - The ARQ alternating bit (tx_seq_q[0]) is sent via TYPE[7] on the
+//     wire and echoed back in ACK frames. On a successful DATA ACK, the
+//     alternating bit toggles; control frames are ACKed/retried but do not
+//     advance the DATA duplicate-filter sequence.
 //
 // Timeout / retry:
 //   - On entering WAIT_ACK, the timeout counter is reset.
@@ -54,15 +54,15 @@ module comm_tx_fsm
     output logic                          frame_req_valid,
     input  logic                          frame_req_ready,
     output logic [2:0]                    frame_req_type,
-    output seq_t                          frame_req_seq,
+    output logic                          frame_req_arq,    // ARQ alternating bit
+    output seq_t                          frame_req_seq,    // msg_id (full 8 bits)
     output msg_len_t                      frame_req_len,
     output logic [MAX_MSG_LEN*8-1:0]      frame_req_payload,
 
     // ---- rx_fsm -> tx (ACK notification) ----
     input  logic                          ack_valid,        // 1-cycle pulse
-    /* verilator lint_off UNUSEDSIGNAL */
-    input  seq_t                          ack_seq,           // only bit[0] used
-    /* verilator lint_on UNUSEDSIGNAL */
+    input  seq_t                          ack_seq,           // msg_id echoed by ACK
+    input  logic                          ack_arq,           // ARQ alternating bit from ACK
 
     // ---- tx -> backend (status feedback, DATA only) ----
     output logic                          cm_status_valid,
@@ -101,7 +101,8 @@ module comm_tx_fsm
 
     assign frame_req_valid   = (state_q == S_SEND);
     assign frame_req_type    = type_q;
-    assign frame_req_seq     = {7'b0, tx_seq_q[0]};
+    assign frame_req_arq     = tx_seq_q[0];
+    assign frame_req_seq     = msg_id_q;
     assign frame_req_len     = len_q;
     assign frame_req_payload = payload_q;
 
@@ -118,7 +119,9 @@ module comm_tx_fsm
     assign timeout_hit = (timeout_q == TIMEOUT_W'(TIMEOUT_CYCLES - 1));
 
     logic ack_match;
-    assign ack_match = ack_valid && (ack_seq[0] == tx_seq_q[0]);
+    assign ack_match = ack_valid
+                    && (ack_arq == tx_seq_q[0])
+                    && (ack_seq == seq_t'(msg_id_q));
 
     logic is_data;
     assign is_data = (type_q == 3'(FRAME_DATA));
@@ -195,8 +198,9 @@ module comm_tx_fsm
                 retry_q <= retry_q + 1'b1;
             end
 
-            // Toggle alternating bit on success.
-            if (state_q == S_WAIT_ACK && ack_match) begin
+            // Toggle alternating bit only on DATA success. Control frames are
+            // deliberately outside the RX DATA duplicate-filter sequence.
+            if (state_q == S_WAIT_ACK && ack_match && is_data) begin
                 tx_seq_q <= {7'b0, ~tx_seq_q[0]};
             end
         end

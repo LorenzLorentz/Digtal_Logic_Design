@@ -5,12 +5,12 @@
 // path short (~ 5 retries x 20 timeout = 100 cycles).
 //
 // Coverage:
-//   1. Single DATA send + matching ACK -> SUCCESS reported, seq toggled.
-//   2. Wrong-seq ACKs ignored: still times out & retries.
+//   1. Single DATA send + matching ACK -> SUCCESS reported, arq toggled.
+//   2. Wrong-arq ACKs ignored: still times out & retries.
 //   3. No ACK at all: times out and FAILs after MAX_RETRY+1 attempts.
 //   4. Control frame (HELLO) follows ARQ but cm_status NOT reported.
-//   5. seq alternates 0,1,0,1 across multiple successful sends.
-//   6. Two DATAs back-to-back (second uses next seq).
+//   5. arq alternates 0,1,0,1 across multiple successful sends.
+//   6. Control frame fail: silent return to IDLE.
 // =====================================================================
 
 #include "Vcomm_tx_fsm.h"
@@ -80,6 +80,7 @@ static void reset() {
     dut->frame_req_ready  = 1;
     dut->ack_valid        = 0;
     dut->ack_seq          = 0;
+    dut->ack_arq          = 0;
     dut->cm_status_ready  = 1;
     dut->clk              = 0;
     for (int i = 0; i < 4; i++) tick();
@@ -101,15 +102,15 @@ static void submit_request(uint8_t ftype, uint8_t msg_id,
 }
 
 // Wait for frame_req_valid handshake to complete (we always assert ready).
-// Returns the seq seen on the bus.
+// Returns the arq bit seen on the bus.  frame_req_seq now carries msg_id.
 static uint8_t wait_send(uint8_t expected_type, int max_cycles = 4 * TIMEOUT_CYCLES) {
     for (int i = 0; i < max_cycles; i++) {
         if (dut->frame_req_valid) {
             uint8_t got_type = (uint8_t)dut->frame_req_type;
-            uint8_t got_seq  = (uint8_t)dut->frame_req_seq;
+            uint8_t got_arq  = (uint8_t)dut->frame_req_arq;
             CHECK_EQ((int)got_type, (int)expected_type, "frame_req type");
             tick();      // accept the handshake (ready=1)
-            return got_seq;
+            return got_arq;
         }
         tick();
     }
@@ -118,13 +119,15 @@ static uint8_t wait_send(uint8_t expected_type, int max_cycles = 4 * TIMEOUT_CYC
     return 0xFF;
 }
 
-// Pulse ACK with given seq for one cycle.
-static void pulse_ack(uint8_t seq) {
+// Pulse ACK with given ARQ bit and echoed msg_id for one cycle.
+static void pulse_ack(uint8_t arq, uint8_t msg_id) {
     dut->ack_valid = 1;
-    dut->ack_seq   = seq;
+    dut->ack_seq   = msg_id;
+    dut->ack_arq   = arq;
     tick();
     dut->ack_valid = 0;
     dut->ack_seq   = 0;
+    dut->ack_arq   = 0;
 }
 
 // Wait until cm_status_valid is asserted (with cm_status_ready already 1
@@ -157,36 +160,36 @@ static void wait_no_status(int cycles) {
     }
 }
 
-// 1) DATA + matching ACK -> SUCCESS, seq toggled.
+// 1) DATA + matching ACK -> SUCCESS, arq toggled.
 static void test_basic_data_success() {
     printf("== test_basic_data_success\n");
     reset();
     submit_request(FRAME_DATA, 0x42, {'h','i'});
-    uint8_t s0 = wait_send(FRAME_DATA);
-    CHECK_EQ(s0 & 1, 0, "first send seq[0]=0");
-    pulse_ack(s0);
+    uint8_t a0 = wait_send(FRAME_DATA);
+    CHECK_EQ((int)a0, 0, "first send arq=0");
+    pulse_ack(a0, 0x42);
     int code = wait_status(0x42);
     CHECK_EQ(code, TX_SUCCESS, "code = TX_SUCCESS");
 
-    // Second send should use seq=1.
+    // Second send should use arq=1.
     submit_request(FRAME_DATA, 0x43, {'!'});
-    uint8_t s1 = wait_send(FRAME_DATA);
-    CHECK_EQ(s1 & 1, 1, "second send seq[0]=1 (toggled)");
-    pulse_ack(s1);
+    uint8_t a1 = wait_send(FRAME_DATA);
+    CHECK_EQ((int)a1, 1, "second send arq=1 (toggled)");
+    pulse_ack(a1, 0x43);
     wait_status(0x43);
 }
 
-// 2) Wrong-seq ACK ignored; eventually timeout retry; then good ACK -> SUCCESS.
+// 2) Wrong-arq ACK ignored; eventually timeout retry; then good ACK -> SUCCESS.
 static void test_wrong_seq_ack_then_good() {
     printf("== test_wrong_seq_ack_then_good\n");
     reset();
     submit_request(FRAME_DATA, 0x10, {'a','b'});
-    uint8_t s0 = wait_send(FRAME_DATA);
-    pulse_ack(s0 ^ 1);                    // wrong seq
+    uint8_t a0 = wait_send(FRAME_DATA);
+    pulse_ack(a0 ^ 1, 0x10);              // wrong arq
     // We should still be waiting; let it time out and retry.
-    uint8_t s1 = wait_send(FRAME_DATA);   // retry uses same seq (s0)
-    CHECK_EQ((int)s1, (int)s0, "retry uses same seq");
-    pulse_ack(s1);
+    uint8_t a1 = wait_send(FRAME_DATA);   // retry uses same arq (a0)
+    CHECK_EQ((int)a1, (int)a0, "retry uses same arq");
+    pulse_ack(a1, 0x10);
     int code = wait_status(0x10);
     CHECK_EQ(code, TX_SUCCESS, "eventually SUCCESS");
 }
@@ -224,25 +227,31 @@ static void test_control_frame_no_status() {
     printf("== test_control_frame_no_status\n");
     reset();
     submit_request(FRAME_HELLO, 0xAB, {'A','l','i','c'});
-    uint8_t s0 = wait_send(FRAME_HELLO);
-    pulse_ack(s0);
+    uint8_t a0 = wait_send(FRAME_HELLO);
+    pulse_ack(a0, 0xAB);
     // Should NOT report. Return to IDLE.
     wait_no_status(8);
     CHECK_EQ((int)dut->be_tx_ready, 1, "back to IDLE after control success");
+
+    submit_request(FRAME_DATA, 0xAC, {'d'});
+    uint8_t d0 = wait_send(FRAME_DATA);
+    CHECK_EQ((int)d0, 0, "control did not advance DATA arq");
+    pulse_ack(d0, 0xAC);
+    CHECK_EQ(wait_status(0xAC), TX_SUCCESS, "post-control DATA success");
 }
 
-// 5) seq alternates 0,1,0,1 across multiple successes.
+// 5) arq alternates 0,1,0,1 across multiple successes.
 static void test_seq_alternation() {
     printf("== test_seq_alternation\n");
     reset();
-    int expected_seq[] = {0, 1, 0, 1};
+    int expected_arq[] = {0, 1, 0, 1};
     for (int i = 0; i < 4; i++) {
         submit_request(FRAME_DATA, (uint8_t)i, {(uint8_t)('A' + i)});
-        uint8_t s = wait_send(FRAME_DATA);
+        uint8_t a = wait_send(FRAME_DATA);
         char lbl[64];
-        std::snprintf(lbl, sizeof(lbl), "iter %d seq[0]", i);
-        CHECK_EQ(s & 1, expected_seq[i], lbl);
-        pulse_ack(s);
+        std::snprintf(lbl, sizeof(lbl), "iter %d arq", i);
+        CHECK_EQ((int)a, expected_arq[i], lbl);
+        pulse_ack(a, (uint8_t)i);
         wait_status((uint8_t)i);
     }
 }

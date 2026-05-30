@@ -2,10 +2,14 @@
 // comm_frame_encoder.sv  --  Frame -> byte-stream serialiser
 // ---------------------------------------------------------------------
 // Accepts a request:
-//   { frame_type[2:0], seq[7:0], len[LEN_WIDTH-1:0], payload[MAX_MSG_LEN*8-1:0] }
+//   { frame_type[2:0], frame_in_arq, seq (msg_id), len, payload }
 // and emits the byte stream:
 //
 //   SOF(0x7E) | TYPE | SEQ | LEN_HI | LEN_LO | PAYLOAD[0..len-1] | CRC16_HI | CRC16_LO
+//
+//   TYPE[7]   = ARQ alternating bit (frame_in_arq)
+//   TYPE[2:0] = frame_type
+//   SEQ[7:0]  = msg_id (full 8 bits)
 //
 // CRC16 (CCITT, see rtl/common/crc16.sv) covers TYPE..PAYLOAD only --
 // not SOF, not the CRC bytes themselves. CRC is transmitted big-endian
@@ -38,7 +42,8 @@ module comm_frame_encoder
     input  logic                          frame_in_valid,
     output logic                          frame_in_ready,
     input  logic [2:0]                    frame_in_type,
-    input  seq_t                          frame_in_seq,
+    input  logic                          frame_in_arq,    // ARQ alternating bit → TYPE[7]
+    input  seq_t                          frame_in_seq,    // msg_id (full 8 bits)
     input  msg_len_t                      frame_in_len,
     input  logic [MAX_MSG_LEN*8-1:0]      frame_in_payload,
 
@@ -52,6 +57,7 @@ module comm_frame_encoder
     // Latched request
     // -----------------------------------------------------------------
     logic [2:0]                  type_q;
+    logic                        arq_q;
     seq_t                        seq_q;
     msg_len_t                    len_q;
     logic [MAX_MSG_LEN*8-1:0]    payload_q;
@@ -100,7 +106,7 @@ module comm_frame_encoder
         byte_out_data  = 8'h00;
         unique case (state_q)
             S_SOF:     begin byte_out_valid = 1'b1; byte_out_data = SOF_BYTE; end
-            S_TYPE:    begin byte_out_valid = 1'b1; byte_out_data = {5'b0, type_q}; end
+            S_TYPE:    begin byte_out_valid = 1'b1; byte_out_data = {arq_q, 4'b0, type_q}; end
             S_SEQ:     begin byte_out_valid = 1'b1; byte_out_data = seq_q; end
             S_LEN_HI:  begin byte_out_valid = 1'b1; byte_out_data = len_q[15:8]; end
             S_LEN_LO:  begin byte_out_valid = 1'b1; byte_out_data = len_q[7:0];  end
@@ -126,7 +132,7 @@ module comm_frame_encoder
 
         if (accept_byte) begin
             unique case (state_q)
-                S_TYPE:    begin crc_en = 1'b1; crc_byte_in = {5'b0, type_q}; end
+                S_TYPE:    begin crc_en = 1'b1; crc_byte_in = {arq_q, 4'b0, type_q}; end
                 S_SEQ:     begin crc_en = 1'b1; crc_byte_in = seq_q; end
                 S_LEN_HI:  begin crc_en = 1'b1; crc_byte_in = len_q[15:8]; end
                 S_LEN_LO:  begin crc_en = 1'b1; crc_byte_in = len_q[7:0];  end
@@ -162,6 +168,7 @@ module comm_frame_encoder
         if (!rst_n) begin
             state_q   <= S_IDLE;
             type_q    <= 3'd0;
+            arq_q     <= 1'b0;
             seq_q     <= '0;
             len_q     <= '0;
             payload_q <= '0;
@@ -172,6 +179,7 @@ module comm_frame_encoder
             // Latch new request on IDLE acceptance.
             if (state_q == S_IDLE && frame_in_valid) begin
                 type_q    <= frame_in_type;
+                arq_q     <= frame_in_arq;
                 seq_q     <= frame_in_seq;
                 len_q     <= frame_in_len;
                 payload_q <= frame_in_payload;

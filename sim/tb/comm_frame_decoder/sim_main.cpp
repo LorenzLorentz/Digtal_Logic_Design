@@ -35,7 +35,7 @@ static constexpr uint8_t  SOF_BYTE    = 0x7E;
 enum : uint8_t {
     FRAME_DATA     = 0, FRAME_ACK      = 1, FRAME_NAK      = 2,
     FRAME_HELLO    = 3, FRAME_REHELLO  = 4, FRAME_USERNAME = 5,
-    FRAME_GOODBYE  = 6,
+    FRAME_GOODBYE  = 6, FRAME_RECALL   = 7,
 };
 
 static void tick_half() {
@@ -74,10 +74,12 @@ static uint16_t sw_crc16(const std::vector<uint8_t>& v) {
     return c;
 }
 // Wire layout: SOF | TYPE | SEQ | LEN_HI | LEN_LO | PAYLOAD[..] | CRC_HI | CRC_LO
-static std::vector<uint8_t> encode(uint8_t ftype, uint8_t seq,
+//   TYPE[7] = arq, TYPE[2:0] = ftype
+//   SEQ     = msg_id (full 8 bits)
+static std::vector<uint8_t> encode(uint8_t ftype, uint8_t arq, uint8_t seq,
                                    const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> body;
-    body.push_back(ftype & 0x07);
+    body.push_back((arq << 7) | (ftype & 0x07));
     body.push_back(seq);
     uint16_t L = (uint16_t)payload.size();
     body.push_back((uint8_t)((L >> 8) & 0xFF));
@@ -95,6 +97,7 @@ static std::vector<uint8_t> encode(uint8_t ftype, uint8_t seq,
 // Captured event from a feed sequence.
 struct DeliverEvt {
     uint8_t  ftype;
+    uint8_t  arq;
     uint8_t  seq;
     uint16_t len;
     uint8_t  payload[MAX_MSG_LEN];
@@ -125,6 +128,7 @@ static void push_byte(uint8_t b) {
 static bool capture_frame(DeliverEvt& evt) {
     if (!dut->frame_out_valid) return false;
     evt.ftype = (uint8_t)dut->frame_out_type;
+    evt.arq   = (uint8_t)dut->frame_out_arq;
     evt.seq   = (uint8_t)dut->frame_out_seq;
     evt.len   = (uint16_t)dut->frame_out_len;
     for (int i = 0; i < MAX_MSG_LEN; i++)
@@ -175,7 +179,7 @@ static void test_one_data_frame() {
     printf("== test_one_data_frame\n");
     reset();
     std::vector<uint8_t> p = {'h','i','!','!'};
-    auto stream = encode(FRAME_DATA, 0x12, p);
+    auto stream = encode(FRAME_DATA, 0, 0x12, p);
     std::vector<DeliverEvt> events;
     int drops = 0;
     feed_stream(stream, events, drops);
@@ -196,7 +200,7 @@ static void test_one_data_frame() {
 static void test_zero_payload() {
     printf("== test_zero_payload\n");
     reset();
-    auto stream = encode(FRAME_ACK, 7, {});
+    auto stream = encode(FRAME_ACK, 0, 7, {});
     std::vector<DeliverEvt> events;
     int drops = 0;
     feed_stream(stream, events, drops);
@@ -204,13 +208,24 @@ static void test_zero_payload() {
     CHECK_EQ((int)events[0].ftype, FRAME_ACK, "ftype");
     CHECK_EQ((int)events[0].len,   0,         "len=0");
     CHECK_EQ(drops, 0, "no drops");
+
+    reset();
+    stream = encode(FRAME_RECALL, 1, 0x42, {});
+    events.clear();
+    drops = 0;
+    feed_stream(stream, events, drops);
+    CHECK_EQ((int)events.size(), 1, "one recall delivery");
+    CHECK_EQ((int)events[0].ftype, FRAME_RECALL, "recall ftype");
+    CHECK_EQ((int)events[0].seq, 0x42, "recall msg_id");
+    CHECK_EQ((int)events[0].len, 0, "recall len=0");
+    CHECK_EQ(drops, 0, "recall no drops");
 }
 
 static void test_payload_with_sof() {
     printf("== test_payload_with_sof\n");
     reset();
     std::vector<uint8_t> p = {0x7E, 0x01, 0x7E, 0x7E, 0x42};
-    auto stream = encode(FRAME_DATA, 1, p);
+    auto stream = encode(FRAME_DATA, 0, 1, p);
     std::vector<DeliverEvt> events;
     int drops = 0;
     feed_stream(stream, events, drops);
@@ -228,7 +243,7 @@ static void test_junk_before_sof() {
     printf("== test_junk_before_sof\n");
     reset();
     std::vector<uint8_t> stream = {0x00, 0xFF, 0xA5, 0x12};
-    auto frame = encode(FRAME_HELLO, 3, {'A','l','i','c'});
+    auto frame = encode(FRAME_HELLO, 0, 3, {'A','l','i','c'});
     for (uint8_t b : frame) stream.push_back(b);
     std::vector<DeliverEvt> events;
     int drops = 0;
@@ -241,7 +256,7 @@ static void test_junk_before_sof() {
 static void test_bad_crc() {
     printf("== test_bad_crc\n");
     reset();
-    auto stream = encode(FRAME_DATA, 5, {'a','b'});
+    auto stream = encode(FRAME_DATA, 0, 5, {'a','b'});
     stream.back() ^= 0xFF;          // corrupt CRC LO
     std::vector<DeliverEvt> events;
     int drops = 0;
@@ -250,7 +265,7 @@ static void test_bad_crc() {
     CHECK_EQ(drops, 1, "one drop pulse");
 
     // Now follow with a valid frame; should sync and deliver.
-    auto stream2 = encode(FRAME_DATA, 6, {'o','k'});
+    auto stream2 = encode(FRAME_DATA, 0, 6, {'o','k'});
     feed_stream(stream2, events, drops);
     CHECK_EQ((int)events.size(), 1, "recovers on next valid frame");
     CHECK_EQ((int)events[0].ftype, FRAME_DATA, "ftype");
@@ -263,7 +278,8 @@ static void test_malformed_len() {
     // Hand-crafted: SOF, type=DATA, seq=0, len=0x0F00 (=3840, way > MAX_MSG_LEN=640).
     // Decoder should drop at the LEN_LO byte once the assembled 16-bit
     // value exceeds the cap, then resync.
-    std::vector<uint8_t> stream = {SOF_BYTE, FRAME_DATA, 0, 0x0F, 0x00};
+    // TYPE byte: arq=0 at bit[7], FRAME_DATA at bits[2:0] → 0x00
+    std::vector<uint8_t> stream = {SOF_BYTE, 0x00, 0, 0x0F, 0x00};
     std::vector<DeliverEvt> events;
     int drops = 0;
     feed_stream(stream, events, drops);
@@ -271,7 +287,7 @@ static void test_malformed_len() {
     CHECK_EQ(drops, 1, "one drop pulse on malformed LEN");
 
     // Valid frame after.
-    auto good = encode(FRAME_GOODBYE, 1, {});
+    auto good = encode(FRAME_GOODBYE, 0, 1, {});
     feed_stream(good, events, drops);
     CHECK_EQ((int)events.size(), 1, "recovers");
     CHECK_EQ((int)events[0].ftype, FRAME_GOODBYE, "ftype");
@@ -285,7 +301,7 @@ static void test_len_just_over_max() {
     reset();
     uint16_t L = (uint16_t)(MAX_MSG_LEN + 1);
     std::vector<uint8_t> stream = {
-        SOF_BYTE, FRAME_DATA, 0,
+        SOF_BYTE, 0x00, 0,   // TYPE with arq=0 at bit[7]
         (uint8_t)((L >> 8) & 0xFF), (uint8_t)(L & 0xFF)
     };
     std::vector<DeliverEvt> events;
@@ -298,7 +314,7 @@ static void test_len_just_over_max() {
     // exercises the LEN_HI byte path end-to-end through the drop path.
     reset();
     std::vector<uint8_t> stream_hi = {
-        SOF_BYTE, FRAME_DATA, 0, 0x01, 0x00
+        SOF_BYTE, 0x00, 0, 0x01, 0x00   // TYPE with arq=0 at bit[7]
     };
     std::vector<DeliverEvt> events2;
     int drops2 = 0;
@@ -316,7 +332,7 @@ static void test_decode_payload_range() {
     for (int L : {1, 64, MAX_MSG_LEN - 1, MAX_MSG_LEN}) {
         std::vector<uint8_t> p(L);
         for (int i = 0; i < L; i++) p[i] = (uint8_t)((i * 7 + 3) & 0xFF);
-        auto stream = encode(FRAME_DATA, (uint8_t)(L & 0xFF), p);
+        auto stream = encode(FRAME_DATA, 0, (uint8_t)(L & 0xFF), p);
         std::vector<DeliverEvt> events;
         int drops = 0;
         feed_stream(stream, events, drops, /*idle_after=*/8);
@@ -343,9 +359,9 @@ static void test_back_to_back() {
     printf("== test_back_to_back\n");
     reset();
     std::vector<uint8_t> stream;
-    auto a = encode(FRAME_DATA, 0, {'A'});
-    auto b = encode(FRAME_DATA, 1, {'B','B'});
-    auto c = encode(FRAME_HELLO, 2, {'h','i'});
+    auto a = encode(FRAME_DATA, 0, 0, {'A'});
+    auto b = encode(FRAME_DATA, 0, 1, {'B','B'});
+    auto c = encode(FRAME_HELLO, 0, 2, {'h','i'});
     for (uint8_t x : a) stream.push_back(x);
     for (uint8_t x : b) stream.push_back(x);
     for (uint8_t x : c) stream.push_back(x);
@@ -367,7 +383,7 @@ static void test_back_to_back() {
 static void test_back_pressure_hold() {
     printf("== test_back_pressure_hold\n");
     reset();
-    auto stream = encode(FRAME_DATA, 9, {'X','Y','Z'});
+    auto stream = encode(FRAME_DATA, 0, 9, {'X','Y','Z'});
     // Feed without ready, watch for valid held high.
     dut->frame_out_ready = 0;
     for (uint8_t b : stream) push_byte(b);

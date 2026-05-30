@@ -9,6 +9,10 @@
 //
 //   SOF(0x7E) | TYPE | SEQ | LEN_HI | LEN_LO | PAYLOAD[0..len-1] | CRC16_HI | CRC16_LO
 //
+//   TYPE[7]   = ARQ alternating bit
+//   TYPE[2:0] = frame_type
+//   SEQ[7:0]  = msg_id
+//
 // Recovery rules:
 //   - In WAIT_SOF, we wait for byte == SOF_BYTE. CRC engine reloads
 //     INIT on the SOF cycle.
@@ -44,7 +48,8 @@ module comm_frame_decoder
     output logic                          frame_out_valid,
     input  logic                          frame_out_ready,
     output logic [2:0]                    frame_out_type,
-    output seq_t                          frame_out_seq,
+    output logic                          frame_out_arq,   // ARQ alternating bit from TYPE[7]
+    output seq_t                          frame_out_seq,   // msg_id (full 8 bits)
     output msg_len_t                      frame_out_len,
     output logic [MAX_MSG_LEN*8-1:0]      frame_out_payload,
 
@@ -73,6 +78,7 @@ module comm_frame_decoder
     // Latched fields
     // -----------------------------------------------------------------
     logic [2:0]                  type_q;
+    logic                        arq_q;
     seq_t                        seq_q;
     msg_len_t                    len_q;
     logic [7:0]                  len_hi_q;     // captured at LEN_HI byte
@@ -189,6 +195,7 @@ module comm_frame_decoder
         if (!rst_n) begin
             state_q     <= S_WAIT_SOF;
             type_q      <= 3'd0;
+            arq_q       <= 1'b0;
             seq_q       <= '0;
             len_q       <= '0;
             len_hi_q    <= 8'd0;
@@ -202,7 +209,7 @@ module comm_frame_decoder
 
             if (byte_in_valid) begin
                 unique case (state_q)
-                    S_TYPE: type_q <= byte_in_data[2:0];
+                    S_TYPE: begin type_q <= byte_in_data[2:0]; arq_q <= byte_in_data[7]; end
                     S_SEQ:  seq_q  <= byte_in_data;
                     S_LEN_HI: len_hi_q <= byte_in_data;
                     S_LEN_LO: begin
@@ -229,6 +236,7 @@ module comm_frame_decoder
     // -----------------------------------------------------------------
     assign frame_out_valid   = (state_q == S_DELIVER);
     assign frame_out_type    = type_q;
+    assign frame_out_arq     = arq_q;
     assign frame_out_seq     = seq_q;
     assign frame_out_len     = len_q;
     assign frame_out_payload = payload_q;

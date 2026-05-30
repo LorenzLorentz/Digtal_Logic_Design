@@ -30,7 +30,7 @@ static constexpr int PAYLOAD_W   = MAX_MSG_LEN * 8 / 32;
 enum : uint8_t {
     FRAME_DATA     = 0, FRAME_ACK      = 1, FRAME_NAK      = 2,
     FRAME_HELLO    = 3, FRAME_REHELLO  = 4, FRAME_USERNAME = 5,
-    FRAME_GOODBYE  = 6,
+    FRAME_GOODBYE  = 6, FRAME_RECALL   = 7,
 };
 enum : uint8_t { TX_SUCCESS = 0, TX_FAIL = 1 };
 
@@ -243,6 +243,40 @@ static void test_hello_no_status() {
     CHECK_EQ((int)dut->be_tx_ready, 1, "tx_fsm back to IDLE silently");
 }
 
+static void test_recall_roundtrip_then_data() {
+    printf("== test_recall_roundtrip_then_data\n");
+    reset();
+    submit(FRAME_RECALL, 0x42, {});
+
+    RxEvt recall;
+    CHECK_EQ(wait_rx(recall) ? 1 : 0, 1, "RECALL delivered as cm_rx");
+    CHECK_EQ((int)recall.type, FRAME_RECALL, "type=RECALL");
+    CHECK_EQ((int)recall.seq, 0x42, "recall msg_id in seq");
+    CHECK_EQ((int)recall.len, 0, "recall len=0");
+
+    for (int i = 0; i < 4000; i++) {
+        if (!status_q.empty()) {
+            ++g_failures;
+            printf("  [FAIL] unexpected cm_status for RECALL\n");
+            return;
+        }
+        tick();
+    }
+
+    // RECALL is a control frame and must not perturb the DATA duplicate
+    // sequence; the following DATA should still be delivered normally.
+    submit(FRAME_DATA, 0x43, {'n'});
+    RxEvt data;
+    CHECK_EQ(wait_rx(data) ? 1 : 0, 1, "DATA delivered after RECALL");
+    CHECK_EQ((int)data.type, FRAME_DATA, "post-recall type=DATA");
+    CHECK_EQ((int)data.seq, 0x43, "post-recall msg_id");
+    CHECK_EQ((int)data.payload[0], 'n', "post-recall payload");
+    StatusEvt s;
+    CHECK_EQ(wait_status(s) ? 1 : 0, 1, "post-recall status");
+    CHECK_EQ((int)s.msg_id, 0x43, "post-recall status msg_id");
+    CHECK_EQ((int)s.code, TX_SUCCESS, "post-recall status success");
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Verilated::traceEverOn(true);
@@ -254,6 +288,7 @@ int main(int argc, char** argv) {
     test_data_roundtrip();
     test_multiple_data();
     test_hello_no_status();
+    test_recall_roundtrip_then_data();
     test_long_data_roundtrip();
 
     tfp->close();

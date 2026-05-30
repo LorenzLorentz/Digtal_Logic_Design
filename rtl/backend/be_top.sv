@@ -243,7 +243,8 @@ module be_top
         S_QUOTE_WRITE              = 6'd31,
         S_QUOTE_PACK               = 6'd32,
         S_QUOTE_RENDER             = 6'd33,
-        S_RECALL_RENDER            = 6'd34
+        S_RECALL_RENDER            = 6'd34,
+        S_RECALL_SEND_COMM         = 6'd35
     } state_e;
 
     state_e state_q, state_d;
@@ -347,6 +348,8 @@ module be_top
 
     msg_id_t                            recall_msg_id_q;
     logic [STORE_IDX_W-1:0]             recall_store_idx_q;
+    logic [1:0]                         recall_side_q;
+    logic                               recall_send_q;
 
     logic [STORE_IDX_W-1:0]             store_ui_rd_idx;
     logic                               store_ui_rd_valid;
@@ -794,12 +797,14 @@ module be_top
     end
 
     // Frame-type aliases (prevent stray casts).
-    logic rx_is_data, rx_is_hello, rx_is_rehello, rx_is_username, rx_is_goodbye;
+    logic rx_is_data, rx_is_hello, rx_is_rehello, rx_is_username;
+    logic rx_is_goodbye, rx_is_recall;
     assign rx_is_data     = (cm_rx_frame_type == 3'(FRAME_DATA));
     assign rx_is_hello    = (cm_rx_frame_type == 3'(FRAME_HELLO));
     assign rx_is_rehello  = (cm_rx_frame_type == 3'(FRAME_REHELLO));
     assign rx_is_username = (cm_rx_frame_type == 3'(FRAME_USERNAME));
     assign rx_is_goodbye  = (cm_rx_frame_type == 3'(FRAME_GOODBYE));
+    assign rx_is_recall   = (cm_rx_frame_type == 3'(FRAME_RECALL));
 
     // -----------------------------------------------------------------
     // Backpressure (ready) signals
@@ -880,6 +885,8 @@ module be_top
                 end else if (accept_rx) begin
                     if (rx_is_data) begin
                         state_d = S_RX_RENDER;
+                    end else if (rx_is_recall) begin
+                        state_d = store_lookup_hit ? S_RECALL_RENDER : S_IDLE;
                     end else if (rx_is_hello) begin
                         state_d = S_TX_REHELLO;
                     end else if (rx_is_rehello) begin
@@ -1025,7 +1032,11 @@ module be_top
                     state_d = S_QUOTE_RENDER;
             end
             S_QUOTE_RENDER: if (be_render_ready) state_d = S_IDLE;
-            S_RECALL_RENDER: if (be_render_ready) state_d = S_IDLE;
+            S_RECALL_RENDER: begin
+                if (be_render_ready)
+                    state_d = recall_send_q ? S_RECALL_SEND_COMM : S_IDLE;
+            end
+            S_RECALL_SEND_COMM: if (be_tx_ready) state_d = S_IDLE;
             S_ENTER_RENDER_LOCAL:       if (be_render_ready) state_d = S_ENTER_SEND_COMM;
             S_ENTER_SEND_COMM:          if (be_tx_ready)     state_d = S_ENTER_RENDER_INPUT_CLEAR;
             S_ENTER_RENDER_INPUT_CLEAR: if (be_render_ready) state_d = S_IDLE;
@@ -1099,6 +1110,11 @@ module be_top
                 be_tx_msg_id     = pending_msg_id_q;
                 be_tx_len        = pending_len_q;
                 be_tx_payload    = pending_payload_q;
+            end
+            S_RECALL_SEND_COMM: begin
+                be_tx_valid      = 1'b1;
+                be_tx_frame_type = 3'(FRAME_RECALL);
+                be_tx_msg_id     = recall_msg_id_q;
             end
             default: ;
         endcase
@@ -1198,7 +1214,7 @@ module be_top
                 be_render_valid   = 1'b1;
                 be_render_cmd     = 4'(RENDER_UPDATE_STATUS);
                 be_render_msg_id  = recall_msg_id_q;
-                be_render_side    = 2'(MSG_LOCAL);
+                be_render_side    = recall_side_q;
                 be_render_status  = 2'(MSG_RECALLED);
                 be_render_len     = '0;
             end
@@ -1337,6 +1353,8 @@ module be_top
             quote_sep_byte_q   <= 8'h20;
             recall_msg_id_q    <= '0;
             recall_store_idx_q <= '0;
+            recall_side_q      <= 2'(MSG_LOCAL);
+            recall_send_q      <= 1'b0;
             emoji_suggest_tracking_q <= 1'b0;
             emoji_suggest_active_q   <= 1'b0;
             emoji_suggest_count_q    <= '0;
@@ -1550,6 +1568,12 @@ module be_top
                     rx_payload_q <= cm_rx_payload;
                     wr_ptr_q     <= wr_ptr_q + 1'b1;
                 end
+                else if (accept_rx && rx_is_recall && store_lookup_hit) begin
+                    recall_msg_id_q    <= msg_id_t'(cm_rx_seq);
+                    recall_store_idx_q <= store_lookup_idx;
+                    recall_side_q      <= 2'(MSG_REMOTE);
+                    recall_send_q      <= 1'b0;
+                end
                 else if (accept_io) begin
                     unique case (key_type_e'(io_key_type))
 
@@ -1652,6 +1676,8 @@ module be_top
                             && (store_ui_rd_status != 2'(MSG_RECALLED))) begin
                             recall_msg_id_q    <= store_ui_rd_msg_id;
                             recall_store_idx_q <= menu_store_idx_q;
+                            recall_side_q      <= 2'(MSG_LOCAL);
+                            recall_send_q      <= 1'b1;
                         end else if (click_in_sticker_picker) begin
                             pending_msg_id_q       <= next_msg_id_q;
                             pending_store_idx_q    <= wr_ptr_q;
@@ -1865,10 +1891,17 @@ module be_top
 
     logic                       store_lookup_hit;
     logic [STORE_IDX_W-1:0]     store_lookup_idx;
+    logic [1:0]                 store_lookup_side;
+    msg_id_t                    store_lookup_msg_id;
 
     logic                       store_upd_en;
     logic [STORE_IDX_W-1:0]     store_upd_idx;
     logic [1:0]                 store_upd_status;
+
+    assign store_lookup_side   = (accept_rx && rx_is_recall)
+                                 ? 2'(MSG_REMOTE) : 2'(MSG_LOCAL);
+    assign store_lookup_msg_id = (accept_rx && rx_is_recall)
+                                 ? msg_id_t'(cm_rx_seq) : cm_status_msg_id;
 
     assign store_upd_en     = ((state_q == S_IDLE) && accept_status && store_lookup_hit)
                            || (state_q == S_RECALL_RENDER);
@@ -1916,7 +1949,8 @@ module be_top
         .rd2_len        (store_ui_rd_len),
         .rd2_payload    (store_ui_rd_payload),
 
-        .lookup_msg_id  (cm_status_msg_id),
+        .lookup_side    (store_lookup_side),
+        .lookup_msg_id  (store_lookup_msg_id),
         .lookup_hit     (store_lookup_hit),
         .lookup_idx     (store_lookup_idx)
     );
