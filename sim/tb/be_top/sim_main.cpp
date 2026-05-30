@@ -254,6 +254,7 @@ static void clear_inputs() {
     for (int i = 0; i < 14; i++) dut->fe_hist_owner_width[i] = 0;
     dut->line_rd_idx       = 0;
     dut->store_rd_idx      = 0;
+    dut->store_rd_byte_idx = 0;
 }
 
 // Low-level reset that does NOT drain the boot REDRAW_ALL render. Used
@@ -492,7 +493,10 @@ static StoreRead read_store(int idx) {
             (uint16_t)dut->store_rd_len};
 }
 static uint8_t store_payload_byte(int i) {
-    return payload_get_byte(&dut->store_rd_payload[0], i);
+    // BRAM-backed payload (1-cycle read latency).
+    dut->store_rd_byte_idx = i;
+    tick();
+    return (uint8_t)dut->store_rd_byte;
 }
 static uint8_t suggest_id(int slot) {
     int bit = slot * EMOJI_TOKEN_ID_W;

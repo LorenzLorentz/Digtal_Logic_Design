@@ -82,7 +82,8 @@ module io_be_integration
     output logic [1:0]                 store_rd_side,
     output logic [1:0]                 store_rd_status,
     output msg_len_t                   store_rd_len,
-    output logic [MAX_MSG_LEN*8-1:0]   store_rd_payload,
+    input  logic [$clog2(MAX_MSG_LEN)-1:0] store_rd_byte_idx,
+    output byte_t                      store_rd_byte,
 
     output logic [1:0]                 conn_state_obs
 );
@@ -199,7 +200,8 @@ module io_be_integration
         .store_rd_side           (store_rd_side),
         .store_rd_status         (store_rd_status),
         .store_rd_len            (store_rd_len),
-        .store_rd_payload        (store_rd_payload),
+        .store_rd_byte_idx       (store_rd_byte_idx),
+        .store_rd_byte           (store_rd_byte),
 
         .conn_state_obs          (conn_state_obs)
     );

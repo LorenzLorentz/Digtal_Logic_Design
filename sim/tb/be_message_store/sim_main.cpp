@@ -106,6 +106,7 @@ static void clear_all_inputs() {
     dut->clear_en = 0;
     dut->rd_idx = 0; dut->lookup_side = 0; dut->lookup_msg_id = 0;
     dut->rd2_idx = 0;
+    dut->rd_byte_slot = 0; dut->rd_byte_idx = 0;
 }
 static void reset(int cycles = 4) {
     dut->rst_n = 0;
@@ -116,7 +117,10 @@ static void reset(int cycles = 4) {
     tick();
 }
 
-// --- Stimulus: drive a write for exactly one cycle -------------------
+// Forward declaration — used by do_write.
+static void wait_wr_done(int timeout = 200);
+
+// --- Stimulus: drive a write (waits for BRAM streaming to finish) ----
 static void do_write(int idx, uint8_t msg_id, uint8_t side,
                      uint8_t status, uint8_t len,
                      const std::vector<uint8_t>& payload) {
@@ -127,9 +131,10 @@ static void do_write(int idx, uint8_t msg_id, uint8_t side,
     dut->wr_status = status;
     dut->wr_len    = len;
     payload_load(&dut->wr_payload[0], payload);
-    tick();
+    tick();  // metadata committed this cycle; payload streaming starts
     dut->wr_en = 0;
     payload_clear(&dut->wr_payload[0]);
+    wait_wr_done();  // payload BRAM streaming takes MAX_MSG_LEN cycles
 }
 
 // --- Stimulus: drive a status update for exactly one cycle ----------
@@ -141,11 +146,7 @@ static void do_status_update(int idx, uint8_t status) {
     dut->upd_en = 0;
 }
 
-// --- Helper: read a slot at idx (combinational) ---------------------
-//
-// We set the address, call eval() once so the combinational read
-// outputs settle, then return them. Note we intentionally do NOT tick
-// the clock -- the read port is purely combinational.
+// --- Helper: read a slot at idx (metadata is combinational) ---------
 struct ReadResult {
     uint8_t valid;
     uint8_t msg_id;
@@ -159,6 +160,19 @@ static ReadResult do_read(int idx) {
     return {(uint8_t)dut->rd_valid, (uint8_t)dut->rd_msg_id,
             (uint8_t)dut->rd_side,  (uint8_t)dut->rd_status,
             (uint8_t)dut->rd_len};
+}
+
+// --- Helper: read one payload byte (BRAM-backed, 1-cycle latency) ----
+static uint8_t read_payload_byte(int slot, int byte_idx) {
+    dut->rd_byte_slot = slot;
+    dut->rd_byte_idx = byte_idx;
+    tick();
+    return (uint8_t)dut->rd_byte_data;
+}
+
+// --- Wait for a prior write's BRAM streaming to complete ------------
+static void wait_wr_done(int timeout) {
+    for (int i = 0; i < timeout && dut->wr_busy; i++) tick();
 }
 
 // --- Helper: lookup msg_id (combinational) ---------------------------
@@ -215,7 +229,7 @@ static void test_basic_write_read() {
     CHECK_EQ(r.len,    4,           "len round-trip");
     for (int i = 0; i < 4; i++) {
         char label[40]; snprintf(label, sizeof(label), "payload[%d]", i);
-        CHECK_EQ(payload_get_byte(&dut->rd_payload[0], i), p[i], label);
+        CHECK_EQ(read_payload_byte(5, i), p[i], label);
     }
 }
 
@@ -262,7 +276,7 @@ static void test_status_update() {
     CHECK_EQ(r.side,   MSG_LOCAL,   "side unchanged");
     CHECK_EQ(r.status, MSG_SUCCESS, "status updated");
     CHECK_EQ(r.len,    3,           "len unchanged");
-    CHECK_EQ(payload_get_byte(&dut->rd_payload[0], 0), 'a', "payload[0] unchanged");
+    CHECK_EQ(read_payload_byte(7, 0), 'a', "payload[0] unchanged");
 }
 
 // 5) upd_en at a never-written slot does NOT make it valid.
@@ -290,7 +304,7 @@ static void test_wide_payload() {
     do_read(11);
     for (int i = 0; i < MAX_MSG_LEN; i++) {
         char label[40]; snprintf(label, sizeof(label), "byte[%d]", i);
-        CHECK_EQ(payload_get_byte(&dut->rd_payload[0], i), p[i], label);
+        CHECK_EQ(read_payload_byte(11, i), p[i], label);
     }
 }
 
@@ -454,7 +468,7 @@ static void test_clear_then_writes_succeed() {
     CHECK_EQ(r.msg_id, 7,           "new msg_id");
     CHECK_EQ(r.side,   MSG_REMOTE,  "new side");
     CHECK_EQ(r.status, MSG_SUCCESS, "new status");
-    CHECK_EQ(payload_get_byte(&dut->rd_payload[0], 0), 'z', "new payload");
+    CHECK_EQ(read_payload_byte(2, 0), 'z', "new payload");
 }
 
 // 12) Reset mid-stream invalidates everything again.

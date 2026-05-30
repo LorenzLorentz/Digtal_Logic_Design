@@ -63,7 +63,8 @@ module chat_top_pair
     output logic [1:0]                 a_store_rd_side,
     output logic [1:0]                 a_store_rd_status,
     output msg_len_t                   a_store_rd_len,
-    output logic [MAX_MSG_LEN*8-1:0]   a_store_rd_payload,
+    input  logic [$clog2(MAX_MSG_LEN)-1:0] a_store_rd_byte_idx,
+    output byte_t                      a_store_rd_byte,
 
     input  logic [$clog2(MAX_MSG_NUM)-1:0] b_store_rd_idx,
     output logic                       b_store_rd_valid,
@@ -71,7 +72,8 @@ module chat_top_pair
     output logic [1:0]                 b_store_rd_side,
     output logic [1:0]                 b_store_rd_status,
     output msg_len_t                   b_store_rd_len,
-    output logic [MAX_MSG_LEN*8-1:0]   b_store_rd_payload
+    input  logic [$clog2(MAX_MSG_LEN)-1:0] b_store_rd_byte_idx,
+    output byte_t                      b_store_rd_byte
 );
 
     // ---- Cross-wired UART ----
@@ -202,7 +204,8 @@ module chat_top_pair
         .store_rd_side          (a_store_rd_side),
         .store_rd_status        (a_store_rd_status),
         .store_rd_len           (a_store_rd_len),
-        .store_rd_payload       (a_store_rd_payload),
+        .store_rd_byte_idx      (a_store_rd_byte_idx),
+        .store_rd_byte          (a_store_rd_byte),
         .conn_state_obs         (a_conn_state)
     );
 
@@ -438,7 +441,8 @@ module chat_top_pair
         .store_rd_side          (b_store_rd_side),
         .store_rd_status        (b_store_rd_status),
         .store_rd_len           (b_store_rd_len),
-        .store_rd_payload       (b_store_rd_payload),
+        .store_rd_byte_idx      (b_store_rd_byte_idx),
+        .store_rd_byte          (b_store_rd_byte),
         .conn_state_obs         (b_conn_state)
     );
 

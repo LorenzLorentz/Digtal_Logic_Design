@@ -186,7 +186,8 @@ module be_top
     output logic [1:0]                 store_rd_side,
     output logic [1:0]                 store_rd_status,
     output msg_len_t                   store_rd_len,
-    output logic [MAX_MSG_LEN*8-1:0]   store_rd_payload,
+    input  logic [$clog2(MAX_MSG_LEN)-1:0] store_rd_byte_idx,
+    output byte_t                      store_rd_byte,
 
     output logic [1:0]                 conn_state_obs
 );
@@ -356,7 +357,7 @@ module be_top
     logic [STORE_IDX_W-1:0]             quoted_store_idx;
     logic                               quoted_store_valid;
     msg_len_t                           quoted_store_len;
-    logic [MAX_MSG_LEN*8-1:0]           quoted_store_payload;
+    logic [$clog2(MAX_MSG_LEN)-1:0]     quoted_rd_byte_idx;
 
     msg_id_t                            recall_msg_id_q;
     logic [STORE_IDX_W-1:0]             recall_store_idx_q;
@@ -369,7 +370,11 @@ module be_top
     logic [1:0]                         store_ui_rd_side;
     logic [1:0]                         store_ui_rd_status;
     msg_len_t                           store_ui_rd_len;
-    logic [MAX_MSG_LEN*8-1:0]           store_ui_rd_payload;
+    logic [$clog2(MAX_MSG_LEN)-1:0]     store_ui_rd_byte_idx;
+    logic                               store_ui_rd_byte_val;
+    byte_t                              store_ui_rd_byte;
+
+    logic                               store_wr_busy;
 
     logic                               emoji_suggest_tracking_q;
     logic                               emoji_suggest_active_q;
@@ -528,12 +533,23 @@ module be_top
 
     // store_ui_rd_idx for quote/recall menu: points at the message
     // under the right-click popup. Also reused by S_BUILD_QUOTE_DISP
-    // to read the quoted message payload.
+    // to read the quoted message payload (metadata is combinational;
+    // payload bytes come from the BRAM-backed store with 1-cycle
+    // latency — see store_ui_rd_byte / store_ui_rd_byte_idx below).
+    //
+    // The first builder cycle is always Phase A ("prefix byte"),
+    // which pre-fetches quoted byte 0 from BRAM.  By the time the
+    // builder reaches Phase B (the next cycle) the data is ready.
     always_comb begin
-        if (state_q == S_BUILD_QUOTE_DISP)
-            store_ui_rd_idx = quoted_store_idx;
-        else
-            store_ui_rd_idx = menu_store_idx_q;
+        if (state_q == S_BUILD_QUOTE_DISP) begin
+            store_ui_rd_idx      = quoted_store_idx;
+            store_ui_rd_byte_val = 1'b1;
+            store_ui_rd_byte_idx = quoted_rd_byte_idx;
+        end else begin
+            store_ui_rd_idx      = menu_store_idx_q;
+            store_ui_rd_byte_val = 1'b0;
+            store_ui_rd_byte_idx = '0;
+        end
     end
 
     // Quote lookup: drive combinational read of the quoted message.
@@ -549,7 +565,31 @@ module be_top
     assign quoted_store_idx  = quote_lkup_idx;
     assign quoted_store_valid = quote_lkup_hit && store_ui_rd_valid;
     assign quoted_store_len   = store_ui_rd_len;
-    assign quoted_store_payload = store_ui_rd_payload;
+
+    // BRAM byte pre-fetch index for the quote display builder.
+    // Phase A (disp_build_idx_q==0): pre-fetch quoted byte 0.
+    // Phase B (1 <= disp_build_idx_q <= copy_len): pre-fetch next byte.
+    // Phases C/D: idle (don't care).
+    // The BRAM has 1-cycle read latency, so the pre-fetched byte
+    // lands in store_ui_rd_byte one cycle later — exactly when the
+    // builder loop needs it for the current disp_payload_q slot.
+    always_comb begin
+        automatic msg_len_t _user_len, _copy_len;
+        _user_len = (pending_len_q > LEN_WIDTH'(QUOTE_MARKER_LEN))
+                    ? (pending_len_q - LEN_WIDTH'(QUOTE_MARKER_LEN)) : '0;
+        _copy_len = (disp_len_q > LEN_WIDTH'(2 + _user_len))
+                    ? (disp_len_q - LEN_WIDTH'(2 + _user_len)) : '0;
+        if (state_q == S_BUILD_QUOTE_DISP) begin
+            if (disp_build_idx_q == '0)
+                quoted_rd_byte_idx = '0;
+            else if (disp_build_idx_q <= _copy_len)
+                quoted_rd_byte_idx = disp_build_idx_q[$clog2(MAX_MSG_LEN)-1:0];
+            else
+                quoted_rd_byte_idx = '0;
+        end else begin
+            quoted_rd_byte_idx = '0;
+        end
+    end
 
     // Emoji suggestion matcher. This deliberately uses a fixed small token
     // table instead of scanning the full 128-byte line. The only dynamic
@@ -849,7 +889,12 @@ module be_top
     assign in_disc_idle      = (state_q == S_DISCONNECTED_IDLE);
 
     assign cm_status_ready = in_chat_idle;
-    assign cm_rx_ready     = (in_chat_idle && !cm_status_valid)
+    // store_wr_busy prevents rx accept while the payload BRAM is still
+    // streaming a prior write (MAX_MSG_LEN cycles ~ 1.3 µs).  In
+    // practice the FSM pipeline (render → tx → render → idle) always
+    // takes > 128 cycles, so this gate is defensive.
+    assign cm_rx_ready     = (in_chat_idle && !cm_status_valid
+                                            && !store_wr_busy)
                           || in_handshake_idle
                           || in_disc_idle;
     assign io_key_ready    = (in_chat_idle && !cm_status_valid && !cm_rx_valid)
@@ -1845,9 +1890,9 @@ module be_top
                     // Phase A: ">"
                     wr_byte = ">";
                 end else if (disp_build_idx_q <= copy_len) begin
-                    // Phase B: quoted text
-                    wr_byte = quoted_store_payload[
-                        ((disp_build_idx_q - msg_len_t'(1))*8) +: 8];
+                    // Phase B: quoted text (pre-fetched from BRAM one
+                    // cycle earlier via quoted_rd_byte_idx).
+                    wr_byte = store_ui_rd_byte;
                     if (wr_byte == 8'h0A) wr_byte = 8'h20;  // flatten newlines
                 end else if (disp_build_idx_q == copy_len + msg_len_t'(1)) begin
                     // Phase C: "\n" separator
@@ -1964,36 +2009,34 @@ module be_top
         store_wr_len     = '0;
         store_wr_payload = '0;
 
-        if (state_q == S_IDLE) begin
-            if (accept_rx && rx_is_data) begin
+        // Guard all writes with !store_wr_busy: the store streams
+        // payload bytes to BRAM over MAX_MSG_LEN cycles and cannot
+        // accept a new write until the stream finishes.
+        if (!store_wr_busy) begin
+            if (state_q == S_IDLE) begin
+                if (accept_rx && rx_is_data) begin
+                    store_wr_en      = 1'b1;
+                    store_wr_msg_id  = msg_id_t'(cm_rx_seq);
+                    store_wr_side    = 2'(MSG_REMOTE);
+                    store_wr_status  = 2'(MSG_SUCCESS);
+                    store_wr_len     = rx_len_clamped;
+                    store_wr_payload = cm_rx_payload;
+                end
+            end else if (enc_done) begin
                 store_wr_en      = 1'b1;
-                store_wr_msg_id  = msg_id_t'(cm_rx_seq);
-                store_wr_side    = 2'(MSG_REMOTE);
-                store_wr_status  = 2'(MSG_SUCCESS);
-                store_wr_len     = rx_len_clamped;
-                store_wr_payload = cm_rx_payload;
+                store_wr_msg_id  = pending_msg_id_q;
+                store_wr_side    = 2'(MSG_LOCAL);
+                store_wr_status  = 2'(MSG_PENDING);
+                store_wr_len     = enc_dst_q;
+                store_wr_payload = pending_payload_q;
+            end else if (state_q == S_STICKER_COMMIT) begin
+                store_wr_en      = 1'b1;
+                store_wr_msg_id  = pending_msg_id_q;
+                store_wr_side    = 2'(MSG_LOCAL);
+                store_wr_status  = 2'(MSG_PENDING);
+                store_wr_len     = pending_len_q;
+                store_wr_payload = pending_payload_q;
             end
-        end else if (enc_done) begin
-            // Encoder finished: pending_payload_q holds the encoded
-            // bytes, enc_dst_q is the total length, pending_msg_id_q
-            // was latched on KEY_ENTER. wr_ptr_q is still the
-            // pre-increment value this cycle (NBA bumps it on the
-            // posedge), so store_wr_idx lands in the right slot.
-            store_wr_en      = 1'b1;
-            store_wr_msg_id  = pending_msg_id_q;
-            store_wr_side    = 2'(MSG_LOCAL);
-            store_wr_status  = 2'(MSG_PENDING);
-            store_wr_len     = enc_dst_q;
-            store_wr_payload = pending_payload_q;
-        end else if (state_q == S_STICKER_COMMIT) begin
-            // Sticker picker selections are already encoded as one
-            // big-emoji anchor byte.
-            store_wr_en      = 1'b1;
-            store_wr_msg_id  = pending_msg_id_q;
-            store_wr_side    = 2'(MSG_LOCAL);
-            store_wr_status  = 2'(MSG_PENDING);
-            store_wr_len     = pending_len_q;
-            store_wr_payload = pending_payload_q;
         end
     end
 
@@ -2071,6 +2114,7 @@ module be_top
         .wr_status      (store_wr_status),
         .wr_len         (store_wr_len),
         .wr_payload     (store_wr_payload),
+        .wr_busy        (store_wr_busy),
 
         .upd_en         (store_upd_en),
         .upd_idx        (store_upd_idx),
@@ -2084,7 +2128,16 @@ module be_top
         .rd_side        (store_rd_side),
         .rd_status      (store_rd_status),
         .rd_len         (store_rd_len),
-        .rd_payload     (store_rd_payload),
+
+        // Shared byte-level payload BRAM read (2-cycle latency).
+        // Serves the quote builder (S_BUILD_QUOTE_DISP) when
+        // store_ui_rd_byte_val is high; otherwise serves the test
+        // observation port (store_rd_idx + store_rd_byte_idx).
+        .rd_byte_slot   (store_ui_rd_byte_val ? store_ui_rd_idx
+                                               : store_rd_idx),
+        .rd_byte_idx    (store_ui_rd_byte_val ? store_ui_rd_byte_idx
+                                               : store_rd_byte_idx),
+        .rd_byte_data   (store_rd_byte),
 
         .rd2_idx        (store_ui_rd_idx),
         .rd2_valid      (store_ui_rd_valid),
@@ -2092,13 +2145,16 @@ module be_top
         .rd2_side       (store_ui_rd_side),
         .rd2_status     (store_ui_rd_status),
         .rd2_len        (store_ui_rd_len),
-        .rd2_payload    (store_ui_rd_payload),
 
         .lookup_side    (store_lookup_side),
         .lookup_msg_id  (store_lookup_msg_id),
         .lookup_hit     (store_lookup_hit),
         .lookup_idx     (store_lookup_idx)
     );
+
+    // During S_BUILD_QUOTE_DISP, the BRAM read port serves the quote
+    // builder; store_ui_rd_byte picks up the registered data.
+    assign store_ui_rd_byte = store_rd_byte;
 
 endmodule
 

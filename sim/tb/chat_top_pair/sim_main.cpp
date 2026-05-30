@@ -56,6 +56,8 @@ static void reset() {
     dut->b_io_key_ascii = 0;
     dut->a_store_rd_idx = 0;
     dut->b_store_rd_idx = 0;
+    dut->a_store_rd_byte_idx = 0;
+    dut->b_store_rd_byte_idx = 0;
     dut->clk            = 0;
     for (int i = 0; i < 4; i++) tick();
     dut->rst_n = 1;
@@ -155,8 +157,11 @@ static void test_alice_to_bob_message() {
          && dut->b_store_rd_side == MSG_REMOTE
          && dut->b_store_rd_status == MSG_SUCCESS
          && dut->b_store_rd_len   == 2) {
-            uint8_t p0 = payload_byte(dut->b_store_rd_payload, 0);
-            uint8_t p1 = payload_byte(dut->b_store_rd_payload, 1);
+            // BRAM-backed payload: 1-cycle read latency per byte.
+            dut->b_store_rd_byte_idx = 0; tick();
+            uint8_t p0 = (uint8_t)dut->b_store_rd_byte;
+            dut->b_store_rd_byte_idx = 1; tick();
+            uint8_t p1 = (uint8_t)dut->b_store_rd_byte;
             if (p0 == 'h' && p1 == 'i') { found = true; break; }
         }
         tick();

@@ -207,7 +207,8 @@ static void clear_inputs() {
     payload_clear(&dut->cm_rx_payload[0]);
     dut->cm_status_valid  = 0;
     dut->line_rd_idx      = 0;
-    dut->store_rd_idx     = 0;
+    dut->store_rd_idx      = 0;
+    dut->store_rd_byte_idx = 0;
 }
 
 // reset_no_drain leaves the FSM parked in S_BOOT_REDRAW. Crucially, no
@@ -365,7 +366,10 @@ static StoreRead read_store(int idx) {
             (uint8_t)dut->store_rd_len};
 }
 static uint8_t store_payload_byte(int i) {
-    return payload_get_byte(&dut->store_rd_payload[0], i);
+    // BRAM-backed payload (1-cycle read latency).
+    dut->store_rd_byte_idx = i;
+    tick();
+    return (uint8_t)dut->store_rd_byte;
 }
 
 #define CHECK_EQ(actual, expected, label) do {                            \
