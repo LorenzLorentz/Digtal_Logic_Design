@@ -1,8 +1,8 @@
 .claude/
 build/
 example/
-sim/waves
-sim/obd_dir
+sim/waves/
+sim/obd_dir/
 __pycache__/
 error.log
 .DS_Store
