@@ -93,7 +93,8 @@ module chat_top
     // PS/2 mouse
     // -----------------------------------------------------------------
     logic [9:0] mouse_x, mouse_y;
-    logic       mouse_scroll_up, mouse_scroll_down, mouse_left_click;
+    logic       mouse_scroll_up, mouse_scroll_down;
+    logic       mouse_left_click, mouse_right_click;
     /* verilator lint_off UNUSEDSIGNAL */
     logic       mouse_click_ready_unused;
     /* verilator lint_on UNUSEDSIGNAL */
@@ -111,7 +112,8 @@ module chat_top
         .mouse_y     (mouse_y),
         .scroll_up   (mouse_scroll_up),
         .scroll_down (mouse_scroll_down),
-        .left_click  (mouse_left_click)
+        .left_click  (mouse_left_click),
+        .right_click (mouse_right_click)
     );
 
     // Determine mouse region for scroll routing
@@ -158,6 +160,7 @@ module chat_top
     logic                          be_render_valid, be_render_ready;
     logic [3:0]                    be_render_cmd;
     msg_id_t                       be_render_msg_id;
+    logic [$clog2(MAX_MSG_NUM)-1:0] be_render_store_idx;
     logic [1:0]                    be_render_side, be_render_status;
     msg_len_t                      be_render_len;
     logic [MAX_MSG_LEN*8-1:0]      be_render_payload;
@@ -170,6 +173,11 @@ module chat_top
     logic                          ui_popup_active;
     logic [1:0]                    ui_popup_type;
     logic [9:0]                    ui_popup_x, ui_popup_y;
+
+    logic [N_HIST_STORED-1:0]      fe_hist_owner_valid;
+    logic [N_HIST_STORED*$clog2(MAX_MSG_NUM)-1:0] fe_hist_owner_store_idx;
+    logic [N_HIST_STORED*2-1:0]    fe_hist_owner_side;
+    logic [N_HIST_STORED*FE_COL_W-1:0] fe_hist_owner_width;
 
     // -----------------------------------------------------------------
     // be_top observability ports -- unused at chip top level. Tied off
@@ -203,11 +211,18 @@ module chat_top
         .io_key_type            (io_key_type),
         .io_key_ascii           (io_key_ascii),
         .io_mouse_click_valid   (mouse_left_click),
+        .io_mouse_right_click_valid(mouse_right_click),
         .io_mouse_click_ready   (mouse_click_ready_unused),
         .io_mouse_click_x       (mouse_x),
         .io_mouse_click_y       (mouse_y),
         .fe_input_scroll_offset (fe_input_scroll_offset_obs),
         .fe_input_at_limit      (fe_input_at_limit),
+        .fe_hist_wr_row         (fe_hist_wr_row_obs),
+        .fe_hist_scroll_offset  (fe_scroll_offset_obs),
+        .fe_hist_owner_valid    (fe_hist_owner_valid),
+        .fe_hist_owner_store_idx(fe_hist_owner_store_idx),
+        .fe_hist_owner_side     (fe_hist_owner_side),
+        .fe_hist_owner_width    (fe_hist_owner_width),
         .ui_popup_active        (ui_popup_active),
         .ui_popup_type          (ui_popup_type),
         .ui_popup_x             (ui_popup_x),
@@ -236,6 +251,7 @@ module chat_top
         .be_render_ready        (be_render_ready),
         .be_render_cmd          (be_render_cmd),
         .be_render_msg_id       (be_render_msg_id),
+        .be_render_store_idx    (be_render_store_idx),
         .be_render_side         (be_render_side),
         .be_render_status       (be_render_status),
         .be_render_len          (be_render_len),
@@ -329,6 +345,7 @@ module chat_top
         .be_render_ready         (be_render_ready),
         .be_render_cmd           (be_render_cmd),
         .be_render_msg_id        (be_render_msg_id),
+        .be_render_store_idx     (be_render_store_idx),
         .be_render_side          (be_render_side),
         .be_render_status        (be_render_status),
         .be_render_len           (be_render_len),
@@ -365,6 +382,10 @@ module chat_top
         .peer_name_len_obs       (fe_peer_name_len_obs),
         .hist_wr_row_obs         (fe_hist_wr_row_obs),
         .scroll_offset_obs       (fe_scroll_offset_obs),
+        .hist_owner_valid_obs    (fe_hist_owner_valid),
+        .hist_owner_store_idx_obs(fe_hist_owner_store_idx),
+        .hist_owner_side_obs     (fe_hist_owner_side),
+        .hist_owner_width_obs    (fe_hist_owner_width),
         .input_cursor_row_obs    (fe_input_cursor_row_obs),
         .input_cursor_col_obs    (fe_input_cursor_col_obs),
         .input_n_lines_obs       (fe_input_n_lines_obs),

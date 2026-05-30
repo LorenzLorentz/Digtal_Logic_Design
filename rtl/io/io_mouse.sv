@@ -6,7 +6,7 @@
 //     for scroll wheel, then 0xF4 Enable Data Reporting).
 //   - Decodes 3-byte (standard) or 4-byte (Intellimouse) packets.
 //   - Tracks absolute X/Y position (clamped to screen bounds).
-//   - Detects scroll wheel and left-button click events.
+//   - Detects scroll wheel and left/right-button click events.
 //
 // Init sequence (table-driven):
 //   Index 0..5 : 0xF3 0xC8  0xF3 0x64  0xF3 0x50  (Intellimouse detect)
@@ -21,7 +21,7 @@
 //   Byte 3: Z movement (scroll wheel, typically -1/0/+1)
 //
 // Output signals are all synchronous to clk. scroll_up / scroll_down
-// and left_click are single-cycle pulses. mouse_x / mouse_y are
+// and *_click are single-cycle pulses. mouse_x / mouse_y are
 // persistent position registers.
 // =====================================================================
 
@@ -50,8 +50,9 @@ module io_mouse
     output logic       scroll_up,
     output logic       scroll_down,
 
-    // Left click (1-cycle pulse on press edge)
-    output logic       left_click
+    // Clicks (1-cycle pulse on press edge)
+    output logic       left_click,
+    output logic       right_click
 );
 
     // -----------------------------------------------------------------
@@ -138,9 +139,10 @@ module io_mouse
     logic [1:0] scroll_suppress_q;
 
     // -----------------------------------------------------------------
-    // Left-button edge detector
+    // Button edge detectors
     // -----------------------------------------------------------------
     logic left_btn_prev_q;
+    logic right_btn_prev_q;
 
     // -----------------------------------------------------------------
     // Sequential logic
@@ -161,11 +163,14 @@ module io_mouse
             scroll_down       <= 1'b0;
             scroll_suppress_q <= '0;
             left_click        <= 1'b0;
+            right_click       <= 1'b0;
             left_btn_prev_q   <= 1'b0;
+            right_btn_prev_q  <= 1'b0;
         end else begin
             scroll_up   <= 1'b0;
             scroll_down <= 1'b0;
             left_click  <= 1'b0;
+            right_click <= 1'b0;
 
             case (init_q)
                 // -------------------------------------------------
@@ -256,10 +261,13 @@ module io_mouse
                                     mouse_y <= 10'(ny);
                                 end
 
-                                // --- Left button ---
+                                // --- Buttons ---
                                 left_btn_prev_q <= pkt_b0_q[0];
                                 if (!left_btn_prev_q && pkt_b0_q[0])
                                     left_click <= 1'b1;
+                                right_btn_prev_q <= pkt_b0_q[1];
+                                if (!right_btn_prev_q && pkt_b0_q[1])
+                                    right_click <= 1'b1;
 
                                 // --- Scroll: need 4th byte? ---
                                 if (has_scroll_q)

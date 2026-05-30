@@ -105,6 +105,7 @@ static void clear_all_inputs() {
     dut->upd_en = 0; dut->upd_idx = 0; dut->upd_status = 0;
     dut->clear_en = 0;
     dut->rd_idx = 0; dut->lookup_msg_id = 0;
+    dut->rd2_idx = 0;
 }
 static void reset(int cycles = 4) {
     dut->rst_n = 0;

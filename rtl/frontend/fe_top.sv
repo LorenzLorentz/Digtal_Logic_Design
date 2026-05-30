@@ -45,6 +45,7 @@ module fe_top
     output logic                       be_render_ready,
     input  logic [3:0]                 be_render_cmd,
     input  msg_id_t                    be_render_msg_id,
+    input  logic [$clog2(MAX_MSG_NUM)-1:0] be_render_store_idx,
     input  logic [1:0]                 be_render_side,
     input  logic [1:0]                 be_render_status,
     input  msg_len_t                   be_render_len,
@@ -97,6 +98,12 @@ module fe_top
     output msg_len_t                   peer_name_len_obs,
     output logic [HIST_W-1:0]          hist_wr_row_obs,
     output logic [SCROLL_W-1:0]        scroll_offset_obs,
+    output logic [N_HIST_STORED-1:0]   hist_owner_valid_obs,
+    output logic [N_HIST_STORED*$clog2(MAX_MSG_NUM)-1:0]
+                                            hist_owner_store_idx_obs,
+    output logic [N_HIST_STORED*2-1:0] hist_owner_side_obs,
+    output logic [N_HIST_STORED*FE_COL_W-1:0]
+                                            hist_owner_width_obs,
     output logic [INPUT_LINE_W-1:0]    input_cursor_row_obs,
     output msg_len_t                   input_cursor_col_obs,
     output logic [INPUT_N_LINES_W-1:0] input_n_lines_obs,
@@ -115,9 +122,17 @@ module fe_top
     logic [HIST_W-1:0]     hist_wr_row_dec;
     logic [SCROLL_W-1:0]   scroll_offset_dec;
     logic [N_HIST_STORED*2-1:0] hist_avatar_attr_dec;
+    logic [N_HIST_STORED-1:0] hist_owner_valid_dec;
+    logic [N_HIST_STORED*$clog2(MAX_MSG_NUM)-1:0] hist_owner_store_idx_dec;
+    logic [N_HIST_STORED*2-1:0] hist_owner_side_dec;
+    logic [N_HIST_STORED*FE_COL_W-1:0] hist_owner_width_dec;
 
     assign hist_wr_row_obs   = hist_wr_row_dec;
     assign scroll_offset_obs = scroll_offset_dec;
+    assign hist_owner_valid_obs     = hist_owner_valid_dec;
+    assign hist_owner_store_idx_obs = hist_owner_store_idx_dec;
+    assign hist_owner_side_obs      = hist_owner_side_dec;
+    assign hist_owner_width_obs     = hist_owner_width_dec;
 
     // fe_render_decoder uses synchronous reset (its FFs drive
     // fe_text_ram's BRAM address pins, and Xilinx BRAM doesn't tolerate
@@ -141,6 +156,7 @@ module fe_top
         .be_render_ready        (be_render_ready),
         .be_render_cmd          (be_render_cmd),
         .be_render_msg_id       (be_render_msg_id),
+        .be_render_store_idx    (be_render_store_idx),
         .be_render_side         (be_render_side),
         .be_render_status       (be_render_status),
         .be_render_len          (be_render_len),
@@ -163,6 +179,10 @@ module fe_top
         .hist_wr_row_obs        (hist_wr_row_dec),
         .scroll_offset_obs      (scroll_offset_dec),
         .hist_avatar_attr_obs   (hist_avatar_attr_dec),
+        .hist_owner_valid_obs   (hist_owner_valid_dec),
+        .hist_owner_store_idx_obs(hist_owner_store_idx_dec),
+        .hist_owner_side_obs    (hist_owner_side_dec),
+        .hist_owner_width_obs   (hist_owner_width_dec),
         .input_cursor_row_obs   (input_cursor_row_obs),
         .input_cursor_col_obs   (input_cursor_col_obs),
         .input_n_lines_obs      (input_n_lines_obs),

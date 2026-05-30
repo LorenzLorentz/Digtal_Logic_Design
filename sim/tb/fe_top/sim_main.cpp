@@ -117,6 +117,7 @@ static void reset() {
     dut->be_render_valid = 0;
     dut->be_render_cmd   = 0;
     dut->be_render_msg_id = 0;
+    dut->be_render_store_idx = 0;
     dut->be_render_side  = 0;
     dut->be_render_status = 0;
     dut->be_render_len   = 0;
@@ -198,6 +199,7 @@ static void read_row(int row, int col_start, int n, uint8_t* out) {
 struct RenderCmd {
     uint8_t  cmd          = 0;
     uint8_t  msg_id       = 0;
+    uint8_t  store_idx    = 0;
     uint8_t  side         = 0;
     uint8_t  status       = 0;
     uint16_t len          = 0;
@@ -227,6 +229,7 @@ static void send_cmd(const RenderCmd& c) {
 
     dut->be_render_cmd            = c.cmd;
     dut->be_render_msg_id         = c.msg_id;
+    dut->be_render_store_idx      = c.store_idx;
     dut->be_render_side           = c.side;
     dut->be_render_status         = c.status;
     dut->be_render_len            = c.len;

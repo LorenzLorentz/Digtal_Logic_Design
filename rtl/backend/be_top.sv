@@ -39,7 +39,7 @@
 //   2. cm_rx_valid     : a remote frame arrived (DATA / HELLO / ...)
 //   3. io_key_valid    : a keyboard event from io
 //
-// FSM states (18 total, 5-bit enum):
+// FSM states (UI interactions added over time; 6-bit enum):
 //   S_BOOT_REDRAW              start state after reset; emits REDRAW_ALL
 //   S_TX_HELLO                 emits FRAME_HELLO + MY_NAME
 //   S_HANDSHAKE_IDLE           waits for peer's HELLO/REHELLO/USERNAME
@@ -80,6 +80,7 @@
 
 module be_top
     import chat_pkg::*;
+    import fe_pkg::*;
 #(
     parameter int LINE_IDX_W  = $clog2(MAX_LINE_LEN),
     parameter int STORE_IDX_W = $clog2(MAX_MSG_NUM),
@@ -102,14 +103,23 @@ module be_top
     // ---- mouse click -> backend ----
     /* verilator lint_off UNUSEDSIGNAL */
     input  logic                       io_mouse_click_valid,
+    input  logic                       io_mouse_right_click_valid,
     output logic                       io_mouse_click_ready,
     input  logic [9:0]                 io_mouse_click_x,
     input  logic [9:0]                 io_mouse_click_y,
 
-    // ---- frontend -> backend : input scroll offset (for click) ----
+    // ---- frontend -> backend : visible-window metadata for click hit-test ----
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [3:0]                 fe_input_scroll_offset,
     input  logic                       fe_input_at_limit,
+    input  logic [HIST_W-1:0]          fe_hist_wr_row,
+    input  logic [SCROLL_W-1:0]        fe_hist_scroll_offset,
+    input  logic [N_HIST_STORED-1:0]   fe_hist_owner_valid,
+    input  logic [N_HIST_STORED*STORE_IDX_W-1:0]
+                                        fe_hist_owner_store_idx,
+    input  logic [N_HIST_STORED*2-1:0] fe_hist_owner_side,
+    input  logic [N_HIST_STORED*FE_COL_W-1:0]
+                                        fe_hist_owner_width,
 
     // ---- backend -> frontend : transient popup overlay state ----
     output logic                       ui_popup_active,
@@ -150,6 +160,7 @@ module be_top
     input  logic                       be_render_ready,
     output logic [3:0]                 be_render_cmd,
     output msg_id_t                    be_render_msg_id,
+    output logic [STORE_IDX_W-1:0]     be_render_store_idx,
     output logic [1:0]                 be_render_side,
     output logic [1:0]                 be_render_status,
     output msg_len_t                   be_render_len,
@@ -182,51 +193,57 @@ module be_top
     // -----------------------------------------------------------------
     // FSM
     // -----------------------------------------------------------------
-    typedef enum logic [4:0] {
-        S_BOOT_REDRAW              = 5'd0,
-        S_TX_HELLO                 = 5'd1,
-        S_HANDSHAKE_IDLE           = 5'd2,
-        S_TX_USERNAME              = 5'd3,
-        S_RENDER_CONN_CONNECTED    = 5'd4,
-        S_IDLE                     = 5'd5,
-        S_RENDER_MOVE_CURSOR       = 5'd6,
-        S_RENDER_INSERT            = 5'd7,
-        S_RENDER_DELETE            = 5'd8,
-        S_ENTER_RENDER_LOCAL       = 5'd9,
-        S_ENTER_SEND_COMM          = 5'd10,
-        S_ENTER_RENDER_INPUT_CLEAR = 5'd11,
-        S_RX_RENDER                = 5'd12,
-        S_STATUS_RENDER            = 5'd13,
-        S_TX_REHELLO               = 5'd14,
-        S_TX_GOODBYE               = 5'd15,
-        S_RENDER_CONN_DISCONNECTED = 5'd16,
-        S_DISCONNECTED_IDLE        = 5'd17,
-        S_RENDER_SCROLL_UP         = 5'd18,
-        S_RENDER_SCROLL_DOWN       = 5'd19,
-        S_RENDER_INPUT_SCROLL_UP   = 5'd20,
-        S_RENDER_INPUT_SCROLL_DOWN = 5'd21,
+    typedef enum logic [5:0] {
+        S_BOOT_REDRAW              = 6'd0,
+        S_TX_HELLO                 = 6'd1,
+        S_HANDSHAKE_IDLE           = 6'd2,
+        S_TX_USERNAME              = 6'd3,
+        S_RENDER_CONN_CONNECTED    = 6'd4,
+        S_IDLE                     = 6'd5,
+        S_RENDER_MOVE_CURSOR       = 6'd6,
+        S_RENDER_INSERT            = 6'd7,
+        S_RENDER_DELETE            = 6'd8,
+        S_ENTER_RENDER_LOCAL       = 6'd9,
+        S_ENTER_SEND_COMM          = 6'd10,
+        S_ENTER_RENDER_INPUT_CLEAR = 6'd11,
+        S_RX_RENDER                = 6'd12,
+        S_STATUS_RENDER            = 6'd13,
+        S_TX_REHELLO               = 6'd14,
+        S_TX_GOODBYE               = 6'd15,
+        S_RENDER_CONN_DISCONNECTED = 6'd16,
+        S_DISCONNECTED_IDLE        = 6'd17,
+        S_RENDER_SCROLL_UP         = 6'd18,
+        S_RENDER_SCROLL_DOWN       = 6'd19,
+        S_RENDER_INPUT_SCROLL_UP   = 6'd20,
+        S_RENDER_INPUT_SCROLL_DOWN = 6'd21,
         // Multi-cycle byte-by-byte shift for KEY_CHAR insert /
         // KEY_BACKSPACE delete. Replaces the old in-S_IDLE parallel
         // shift over MAX_LINE_LEN, which Vivado was unrolling into a
         // 128-input mux per byte.
-        S_LINE_INSERT              = 5'd22,
-        S_LINE_DELETE              = 5'd23,
+        S_LINE_INSERT              = 6'd22,
+        S_LINE_DELETE              = 6'd23,
         // Multi-cycle token-expansion encoder for KEY_ENTER commit.
         // Replaces a 128-iter unrolled for-loop whose per-iteration
         // 19-token priority chain + 1024-bit dynamic bit-slice write
         // was blowing up Vivado RTL Opt Phase 2.
-        S_LINE_ENCODE              = 5'd24,
+        S_LINE_ENCODE              = 6'd24,
         // Mouse click in input area: multi-cycle 2D→linear cursor
         // position conversion. Walks line_buf tracking visual rows.
-        S_MOUSE_CLICK              = 5'd25,
+        S_MOUSE_CLICK              = 6'd25,
         // Sticker picker selection: one-cycle local-message commit for
         // a single big-emoji anchor byte.
-        S_STICKER_COMMIT           = 5'd26,
+        S_STICKER_COMMIT           = 6'd26,
         // Emoji suggestion completion: insert the selected token suffix
         // byte-by-byte, pack the full line, then push one full input update.
-        S_EMOJI_COMPLETE_INSERT    = 5'd27,
-        S_EMOJI_COMPLETE_PACK      = 5'd28,
-        S_EMOJI_COMPLETE_RENDER    = 5'd29
+        S_EMOJI_COMPLETE_INSERT    = 6'd27,
+        S_EMOJI_COMPLETE_PACK      = 6'd28,
+        S_EMOJI_COMPLETE_RENDER    = 6'd29,
+        // Message context menu actions.
+        S_QUOTE_SHIFT              = 6'd30,
+        S_QUOTE_WRITE              = 6'd31,
+        S_QUOTE_PACK               = 6'd32,
+        S_QUOTE_RENDER             = 6'd33,
+        S_RECALL_RENDER            = 6'd34
     } state_e;
 
     state_e state_q, state_d;
@@ -269,10 +286,12 @@ module be_top
 
     // Latched fields needed AFTER S_IDLE leaves them stale.
     msg_id_t                            pending_msg_id_q;
+    logic [STORE_IDX_W-1:0]             pending_store_idx_q;
     msg_len_t                           pending_len_q;
     logic [MAX_MSG_LEN*8-1:0]           pending_payload_q;
 
     seq_t                               rx_seq_q;
+    logic [STORE_IDX_W-1:0]             rx_store_idx_q;
     msg_len_t                           rx_len_q;
     logic [MAX_MSG_LEN*8-1:0]           rx_payload_q;
 
@@ -293,6 +312,7 @@ module be_top
     // make the cursor teleport through every click in order, which is
     // not what anybody wants).
     logic                               click_pending_q;
+    logic                               click_is_right_q;
     logic [9:0]                         click_x_q;
     logic [9:0]                         click_y_q;
     logic [6:0]                         click_raw_col_q;     // io_mouse_click_x[9:3]
@@ -315,6 +335,26 @@ module be_top
     logic [1:0]                         popup_type_q;
     logic [9:0]                         popup_x_q;
     logic [9:0]                         popup_y_q;
+    logic [STORE_IDX_W-1:0]             menu_store_idx_q;
+
+    // Quote action scratch. Quote inserts "> <payload><sep>" at the
+    // current cursor, where sep is newline when the input has line room
+    // and a space otherwise.
+    logic [MAX_MSG_LEN*8-1:0]           quote_payload_q;
+    msg_len_t                           quote_insert_len_q;
+    msg_len_t                           quote_write_idx_q;
+    byte_t                              quote_sep_byte_q;
+
+    msg_id_t                            recall_msg_id_q;
+    logic [STORE_IDX_W-1:0]             recall_store_idx_q;
+
+    logic [STORE_IDX_W-1:0]             store_ui_rd_idx;
+    logic                               store_ui_rd_valid;
+    msg_id_t                            store_ui_rd_msg_id;
+    logic [1:0]                         store_ui_rd_side;
+    logic [1:0]                         store_ui_rd_status;
+    msg_len_t                           store_ui_rd_len;
+    logic [MAX_MSG_LEN*8-1:0]           store_ui_rd_payload;
 
     logic                               emoji_suggest_tracking_q;
     logic                               emoji_suggest_active_q;
@@ -358,6 +398,9 @@ module be_top
     logic [3:0] click_sticker_col;
     logic       click_in_sticker_picker;
     byte_t      click_sticker_anchor;
+    logic       click_in_msg_menu;
+    logic       click_msg_menu_quote;
+    logic       click_msg_menu_recall;
     logic [9:0] click_emoji_dx;
     logic [9:0] click_emoji_dy;
     logic [3:0] click_emoji_row;
@@ -367,6 +410,21 @@ module be_top
     msg_len_t   click_emoji_prefix_len;
     msg_len_t   click_emoji_suffix_len;
     logic       click_emoji_fits;
+    logic       click_in_hist_window;
+    logic [HIST_W-1:0] click_hist_slot;
+    logic [FE_COL_W-1:0] click_hist_col;
+    logic       click_hist_owner_valid;
+    logic [STORE_IDX_W-1:0] click_hist_owner_store_idx;
+    logic [1:0] click_hist_owner_side;
+    logic [FE_COL_W-1:0] click_hist_owner_width;
+    logic [FE_COL_W-1:0] click_hist_bubble_left;
+    logic [FE_COL_W-1:0] click_hist_bubble_right;
+    logic       click_in_hist_bubble;
+    msg_len_t   quote_room;
+    msg_len_t   quote_src_room;
+    msg_len_t   quote_src_len_calc;
+    msg_len_t   quote_insert_len_calc;
+    logic       quote_can_insert;
 
     assign click_popup_dx = click_x_q - popup_x_q;
     assign click_popup_dy = click_y_q - popup_y_q;
@@ -377,6 +435,19 @@ module be_top
         && (click_popup_dx < 10'(POPUP_STICKER_PICKER_W_PX))
         && (click_popup_dy < 10'(POPUP_STICKER_PICKER_H_PX));
     assign click_sticker_anchor = sticker_anchor_for_col(click_sticker_col);
+    assign click_in_msg_menu =
+        popup_active_q
+        && (popup_type_q == 2'(POPUP_MSG_MENU))
+        && (click_popup_dx < 10'(POPUP_MSG_MENU_W_PX))
+        && (click_popup_dy < 10'(POPUP_MSG_MENU_H_PX));
+    assign click_msg_menu_quote =
+        click_in_msg_menu
+        && (click_popup_dy >= 10'(POPUP_BORDER_PX))
+        && (click_popup_dy < 10'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX));
+    assign click_msg_menu_recall =
+        click_in_msg_menu
+        && (click_popup_dy >= 10'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX))
+        && (click_popup_dy < 10'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX * 2));
     assign click_emoji_dx  = click_x_q - 10'(EMOJI_SUGGEST_X_PX);
     assign click_emoji_dy  = click_y_q - 10'(EMOJI_SUGGEST_Y_PX);
     assign click_emoji_row =
@@ -404,6 +475,50 @@ module be_top
         ? (click_emoji_token_len - click_emoji_prefix_len) : '0;
     assign click_emoji_fits =
         (len_q + click_emoji_suffix_len) <= LEN_WIDTH'(MAX_LINE_LEN);
+
+    assign click_in_hist_window =
+        (click_screen_row_q >= 6'(HIST_ROW_START))
+        && (click_screen_row_q < 6'(HIST_ROW_START + N_HIST_VISIBLE));
+    assign click_hist_slot =
+        fe_hist_wr_row
+        + HIST_W'(N_HIST_STORED - N_HIST_VISIBLE)
+        - HIST_W'(fe_hist_scroll_offset)
+        + HIST_W'(click_screen_row_q - 6'(HIST_ROW_START));
+    assign click_hist_col = FE_COL_W'(click_raw_col_q);
+    assign click_hist_owner_valid = fe_hist_owner_valid[click_hist_slot];
+    assign click_hist_owner_store_idx =
+        fe_hist_owner_store_idx[click_hist_slot*STORE_IDX_W +: STORE_IDX_W];
+    assign click_hist_owner_side =
+        fe_hist_owner_side[click_hist_slot*2 +: 2];
+    assign click_hist_owner_width =
+        fe_hist_owner_width[click_hist_slot*FE_COL_W +: FE_COL_W];
+    always_comb begin
+        if (click_hist_owner_side == 2'(MSG_REMOTE)) begin
+            click_hist_bubble_left  = FE_COL_W'(BUBBLE_MARGIN_L);
+            click_hist_bubble_right = FE_COL_W'(BUBBLE_MARGIN_L + 1)
+                                      + click_hist_owner_width;
+        end else begin
+            click_hist_bubble_right = FE_COL_W'(BUBBLE_RIGHT_EDGE);
+            click_hist_bubble_left  = FE_COL_W'(BUBBLE_RIGHT_EDGE)
+                                      - click_hist_owner_width - FE_COL_W'(1);
+        end
+    end
+    assign click_in_hist_bubble =
+        click_in_hist_window
+        && click_hist_owner_valid
+        && (click_hist_col >= click_hist_bubble_left)
+        && (click_hist_col <= click_hist_bubble_right);
+
+    assign store_ui_rd_idx = menu_store_idx_q;
+    assign quote_room = LEN_WIDTH'(MAX_LINE_LEN) - len_q;
+    assign quote_src_room = (quote_room > msg_len_t'(3))
+                            ? (quote_room - msg_len_t'(3)) : '0;
+    assign quote_src_len_calc =
+        (store_ui_rd_len > quote_src_room) ? quote_src_room : store_ui_rd_len;
+    assign quote_insert_len_calc =
+        quote_can_insert ? (quote_src_len_calc + msg_len_t'(3)) : '0;
+    assign quote_can_insert =
+        store_ui_rd_valid && (quote_room >= msg_len_t'(3));
 
     // Emoji suggestion matcher. This deliberately uses a fixed small token
     // table instead of scanning the full 128-byte line. The only dynamic
@@ -822,12 +937,24 @@ module be_top
                         default: state_d = S_IDLE;
                     endcase
                 end else if (accept_mouse_click) begin
-                    if (popup_active_q) begin
+                    if (click_is_right_q) begin
+                        state_d = S_IDLE;
+                    end else if (popup_active_q) begin
                         // Popup clicks are consumed here. A hit in the
                         // sticker row commits one big-emoji anchor; any
                         // miss just closes the popup in the sequential block.
-                        if (click_in_sticker_picker)
+                        if (click_in_msg_menu && click_msg_menu_quote
+                            && quote_can_insert) begin
+                            state_d = (cursor_pos_q < len_q)
+                                      ? S_QUOTE_SHIFT : S_QUOTE_WRITE;
+                        end else if (click_in_msg_menu && click_msg_menu_recall
+                            && store_ui_rd_valid
+                            && (store_ui_rd_side == 2'(MSG_LOCAL))
+                            && (store_ui_rd_status != 2'(MSG_RECALLED))) begin
+                            state_d = S_RECALL_RENDER;
+                        end else if (click_in_sticker_picker) begin
                             state_d = S_STICKER_COMMIT;
+                        end
                     end else if (emoji_suggest_active_q) begin
                         if (click_in_emoji_suggest && click_emoji_fits) begin
                             state_d = (click_emoji_prefix_len >= click_emoji_token_len)
@@ -885,6 +1012,20 @@ module be_top
                     state_d = S_EMOJI_COMPLETE_RENDER;
             end
             S_EMOJI_COMPLETE_RENDER: if (be_render_ready) state_d = S_IDLE;
+            S_QUOTE_SHIFT: begin
+                if (shift_idx_q == cursor_pos_q)
+                    state_d = S_QUOTE_WRITE;
+            end
+            S_QUOTE_WRITE: begin
+                if (quote_write_idx_q + LEN_WIDTH'(1) >= quote_insert_len_q)
+                    state_d = S_QUOTE_PACK;
+            end
+            S_QUOTE_PACK: begin
+                if (shift_idx_q >= len_q)
+                    state_d = S_QUOTE_RENDER;
+            end
+            S_QUOTE_RENDER: if (be_render_ready) state_d = S_IDLE;
+            S_RECALL_RENDER: if (be_render_ready) state_d = S_IDLE;
             S_ENTER_RENDER_LOCAL:       if (be_render_ready) state_d = S_ENTER_SEND_COMM;
             S_ENTER_SEND_COMM:          if (be_tx_ready)     state_d = S_ENTER_RENDER_INPUT_CLEAR;
             S_ENTER_RENDER_INPUT_CLEAR: if (be_render_ready) state_d = S_IDLE;
@@ -970,6 +1111,7 @@ module be_top
         be_render_valid       = 1'b0;
         be_render_cmd         = 4'd0;
         be_render_msg_id      = '0;
+        be_render_store_idx   = '0;
         be_render_side        = 2'd0;
         be_render_status      = 2'd0;
         be_render_len         = '0;
@@ -1002,6 +1144,7 @@ module be_top
                 be_render_valid   = 1'b1;
                 be_render_cmd     = 4'(RENDER_APPEND_LOCAL_PENDING);
                 be_render_msg_id  = pending_msg_id_q;
+                be_render_store_idx = pending_store_idx_q;
                 be_render_side    = 2'(MSG_LOCAL);
                 be_render_status  = 2'(MSG_PENDING);
                 be_render_len     = pending_len_q;
@@ -1028,6 +1171,7 @@ module be_top
                 be_render_valid   = 1'b1;
                 be_render_cmd     = 4'(RENDER_APPEND_REMOTE);
                 be_render_msg_id  = msg_id_t'(rx_seq_q);
+                be_render_store_idx = rx_store_idx_q;
                 be_render_side    = 2'(MSG_REMOTE);
                 be_render_status  = 2'(MSG_SUCCESS);
                 be_render_len     = rx_len_q;
@@ -1039,6 +1183,23 @@ module be_top
                 be_render_msg_id  = status_msg_id_q;
                 be_render_side    = 2'(MSG_LOCAL);
                 be_render_status  = status_status_q;
+                be_render_len     = '0;
+            end
+            S_QUOTE_RENDER: begin
+                be_render_valid      = 1'b1;
+                be_render_cmd        = 4'(RENDER_UPDATE_INPUT_LINE);
+                be_render_side       = 2'(MSG_LOCAL);
+                be_render_status     = 2'(MSG_PENDING);
+                be_render_len        = len_q;
+                be_render_payload    = pending_payload_q;
+                be_render_cursor_pos = cursor_pos_q;
+            end
+            S_RECALL_RENDER: begin
+                be_render_valid   = 1'b1;
+                be_render_cmd     = 4'(RENDER_UPDATE_STATUS);
+                be_render_msg_id  = recall_msg_id_q;
+                be_render_side    = 2'(MSG_LOCAL);
+                be_render_status  = 2'(MSG_RECALLED);
                 be_render_len     = '0;
             end
             S_RENDER_CONN_CONNECTED: begin
@@ -1137,9 +1298,11 @@ module be_top
             wr_ptr_q           <= '0;
             next_msg_id_q      <= '0;
             pending_msg_id_q   <= '0;
+            pending_store_idx_q <= '0;
             pending_len_q      <= '0;
             pending_payload_q  <= '0;
             rx_seq_q           <= '0;
+            rx_store_idx_q     <= '0;
             rx_len_q           <= '0;
             rx_payload_q       <= '0;
             status_msg_id_q    <= '0;
@@ -1153,6 +1316,7 @@ module be_top
             peer_name_len_q    <= '0;
             peer_name_q        <= '0;
             click_pending_q    <= 1'b0;
+            click_is_right_q   <= 1'b0;
             click_x_q          <= '0;
             click_y_q          <= '0;
             click_raw_col_q    <= '0;
@@ -1166,6 +1330,13 @@ module be_top
             popup_type_q       <= 2'(POPUP_NONE);
             popup_x_q          <= '0;
             popup_y_q          <= '0;
+            menu_store_idx_q   <= '0;
+            quote_payload_q    <= '0;
+            quote_insert_len_q <= '0;
+            quote_write_idx_q  <= '0;
+            quote_sep_byte_q   <= 8'h20;
+            recall_msg_id_q    <= '0;
+            recall_store_idx_q <= '0;
             emoji_suggest_tracking_q <= 1'b0;
             emoji_suggest_active_q   <= 1'b0;
             emoji_suggest_count_q    <= '0;
@@ -1335,6 +1506,14 @@ module be_top
                 click_y_q          <= io_mouse_click_y;
                 click_raw_col_q    <= io_mouse_click_x[9:3];
                 click_screen_row_q <= io_mouse_click_y[9:4];
+                click_is_right_q   <= 1'b0;
+                click_pending_q    <= 1'b1;
+            end else if (io_mouse_right_click_valid) begin
+                click_x_q          <= io_mouse_click_x;
+                click_y_q          <= io_mouse_click_y;
+                click_raw_col_q    <= io_mouse_click_x[9:3];
+                click_screen_row_q <= io_mouse_click_y[9:4];
+                click_is_right_q   <= 1'b1;
                 click_pending_q    <= 1'b1;
             end else if (accept_mouse_click) begin
                 click_pending_q    <= 1'b0;
@@ -1366,6 +1545,7 @@ module be_top
                 end
                 else if (accept_rx && rx_is_data) begin
                     rx_seq_q     <= cm_rx_seq;
+                    rx_store_idx_q <= wr_ptr_q;
                     rx_len_q     <= rx_len_clamped;
                     rx_payload_q <= cm_rx_payload;
                     wr_ptr_q     <= wr_ptr_q + 1'b1;
@@ -1417,11 +1597,12 @@ module be_top
                                 // and store_wr all happen in the
                                 // encoder's done cycle (state_q ==
                                 // S_LINE_ENCODE && enc_src_q >= len_q).
-                                pending_msg_id_q  <= next_msg_id_q;
-                                pending_payload_q <= '0;
-                                enc_src_q         <= '0;
-                                enc_dst_q         <= '0;
-                                enter_pulse_q     <= 1'b1;
+                                pending_msg_id_q    <= next_msg_id_q;
+                                pending_store_idx_q <= wr_ptr_q;
+                                pending_payload_q   <= '0;
+                                enc_src_q           <= '0;
+                                enc_dst_q           <= '0;
+                                enter_pulse_q       <= 1'b1;
                             end
                         end
 
@@ -1437,28 +1618,62 @@ module be_top
                         default: ;
                     endcase
                 end
-                else if (accept_mouse_click && popup_active_q) begin
-                    if (click_in_sticker_picker) begin
-                        pending_msg_id_q     <= next_msg_id_q;
-                        pending_len_q        <= msg_len_t'(1);
-                        pending_payload_q    <= '0;
-                        pending_payload_q[7:0] <= click_sticker_anchor;
+                else if (accept_mouse_click) begin
+                    if (click_is_right_q) begin
+                        popup_active_q <= 1'b0;
+                        popup_type_q   <= 2'(POPUP_NONE);
+                        if (click_in_hist_bubble) begin
+                            popup_active_q    <= 1'b1;
+                            popup_type_q      <= 2'(POPUP_MSG_MENU);
+                            popup_x_q         <= click_x_q;
+                            popup_y_q         <= click_y_q;
+                            menu_store_idx_q  <= click_hist_owner_store_idx;
+                            emoji_suggest_tracking_q <= 1'b0;
+                            emoji_suggest_active_q   <= 1'b0;
+                            emoji_suggest_count_q    <= '0;
+                            emoji_suggest_ids_q      <= '0;
+                            emoji_suggest_anchor_q   <= '0;
+                        end
+                    end else if (popup_active_q) begin
+                        if (click_in_msg_menu && click_msg_menu_quote
+                            && quote_can_insert) begin
+                            quote_payload_q    <= store_ui_rd_payload;
+                            quote_insert_len_q <= quote_insert_len_calc;
+                            quote_write_idx_q  <= '0;
+                            quote_sep_byte_q   <=
+                                (input_newline_count_q
+                                 < INPUT_NL_COUNT_W'(INPUT_NEWLINE_LIMIT))
+                                ? 8'h0A : 8'h20;
+                            if (cursor_pos_q < len_q)
+                                shift_idx_q <= len_q - LEN_WIDTH'(1);
+                        end else if (click_in_msg_menu && click_msg_menu_recall
+                            && store_ui_rd_valid
+                            && (store_ui_rd_side == 2'(MSG_LOCAL))
+                            && (store_ui_rd_status != 2'(MSG_RECALLED))) begin
+                            recall_msg_id_q    <= store_ui_rd_msg_id;
+                            recall_store_idx_q <= menu_store_idx_q;
+                        end else if (click_in_sticker_picker) begin
+                            pending_msg_id_q       <= next_msg_id_q;
+                            pending_store_idx_q    <= wr_ptr_q;
+                            pending_len_q          <= msg_len_t'(1);
+                            pending_payload_q      <= '0;
+                            pending_payload_q[7:0] <= click_sticker_anchor;
+                        end
+                        popup_active_q <= 1'b0;
+                        popup_type_q   <= 2'(POPUP_NONE);
+                    end else if (emoji_suggest_active_q) begin
+                        if (click_in_emoji_suggest && click_emoji_fits) begin
+                            emoji_complete_token_q     <= click_emoji_token_id;
+                            emoji_complete_char_idx_q  <= click_emoji_prefix_len;
+                            emoji_complete_token_len_q <= click_emoji_token_len;
+                            shift_idx_q                <= len_q;
+                        end
+                        emoji_suggest_tracking_q <= 1'b0;
+                        emoji_suggest_active_q   <= 1'b0;
+                        emoji_suggest_count_q    <= '0;
+                        emoji_suggest_ids_q      <= '0;
+                        emoji_suggest_anchor_q   <= '0;
                     end
-                    popup_active_q <= 1'b0;
-                    popup_type_q   <= 2'(POPUP_NONE);
-                end
-                else if (accept_mouse_click && emoji_suggest_active_q) begin
-                    if (click_in_emoji_suggest && click_emoji_fits) begin
-                        emoji_complete_token_q     <= click_emoji_token_id;
-                        emoji_complete_char_idx_q  <= click_emoji_prefix_len;
-                        emoji_complete_token_len_q <= click_emoji_token_len;
-                        shift_idx_q                <= len_q;
-                    end
-                    emoji_suggest_tracking_q <= 1'b0;
-                    emoji_suggest_active_q   <= 1'b0;
-                    emoji_suggest_count_q    <= '0;
-                    emoji_suggest_ids_q      <= '0;
-                    emoji_suggest_anchor_q   <= '0;
                 end
             end
 
@@ -1487,6 +1702,55 @@ module be_top
                 shift_idx_q       <= '0;
             end
             if (state_q == S_EMOJI_COMPLETE_PACK) begin
+                if (shift_idx_q < len_q) begin
+                    pending_payload_q[shift_idx_q*8 +: 8]
+                        <= line_buf[shift_idx_q[LINE_IDX_W-1:0]];
+                    shift_idx_q <= shift_idx_q + LEN_WIDTH'(1);
+                end
+            end
+
+            if (state_q == S_QUOTE_SHIFT) begin
+                line_buf[LINE_IDX_W'(shift_idx_q + quote_insert_len_q)]
+                    <= line_buf[shift_idx_q[LINE_IDX_W-1:0]];
+                if (shift_idx_q != cursor_pos_q)
+                    shift_idx_q <= shift_idx_q - LEN_WIDTH'(1);
+            end
+
+            if (state_q == S_QUOTE_WRITE) begin
+                automatic byte_t quote_byte;
+                automatic msg_len_t quote_payload_idx;
+                quote_payload_idx = quote_write_idx_q - msg_len_t'(2);
+                quote_byte = 8'h20;
+                if (quote_write_idx_q == msg_len_t'(0)) begin
+                    quote_byte = ">";
+                end else if (quote_write_idx_q == msg_len_t'(1)) begin
+                    quote_byte = " ";
+                end else if (quote_write_idx_q + msg_len_t'(1)
+                             >= quote_insert_len_q) begin
+                    quote_byte = quote_sep_byte_q;
+                end else begin
+                    quote_byte = quote_payload_q[quote_payload_idx*8 +: 8];
+                    if (quote_byte == 8'h0A)
+                        quote_byte = 8'h20;
+                end
+
+                line_buf[LINE_IDX_W'(cursor_pos_q + quote_write_idx_q)]
+                    <= quote_byte;
+                if (quote_write_idx_q + LEN_WIDTH'(1) >= quote_insert_len_q) begin
+                    len_q        <= len_q + quote_insert_len_q;
+                    cursor_pos_q <= cursor_pos_q + quote_insert_len_q;
+                    if ((quote_sep_byte_q == 8'h0A)
+                     && (input_newline_count_q
+                         < INPUT_NL_COUNT_W'(INPUT_NEWLINE_LIMIT)))
+                        input_newline_count_q <= input_newline_count_q + 1'b1;
+                    pending_payload_q <= '0;
+                    shift_idx_q       <= '0;
+                end else begin
+                    quote_write_idx_q <= quote_write_idx_q + LEN_WIDTH'(1);
+                end
+            end
+
+            if (state_q == S_QUOTE_PACK) begin
                 if (shift_idx_q < len_q) begin
                     pending_payload_q[shift_idx_q*8 +: 8]
                         <= line_buf[shift_idx_q[LINE_IDX_W-1:0]];
@@ -1606,10 +1870,14 @@ module be_top
     logic [STORE_IDX_W-1:0]     store_upd_idx;
     logic [1:0]                 store_upd_status;
 
-    assign store_upd_en     = (state_q == S_IDLE) && accept_status && store_lookup_hit;
-    assign store_upd_idx    = store_lookup_idx;
-    assign store_upd_status = (cm_status_code == 2'(TX_SUCCESS))
-                              ? 2'(MSG_SUCCESS) : 2'(MSG_FAIL);
+    assign store_upd_en     = ((state_q == S_IDLE) && accept_status && store_lookup_hit)
+                           || (state_q == S_RECALL_RENDER);
+    assign store_upd_idx    = (state_q == S_RECALL_RENDER)
+                              ? recall_store_idx_q : store_lookup_idx;
+    assign store_upd_status = (state_q == S_RECALL_RENDER)
+                              ? 2'(MSG_RECALLED)
+                              : ((cm_status_code == 2'(TX_SUCCESS))
+                                 ? 2'(MSG_SUCCESS) : 2'(MSG_FAIL));
 
     // -----------------------------------------------------------------
     // Message store instance
@@ -1639,6 +1907,14 @@ module be_top
         .rd_status      (store_rd_status),
         .rd_len         (store_rd_len),
         .rd_payload     (store_rd_payload),
+
+        .rd2_idx        (store_ui_rd_idx),
+        .rd2_valid      (store_ui_rd_valid),
+        .rd2_msg_id     (store_ui_rd_msg_id),
+        .rd2_side       (store_ui_rd_side),
+        .rd2_status     (store_ui_rd_status),
+        .rd2_len        (store_ui_rd_len),
+        .rd2_payload    (store_ui_rd_payload),
 
         .lookup_msg_id  (cm_status_msg_id),
         .lookup_hit     (store_lookup_hit),

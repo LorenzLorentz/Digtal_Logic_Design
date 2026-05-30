@@ -81,6 +81,15 @@ module be_message_store
     output msg_len_t                      rd_len,
     output logic [MAX_MSG_LEN*8-1:0]      rd_payload,
 
+    // Second combinational read port for backend-owned UI actions.
+    input  logic [IDX_W-1:0]              rd2_idx,
+    output logic                          rd2_valid,
+    output msg_id_t                       rd2_msg_id,
+    output logic [1:0]                    rd2_side,
+    output logic [1:0]                    rd2_status,
+    output msg_len_t                      rd2_len,
+    output logic [MAX_MSG_LEN*8-1:0]      rd2_payload,
+
     // Combinational lookup by msg_id (lowest matching idx)
     input  msg_id_t                       lookup_msg_id,
     output logic                          lookup_hit,
@@ -136,6 +145,13 @@ module be_message_store
     assign rd_status  = store[rd_idx].status;
     assign rd_len     = store[rd_idx].len;
     assign rd_payload = store[rd_idx].payload;
+
+    assign rd2_valid   = store[rd2_idx].valid;
+    assign rd2_msg_id  = store[rd2_idx].msg_id;
+    assign rd2_side    = store[rd2_idx].side;
+    assign rd2_status  = store[rd2_idx].status;
+    assign rd2_len     = store[rd2_idx].len;
+    assign rd2_payload = store[rd2_idx].payload;
 
     // -----------------------------------------------------------------
     // Combinational lookup by msg_id (lowest valid match wins).

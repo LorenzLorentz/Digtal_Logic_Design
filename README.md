@@ -227,8 +227,9 @@ DATA 帧的最终发送状态:
 | `be_render_ready`                 | frontend → backend  | frontend 可接                                 |
 | `be_render_cmd[3:0]`              | backend → frontend  | `render_cmd_e`                                |
 | `be_render_msg_id[7:0]`           | backend → frontend  | APPEND/UPDATE_STATUS 时用                     |
+| `be_render_store_idx[5:0]`        | backend → frontend  | APPEND 时携带 backend store slot, 供鼠标命中回查 |
 | `be_render_side[1:0]`             | backend → frontend  | LOCAL / REMOTE / SYSTEM                       |
-| `be_render_status[1:0]`           | backend → frontend  | PENDING / SUCCESS / FAIL                      |
+| `be_render_status[1:0]`           | backend → frontend  | PENDING / SUCCESS / FAIL / RECALLED           |
 | `be_render_len[7:0]`              | backend → frontend  | payload 长度                                  |
 | `be_render_payload[MAX*8-1:0]`    | backend → frontend  | 消息文本 / 输入行                             |
 | `be_render_cursor_pos[7:0]`       | backend → frontend  | 编辑后的光标位置                              |
@@ -247,6 +248,8 @@ RENDER_UPDATE_INPUT_LINE    = 3    RENDER_DELETE_AT_CURSOR = 8
 RENDER_CLEAR_SCREEN         = 4    RENDER_CONN_STATE       = 9
                                    RENDER_SCROLL_UP        = 10
                                    RENDER_SCROLL_DOWN      = 11
+                                   RENDER_INPUT_SCROLL_UP  = 12
+                                   RENDER_INPUT_SCROLL_DOWN= 13
 ```
 
 `conn_state_e`:
@@ -255,6 +258,12 @@ RENDER_CLEAR_SCREEN         = 4    RENDER_CONN_STATE       = 9
 CONN_BOOT         = 0   CONN_CONNECTED    = 2
 CONN_HANDSHAKE    = 1   CONN_DISCONNECTED = 3
 ```
+
+鼠标上下文菜单使用 frontend 暴露的历史行 owner 元数据完成 hit-test:
+`hist_wr_row_obs` / `scroll_offset_obs` 定位可见历史行, 每个历史物理行再提供
+`hist_owner_valid/store_idx/side/width`. backend 右键命中消息气泡后打开
+`POPUP_MSG_MENU`; Quote 将 `> <payload><newline>` 插入输入框, Recall 将本地消息状态
+更新为 `MSG_RECALLED` 并通过 `RENDER_UPDATE_STATUS` 重绘.
 
 ### 3.5 关键尺寸参数 (`chat_pkg.sv`)
 

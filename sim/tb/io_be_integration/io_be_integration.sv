@@ -97,6 +97,7 @@ module io_be_integration
     logic [1:0]  ui_popup_type_unused;
     logic [9:0]  ui_popup_x_unused;
     logic [9:0]  ui_popup_y_unused;
+    logic [$clog2(MAX_MSG_NUM)-1:0] be_render_store_idx_unused;
     logic        emoji_suggest_active_unused;
     logic [EMOJI_SUGGEST_COUNT_W-1:0] emoji_suggest_count_unused;
     logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] emoji_suggest_ids_unused;
@@ -129,11 +130,18 @@ module io_be_integration
         .io_key_type             (io_key_type),
         .io_key_ascii            (io_key_ascii),
         .io_mouse_click_valid    (1'b0),
+        .io_mouse_right_click_valid(1'b0),
         .io_mouse_click_ready    (io_mouse_click_ready_unused),
         .io_mouse_click_x        (10'd0),
         .io_mouse_click_y        (10'd0),
         .fe_input_scroll_offset  ('0),
         .fe_input_at_limit       (1'b0),
+        .fe_hist_wr_row          ('0),
+        .fe_hist_scroll_offset   ('0),
+        .fe_hist_owner_valid     ('0),
+        .fe_hist_owner_store_idx ('0),
+        .fe_hist_owner_side      ('0),
+        .fe_hist_owner_width     ('0),
         .ui_popup_active         (ui_popup_active_unused),
         .ui_popup_type           (ui_popup_type_unused),
         .ui_popup_x              (ui_popup_x_unused),
@@ -166,6 +174,7 @@ module io_be_integration
         .be_render_ready         (be_render_ready),
         .be_render_cmd           (be_render_cmd),
         .be_render_msg_id        (be_render_msg_id),
+        .be_render_store_idx     (be_render_store_idx_unused),
         .be_render_side          (be_render_side),
         .be_render_status        (be_render_status),
         .be_render_len           (be_render_len),

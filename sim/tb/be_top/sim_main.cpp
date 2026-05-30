@@ -52,7 +52,7 @@ enum : uint8_t { KEY_CHAR = 0, KEY_ENTER = 1, KEY_BACKSPACE = 2,
                  KEY_UP   = 6, KEY_DOWN  = 7 };
 // msg_side_e / msg_status_e
 enum : uint8_t { MSG_LOCAL = 0, MSG_REMOTE = 1, MSG_SYSTEM = 2 };
-enum : uint8_t { MSG_PENDING = 0, MSG_SUCCESS = 1, MSG_FAIL = 2 };
+enum : uint8_t { MSG_PENDING = 0, MSG_SUCCESS = 1, MSG_FAIL = 2, MSG_RECALLED = 3 };
 // tx_status_e
 enum : uint8_t { TX_SUCCESS = 0, TX_FAIL = 1 };
 // render_cmd_e (mirrors chat_pkg.sv)
@@ -230,6 +230,7 @@ static void clear_inputs() {
     dut->io_key_type       = 0;
     dut->io_key_ascii      = 0;
     dut->io_mouse_click_valid = 0;
+    dut->io_mouse_right_click_valid = 0;
     dut->io_mouse_click_x     = 0;
     dut->io_mouse_click_y     = 0;
     dut->cm_rx_valid       = 0;
@@ -242,7 +243,14 @@ static void clear_inputs() {
     dut->cm_status_code    = 0;
     dut->be_tx_ready       = 1;
     dut->be_render_ready   = 1;
+    dut->fe_input_scroll_offset = 0;
     dut->fe_input_at_limit = 0;
+    dut->fe_hist_wr_row = 0;
+    dut->fe_hist_scroll_offset = 0;
+    dut->fe_hist_owner_valid = 0;
+    for (int i = 0; i < 12; i++) dut->fe_hist_owner_store_idx[i] = 0;
+    for (int i = 0; i < 4; i++) dut->fe_hist_owner_side[i] = 0;
+    for (int i = 0; i < 14; i++) dut->fe_hist_owner_width[i] = 0;
     dut->line_rd_idx       = 0;
     dut->store_rd_idx      = 0;
 }
@@ -342,6 +350,49 @@ static void send_mouse_click(uint16_t x, uint16_t y) {
     dut->io_mouse_click_valid = 1;
     tick();
     dut->io_mouse_click_valid = 0;
+}
+
+static void send_mouse_right_click(uint16_t x, uint16_t y) {
+    dut->io_mouse_click_x = x;
+    dut->io_mouse_click_y = y;
+    dut->io_mouse_right_click_valid = 1;
+    tick();
+    dut->io_mouse_right_click_valid = 0;
+}
+
+static void set_hist_owner(int hist_slot, bool valid, uint8_t store_idx,
+                           uint8_t side, uint8_t width) {
+    if (valid)
+        dut->fe_hist_owner_valid |= (1ULL << hist_slot);
+    else
+        dut->fe_hist_owner_valid &= ~(1ULL << hist_slot);
+
+    int bit = hist_slot * 6;
+    int word = bit >> 5;
+    int off = bit & 31;
+    uint64_t mask = 0x3FULL << off;
+    uint64_t cur = dut->fe_hist_owner_store_idx[word];
+    if (off > 26) cur |= (uint64_t)dut->fe_hist_owner_store_idx[word + 1] << 32;
+    cur = (cur & ~mask) | ((uint64_t)(store_idx & 0x3F) << off);
+    dut->fe_hist_owner_store_idx[word] = (uint32_t)cur;
+    if (off > 26) dut->fe_hist_owner_store_idx[word + 1] = (uint32_t)(cur >> 32);
+
+    bit = hist_slot * 2;
+    word = bit >> 5;
+    off = bit & 31;
+    dut->fe_hist_owner_side[word] =
+        (dut->fe_hist_owner_side[word] & ~(0x3u << off))
+        | ((uint32_t)(side & 0x3) << off);
+
+    bit = hist_slot * 7;
+    word = bit >> 5;
+    off = bit & 31;
+    mask = 0x7FULL << off;
+    cur = dut->fe_hist_owner_width[word];
+    if (off > 25) cur |= (uint64_t)dut->fe_hist_owner_width[word + 1] << 32;
+    cur = (cur & ~mask) | ((uint64_t)(width & 0x7F) << off);
+    dut->fe_hist_owner_width[word] = (uint32_t)cur;
+    if (off > 25) dut->fe_hist_owner_width[word + 1] = (uint32_t)(cur >> 32);
 }
 
 static void inject_rx_frame(uint8_t frame_type, uint8_t seq, uint16_t len,
@@ -2072,6 +2123,82 @@ static void test_frontend_height_limit_blocks_newline_only() {
     dut->fe_input_at_limit = 0;
 }
 
+static void commit_hi_and_expose_hist_owner() {
+    for (char c : std::string("hi")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+
+    // FE's visible-window formula maps screen row 30 to hist slot 0
+    // after a single one-line append (hist_wr_row=1, scroll=0).
+    dut->fe_hist_wr_row = 1;
+    dut->fe_hist_scroll_offset = 0;
+    set_hist_owner(/*hist_slot=*/0, true, /*store_idx=*/0,
+                   MSG_LOCAL, /*bubble width=*/2);
+}
+
+static void test_right_click_message_opens_context_menu() {
+    printf("== test_right_click_message_opens_context_menu\n");
+    reset();
+    commit_hi_and_expose_hist_owner();
+
+    send_mouse_right_click(/*x=*/95 * 8 + 1, /*y=*/30 * 16 + 8);
+    tick();
+
+    CHECK_EQ(dut->ui_popup_active, 1, "message menu active");
+    CHECK_EQ(dut->ui_popup_type, POPUP_MSG_MENU, "message menu type");
+    CHECK_EQ(dut->ui_popup_x, 95 * 8 + 1, "message menu x");
+    CHECK_EQ(dut->ui_popup_y, 30 * 16 + 8, "message menu y");
+    CHECK_EQ(no_render_for(3), true, "opening message menu emits no render");
+}
+
+static void test_context_menu_quote_inserts_input_prefix() {
+    printf("== test_context_menu_quote_inserts_input_prefix\n");
+    reset();
+    commit_hi_and_expose_hist_owner();
+
+    send_mouse_right_click(/*x=*/95 * 8 + 1, /*y=*/30 * 16 + 8);
+    tick();
+    send_mouse_click(dut->ui_popup_x + 10, dut->ui_popup_y + 10);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + 30), true, "quote render fires");
+    CHECK_EQ(r.cmd, RENDER_UPDATE_INPUT_LINE, "quote updates full input");
+    CHECK_EQ(r.len, 5, "quote input len");
+    CHECK_EQ(r.cursor_pos, 5, "quote cursor");
+    const uint8_t expect[] = {'>',' ','h','i',0x0A};
+    for (int i = 0; i < 5; i++) {
+        char lbl[48]; snprintf(lbl, sizeof(lbl), "quote payload[%d]", i);
+        CHECK_EQ(payload_get_byte(r.payload, i), expect[i], lbl);
+        snprintf(lbl, sizeof(lbl), "quote line_buf[%d]", i);
+        CHECK_EQ(read_buf(i), expect[i], lbl);
+    }
+    CHECK_EQ(dut->ui_popup_active, 0, "menu closes after quote");
+}
+
+static void test_context_menu_recall_marks_local_message() {
+    printf("== test_context_menu_recall_marks_local_message\n");
+    reset();
+    commit_hi_and_expose_hist_owner();
+
+    send_mouse_right_click(/*x=*/95 * 8 + 1, /*y=*/30 * 16 + 8);
+    tick();
+    send_mouse_click(dut->ui_popup_x + 10, dut->ui_popup_y + 2 + 24 + 8);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, 20), true, "recall render fires");
+    CHECK_EQ(r.cmd, RENDER_UPDATE_STATUS, "recall uses status update render");
+    CHECK_EQ(r.msg_id, 0, "recall msg id");
+    CHECK_EQ(r.status, MSG_RECALLED, "recall status");
+    CHECK_EQ(dut->ui_popup_active, 0, "menu closes after recall");
+
+    StoreRead s = read_store(0);
+    CHECK_EQ(s.valid, 1, "recall store valid");
+    CHECK_EQ(s.status, MSG_RECALLED, "store status recalled");
+}
+
 // =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
@@ -2118,6 +2245,9 @@ int main(int argc, char** argv) {
     test_emoji_tokens_encoded_on_commit();
     test_big_emoji_tokens_encoded_on_commit();
     test_ctrl_e_sticker_picker_sends_big_emoji();
+    test_right_click_message_opens_context_menu();
+    test_context_menu_quote_inserts_input_prefix();
+    test_context_menu_recall_marks_local_message();
     test_big_emoji_tokens_mixed_text_passthrough();
     test_big_emoji_unknown_token_passthrough();
     test_commit_full_pipeline_order();

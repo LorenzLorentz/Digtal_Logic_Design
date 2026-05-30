@@ -105,7 +105,8 @@ package chat_pkg;
     typedef enum logic [1:0] {
         MSG_PENDING = 2'd0,
         MSG_SUCCESS = 2'd1,
-        MSG_FAIL    = 2'd2
+        MSG_FAIL    = 2'd2,
+        MSG_RECALLED = 2'd3
     } msg_status_e;
 
     // -----------------------------------------------------------------

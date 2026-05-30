@@ -61,6 +61,7 @@ module fe_render_decoder
     output logic                       be_render_ready,
     input  logic [3:0]                 be_render_cmd,
     input  msg_id_t                    be_render_msg_id,
+    input  logic [$clog2(MAX_MSG_NUM)-1:0] be_render_store_idx,
     input  logic [1:0]                 be_render_side,
     input  logic [1:0]                 be_render_status,
     input  msg_len_t                   be_render_len,
@@ -90,6 +91,12 @@ module fe_render_decoder
     output logic [HIST_W-1:0]          hist_wr_row_obs,
     output logic [SCROLL_W-1:0]        scroll_offset_obs,
     output logic [N_HIST_STORED*2-1:0] hist_avatar_attr_obs,
+    output logic [N_HIST_STORED-1:0]   hist_owner_valid_obs,
+    output logic [N_HIST_STORED*$clog2(MAX_MSG_NUM)-1:0]
+                                            hist_owner_store_idx_obs,
+    output logic [N_HIST_STORED*2-1:0] hist_owner_side_obs,
+    output logic [N_HIST_STORED*FE_COL_W-1:0]
+                                            hist_owner_width_obs,
 
     // for fe_scan: 2-D cursor position within the multi-row input
     // window, plus the current input scroll offset.
@@ -136,6 +143,7 @@ module fe_render_decoder
     // -----------------------------------------------------------------
     localparam int NAME_IDX_W = $clog2(MAX_NAME_LEN);
     localparam int LINE_IDX_W = $clog2(MAX_LINE_LEN);
+    localparam int STORE_IDX_W = $clog2(MAX_MSG_NUM);
 
     // -----------------------------------------------------------------
     // Counters / latched-on-accept registers
@@ -147,6 +155,7 @@ module fe_render_decoder
 
     logic [1:0]                       side_q;
     logic [1:0]                       status_q;
+    logic [STORE_IDX_W-1:0]           store_idx_q;
     logic [MAX_MSG_LEN*8-1:0]         payload_q;
 
     // Multi-line parsing state.
@@ -247,12 +256,24 @@ module fe_render_decoder
     // (fe_msg_payload_ram) to free the LUTs.
     logic [1:0]                       slot_side_q     [N_HIST_STORED];
     msg_len_t                         slot_len_q      [N_HIST_STORED];
+    logic [LINE_CNT_W-1:0]            slot_n_lines_q  [N_HIST_STORED];
     logic [1:0]                       slot_avatar_attr_q [N_HIST_STORED];
+
+    logic                             slot_owner_valid_q [N_HIST_STORED];
+    logic [STORE_IDX_W-1:0]           slot_owner_store_idx_q [N_HIST_STORED];
+    logic [1:0]                       slot_owner_side_q [N_HIST_STORED];
+    logic [FE_COL_W-1:0]              slot_owner_width_q [N_HIST_STORED];
 
     genvar attr_i;
     generate
         for (attr_i = 0; attr_i < N_HIST_STORED; attr_i++) begin : g_hist_avatar_attr_obs
             assign hist_avatar_attr_obs[attr_i*2 +: 2] = slot_avatar_attr_q[attr_i];
+            assign hist_owner_valid_obs[attr_i] = slot_owner_valid_q[attr_i];
+            assign hist_owner_store_idx_obs[attr_i*STORE_IDX_W +: STORE_IDX_W]
+                = slot_owner_store_idx_q[attr_i];
+            assign hist_owner_side_obs[attr_i*2 +: 2] = slot_owner_side_q[attr_i];
+            assign hist_owner_width_obs[attr_i*FE_COL_W +: FE_COL_W]
+                = slot_owner_width_q[attr_i];
         end
     endgenerate
 
@@ -455,6 +476,23 @@ module fe_render_decoder
             0:       input_prefix_byte = ">";
             1:       input_prefix_byte = " ";
             default: input_prefix_byte = " ";
+        endcase
+    endfunction
+
+    localparam int RECALLED_TEXT_LEN = 10;
+    function automatic byte_t recalled_text_byte(input int unsigned idx);
+        case (idx)
+            0:       recalled_text_byte = "[";
+            1:       recalled_text_byte = "r";
+            2:       recalled_text_byte = "e";
+            3:       recalled_text_byte = "c";
+            4:       recalled_text_byte = "a";
+            5:       recalled_text_byte = "l";
+            6:       recalled_text_byte = "l";
+            7:       recalled_text_byte = "e";
+            8:       recalled_text_byte = "d";
+            9:       recalled_text_byte = "]";
+            default: recalled_text_byte = " ";
         endcase
     endfunction
 
@@ -767,7 +805,9 @@ module fe_render_decoder
                         // before rewriting the bubble row.
                         RENDER_UPDATE_STATUS:
                             state_d = msg_id_valid_q[be_render_msg_id]
-                                      ? S_HIST_LOAD : S_IDLE;
+                                      ? ((be_render_status == 2'(MSG_RECALLED))
+                                         ? S_UPDATE_STATUS : S_HIST_LOAD)
+                                      : S_IDLE;
 
                         // Input edit pipeline. INSERT / DELETE first
                         // walk input_line_q one byte per cycle in
@@ -903,6 +943,7 @@ module fe_render_decoder
             target_row_q      <= '0;
             side_q            <= 2'(MSG_LOCAL);
             status_q          <= 2'(MSG_PENDING);
+            store_idx_q       <= '0;
             payload_q         <= '0;
             cur_line_q        <= '0;
             n_lines_q         <= LINE_CNT_W'(1);
@@ -956,7 +997,12 @@ module fe_render_decoder
             for (int i = 0; i < N_HIST_STORED; i++) begin
                 slot_side_q[i]        <= 2'(MSG_LOCAL);
                 slot_len_q[i]         <= '0;
+                slot_n_lines_q[i]     <= LINE_CNT_W'(1);
                 slot_avatar_attr_q[i] <= BUBBLE_ATTR_NONE;
+                slot_owner_valid_q[i] <= 1'b0;
+                slot_owner_store_idx_q[i] <= '0;
+                slot_owner_side_q[i]  <= 2'(MSG_LOCAL);
+                slot_owner_width_q[i] <= '0;
             end
 
             chain_titlebar_q  <= 1'b0;
@@ -1061,7 +1107,12 @@ module fe_render_decoder
                                 for (int i = 0; i < N_HIST_STORED; i++) begin
                                     slot_side_q[i]        <= 2'(MSG_LOCAL);
                                     slot_len_q[i]         <= '0;
+                                    slot_n_lines_q[i]     <= LINE_CNT_W'(1);
                                     slot_avatar_attr_q[i] <= BUBBLE_ATTR_NONE;
+                                    slot_owner_valid_q[i] <= 1'b0;
+                                    slot_owner_store_idx_q[i] <= '0;
+                                    slot_owner_side_q[i]  <= 2'(MSG_LOCAL);
+                                    slot_owner_width_q[i] <= '0;
                                 end
                             end
                         end else begin
@@ -1085,6 +1136,7 @@ module fe_render_decoder
                         // once we know n_lines from the parse.
                         side_q        <= be_render_side;
                         status_q      <= be_render_status;
+                        store_idx_q   <= be_render_store_idx;
                         payload_q     <= be_render_payload;
                         target_row_q  <= FE_ROW_W'(HIST_ROW_START)
                                          + FE_ROW_W'(hist_wr_row_q);
@@ -1108,8 +1160,25 @@ module fe_render_decoder
                             target_row_q      <= FE_ROW_W'(HIST_ROW_START)
                                                  + FE_ROW_W'(slot);
                             side_q            <= slot_side_q[slot];
-                            msg_total_len_q   <= slot_len_q[slot];
                             msg_target_slot_q <= slot;
+                            if (be_render_status == 2'(MSG_RECALLED)) begin
+                                payload_q       <= '0;
+                                for (int i = 0; i < RECALLED_TEXT_LEN; i++)
+                                    payload_q[i*8 +: 8] <= recalled_text_byte(i);
+                                msg_total_len_q  <= msg_len_t'(RECALLED_TEXT_LEN);
+                                msg_max_sub_len_q <= msg_len_t'(RECALLED_TEXT_LEN);
+                                n_lines_q        <= slot_n_lines_q[slot];
+                                cur_line_q       <= '0;
+                                is_big_emoji_q   <= 1'b0;
+                                for (int i = 0; i < MAX_LINES; i++) begin
+                                    ml_offset_q[i] <= '0;
+                                    ml_len_q[i]    <= (i == 0)
+                                                      ? msg_len_t'(RECALLED_TEXT_LEN)
+                                                      : '0;
+                                end
+                            end else begin
+                                msg_total_len_q <= slot_len_q[slot];
+                            end
                         end
                     end
 
@@ -1476,6 +1545,8 @@ module fe_render_decoder
                             ml_offset_q[i] <= '0;
                             ml_len_q[i]    <= msg_len_t'(BIG_EMOJI_N_COLS);
                         end
+                        slot_n_lines_q[msg_target_slot_q] <=
+                            LINE_CNT_W'(BIG_EMOJI_N_ROWS);
                         for (int i = 0; i < MAX_LINES; i++) begin
                             if (i < BIG_EMOJI_N_ROWS) begin
                                 slot_avatar_attr_q[
@@ -1483,6 +1554,22 @@ module fe_render_decoder
                                     & HIST_W'(N_HIST_STORED - 1)
                                 ] <= (i == 0) ? bubble_attr_for_side(side_q)
                                               : BUBBLE_ATTR_NONE;
+                                slot_owner_valid_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= 1'b1;
+                                slot_owner_store_idx_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= store_idx_q;
+                                slot_owner_side_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= side_q;
+                                slot_owner_width_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= FE_COL_W'(BIG_EMOJI_N_COLS);
                             end
                         end
                         // Advance hist pointer by N_ROWS (bubble is that
@@ -1498,6 +1585,7 @@ module fe_render_decoder
                     end else begin
                         automatic logic [LINE_CNT_W-1:0] final_n_lines;
                         automatic msg_len_t             final_line_len;
+                        automatic logic [FE_COL_W-1:0]  final_width;
                         automatic logic [LINE_SEL_W-1:0] final_last_sel;
                         automatic logic [HIST_W:0]       next_used_rows;
                         is_big_emoji_q <= 1'b0;
@@ -1514,12 +1602,16 @@ module fe_render_decoder
                         final_last_sel = is_break
                             ? msg_parse_line_sel
                             : msg_parse_last_sel;
+                        final_width = FE_COL_W'(
+                            (!is_break && final_line_len > msg_max_sub_len_q)
+                            ? final_line_len : msg_max_sub_len_q);
 
                         ml_len_q[final_last_sel] <= final_line_len;
                         n_lines_q  <= final_n_lines;
                         cur_line_q <= '0;
                         if (!is_break && final_line_len > msg_max_sub_len_q)
                             msg_max_sub_len_q <= final_line_len;
+                        slot_n_lines_q[msg_target_slot_q] <= final_n_lines;
                         for (int i = 0; i < MAX_LINES; i++) begin
                             if (LINE_CNT_W'(i) < final_n_lines) begin
                                 slot_avatar_attr_q[
@@ -1527,6 +1619,22 @@ module fe_render_decoder
                                     & HIST_W'(N_HIST_STORED - 1)
                                 ] <= (i == 0) ? bubble_attr_for_side(side_q)
                                               : BUBBLE_ATTR_NONE;
+                                slot_owner_valid_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= 1'b1;
+                                slot_owner_store_idx_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= store_idx_q;
+                                slot_owner_side_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= side_q;
+                                slot_owner_width_q[
+                                    (msg_target_slot_q + HIST_W'(i))
+                                    & HIST_W'(N_HIST_STORED - 1)
+                                ] <= final_width;
                             end
                         end
                         next_used_rows = hist_used_after_append(

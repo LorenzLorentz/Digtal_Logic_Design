@@ -100,6 +100,7 @@ module chat_top_pair
     logic                          a_be_render_valid, a_be_render_ready;
     logic [3:0]                    a_be_render_cmd;
     msg_id_t                       a_be_render_msg_id;
+    logic [$clog2(MAX_MSG_NUM)-1:0] a_be_render_store_idx;
     logic [1:0]                    a_be_render_side, a_be_render_status;
     msg_len_t                      a_be_render_len;
     logic [MAX_MSG_LEN*8-1:0]      a_be_render_payload;
@@ -121,6 +122,10 @@ module chat_top_pair
     logic [EMOJI_SUGGEST_COUNT_W-1:0] a_emoji_suggest_count;
     logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] a_emoji_suggest_ids;
     msg_len_t                      a_emoji_suggest_anchor_pos;
+    logic [N_HIST_STORED-1:0]      a_fe_hist_owner_valid;
+    logic [N_HIST_STORED*$clog2(MAX_MSG_NUM)-1:0] a_fe_hist_owner_store_idx;
+    logic [N_HIST_STORED*2-1:0]    a_fe_hist_owner_side;
+    logic [N_HIST_STORED*FE_COL_W-1:0] a_fe_hist_owner_width;
     /* verilator lint_on UNUSEDSIGNAL */
 
     be_top #(
@@ -134,11 +139,18 @@ module chat_top_pair
         .io_key_type            (a_io_key_type),
         .io_key_ascii           (a_io_key_ascii),
         .io_mouse_click_valid   (1'b0),
+        .io_mouse_right_click_valid(1'b0),
         .io_mouse_click_ready   (a_mouse_click_ready_unused),
         .io_mouse_click_x       (10'd0),
         .io_mouse_click_y       (10'd0),
         .fe_input_scroll_offset ('0),
         .fe_input_at_limit      (a_fe_input_at_limit),
+        .fe_hist_wr_row         (a_fe_hist_wr_row),
+        .fe_hist_scroll_offset  (a_fe_scroll_offset),
+        .fe_hist_owner_valid    (a_fe_hist_owner_valid),
+        .fe_hist_owner_store_idx(a_fe_hist_owner_store_idx),
+        .fe_hist_owner_side     (a_fe_hist_owner_side),
+        .fe_hist_owner_width    (a_fe_hist_owner_width),
         .ui_popup_active        (a_ui_popup_active),
         .ui_popup_type          (a_ui_popup_type),
         .ui_popup_x             (a_ui_popup_x),
@@ -167,6 +179,7 @@ module chat_top_pair
         .be_render_ready        (a_be_render_ready),
         .be_render_cmd          (a_be_render_cmd),
         .be_render_msg_id       (a_be_render_msg_id),
+        .be_render_store_idx    (a_be_render_store_idx),
         .be_render_side         (a_be_render_side),
         .be_render_status       (a_be_render_status),
         .be_render_len          (a_be_render_len),
@@ -248,6 +261,7 @@ module chat_top_pair
         .be_render_ready         (a_be_render_ready),
         .be_render_cmd           (a_be_render_cmd),
         .be_render_msg_id        (a_be_render_msg_id),
+        .be_render_store_idx     (a_be_render_store_idx),
         .be_render_side          (a_be_render_side),
         .be_render_status        (a_be_render_status),
         .be_render_len           (a_be_render_len),
@@ -284,6 +298,10 @@ module chat_top_pair
         .peer_name_len_obs       (a_fe_peer_name_len),
         .hist_wr_row_obs         (a_fe_hist_wr_row),
         .scroll_offset_obs       (a_fe_scroll_offset),
+        .hist_owner_valid_obs    (a_fe_hist_owner_valid),
+        .hist_owner_store_idx_obs(a_fe_hist_owner_store_idx),
+        .hist_owner_side_obs     (a_fe_hist_owner_side),
+        .hist_owner_width_obs    (a_fe_hist_owner_width),
         .input_cursor_row_obs    (a_fe_input_cursor_row),
         .input_cursor_col_obs    (a_fe_input_cursor_col),
         .input_n_lines_obs       (a_fe_input_n_lines),
@@ -315,6 +333,7 @@ module chat_top_pair
     logic                          b_be_render_valid, b_be_render_ready;
     logic [3:0]                    b_be_render_cmd;
     msg_id_t                       b_be_render_msg_id;
+    logic [$clog2(MAX_MSG_NUM)-1:0] b_be_render_store_idx;
     logic [1:0]                    b_be_render_side, b_be_render_status;
     msg_len_t                      b_be_render_len;
     logic [MAX_MSG_LEN*8-1:0]      b_be_render_payload;
@@ -336,6 +355,10 @@ module chat_top_pair
     logic [EMOJI_SUGGEST_COUNT_W-1:0] b_emoji_suggest_count;
     logic [EMOJI_SUGGEST_MAX*EMOJI_TOKEN_ID_W-1:0] b_emoji_suggest_ids;
     msg_len_t                      b_emoji_suggest_anchor_pos;
+    logic [N_HIST_STORED-1:0]      b_fe_hist_owner_valid;
+    logic [N_HIST_STORED*$clog2(MAX_MSG_NUM)-1:0] b_fe_hist_owner_store_idx;
+    logic [N_HIST_STORED*2-1:0]    b_fe_hist_owner_side;
+    logic [N_HIST_STORED*FE_COL_W-1:0] b_fe_hist_owner_width;
     /* verilator lint_on UNUSEDSIGNAL */
 
     be_top #(
@@ -349,11 +372,18 @@ module chat_top_pair
         .io_key_type            (b_io_key_type),
         .io_key_ascii           (b_io_key_ascii),
         .io_mouse_click_valid   (1'b0),
+        .io_mouse_right_click_valid(1'b0),
         .io_mouse_click_ready   (b_mouse_click_ready_unused),
         .io_mouse_click_x       (10'd0),
         .io_mouse_click_y       (10'd0),
         .fe_input_scroll_offset ('0),
         .fe_input_at_limit      (b_fe_input_at_limit),
+        .fe_hist_wr_row         (b_fe_hist_wr_row),
+        .fe_hist_scroll_offset  (b_fe_scroll_offset),
+        .fe_hist_owner_valid    (b_fe_hist_owner_valid),
+        .fe_hist_owner_store_idx(b_fe_hist_owner_store_idx),
+        .fe_hist_owner_side     (b_fe_hist_owner_side),
+        .fe_hist_owner_width    (b_fe_hist_owner_width),
         .ui_popup_active        (b_ui_popup_active),
         .ui_popup_type          (b_ui_popup_type),
         .ui_popup_x             (b_ui_popup_x),
@@ -382,6 +412,7 @@ module chat_top_pair
         .be_render_ready        (b_be_render_ready),
         .be_render_cmd          (b_be_render_cmd),
         .be_render_msg_id       (b_be_render_msg_id),
+        .be_render_store_idx    (b_be_render_store_idx),
         .be_render_side         (b_be_render_side),
         .be_render_status       (b_be_render_status),
         .be_render_len          (b_be_render_len),
@@ -462,6 +493,7 @@ module chat_top_pair
         .be_render_ready         (b_be_render_ready),
         .be_render_cmd           (b_be_render_cmd),
         .be_render_msg_id        (b_be_render_msg_id),
+        .be_render_store_idx     (b_be_render_store_idx),
         .be_render_side          (b_be_render_side),
         .be_render_status        (b_be_render_status),
         .be_render_len           (b_be_render_len),
@@ -498,6 +530,10 @@ module chat_top_pair
         .peer_name_len_obs       (b_fe_peer_name_len),
         .hist_wr_row_obs         (b_fe_hist_wr_row),
         .scroll_offset_obs       (b_fe_scroll_offset),
+        .hist_owner_valid_obs    (b_fe_hist_owner_valid),
+        .hist_owner_store_idx_obs(b_fe_hist_owner_store_idx),
+        .hist_owner_side_obs     (b_fe_hist_owner_side),
+        .hist_owner_width_obs    (b_fe_hist_owner_width),
         .input_cursor_row_obs    (b_fe_input_cursor_row),
         .input_cursor_col_obs    (b_fe_input_cursor_col),
         .input_n_lines_obs       (b_fe_input_n_lines),
