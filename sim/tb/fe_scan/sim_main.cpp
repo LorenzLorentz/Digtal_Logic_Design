@@ -44,7 +44,7 @@ static constexpr uint8_t POPUP_MSG_MENU = 1;
 static constexpr int EMOJI_SUGGEST_X_PX = 16;
 static constexpr int EMOJI_SUGGEST_Y_PX = 260;
 static constexpr int EMOJI_SUGGEST_BORDER_PX = 2;
-static constexpr int EMOJI_SUGGEST_TEXT_X_PX = 8;
+static constexpr int EMOJI_SUGGEST_TEXT_X_PX = 10;
 
 static constexpr uint8_t SPRITE_BL = 0xF3;
 static constexpr uint8_t SPRITE_BR = 0xF4;
@@ -283,9 +283,17 @@ static void test_popup_menu_text_uses_glyph_rom_bus() {
     CHECK_EQ(dut->video_blue,  POPUP_TEXT_B, "popup text blue");
 }
 
+static constexpr int EMOJI_SUGGEST_MAX = 15;
+static constexpr int EMOJI_SUGGEST_ITEM_H_PX = 16;
+
 static void test_emoji_suggest_overlay() {
     printf("== test_emoji_suggest_overlay\n");
     reset();
+
+    // count=1 -> dynamic Y = 260 + (15-1)*16 = 484
+    static constexpr int SUGGEST_Y =
+        EMOJI_SUGGEST_Y_PX
+        + (EMOJI_SUGGEST_MAX - 1) * EMOJI_SUGGEST_ITEM_H_PX;
 
     dut->emoji_suggest_active = 1;
     dut->emoji_suggest_count = 1;
@@ -293,21 +301,30 @@ static void test_emoji_suggest_overlay() {
     dut->mouse_x = 1023;
     dut->mouse_y = 1023;
 
-    drive_visible_pixel(EMOJI_SUGGEST_X_PX, EMOJI_SUGGEST_Y_PX,
+    // Top-left pixel of the overlay (border).
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX, SUGGEST_Y,
                         BUBBLE_ATTR_NONE);
     CHECK_EQ(dut->video_red,   POPUP_BORDER_R, "suggest border red");
     CHECK_EQ(dut->video_green, POPUP_BORDER_G, "suggest border green");
     CHECK_EQ(dut->video_blue,  POPUP_BORDER_B, "suggest border blue");
 
+    // Interior (background).
     drive_visible_pixel(EMOJI_SUGGEST_X_PX + 40,
-                        EMOJI_SUGGEST_Y_PX + EMOJI_SUGGEST_BORDER_PX + 8,
+                        SUGGEST_Y + EMOJI_SUGGEST_BORDER_PX + 8,
                         BUBBLE_ATTR_NONE);
     CHECK_EQ(dut->video_red,   POPUP_BG_R, "suggest bg red");
     CHECK_EQ(dut->video_green, POPUP_BG_G, "suggest bg green");
     CHECK_EQ(dut->video_blue,  POPUP_BG_B, "suggest bg blue");
 
+    // Icon area: glyph should be the emoji code (0xE0 = HAPPY).
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX + EMOJI_SUGGEST_BORDER_PX + 4,
+                        SUGGEST_Y + EMOJI_SUGGEST_BORDER_PX,
+                        BUBBLE_ATTR_NONE, ' ', 0x80);
+    CHECK_EQ(dut->glyph_code, (uint8_t)0xE0, "suggest icon glyph");
+
+    // Text label: pixel at text start renders '\\' (first char).
     drive_visible_pixel(EMOJI_SUGGEST_X_PX + EMOJI_SUGGEST_TEXT_X_PX,
-                        EMOJI_SUGGEST_Y_PX + EMOJI_SUGGEST_BORDER_PX,
+                        SUGGEST_Y + EMOJI_SUGGEST_BORDER_PX,
                         BUBBLE_ATTR_NONE, ' ', 0x80);
     CHECK_EQ(dut->glyph_code, (uint8_t)'\\', "suggest label glyph");
     CHECK_EQ(dut->video_red,   POPUP_TEXT_R, "suggest text red");

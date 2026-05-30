@@ -839,7 +839,9 @@ static void test_emoji_suggest_click_completes_token() {
     CHECK_EQ(suggest_id(0), EMOJI_TOKEN_HAPPY, "\\ha candidate is happy");
 
     send_mouse_click(EMOJI_SUGGEST_X_PX + 10,
-                     EMOJI_SUGGEST_Y_PX + EMOJI_SUGGEST_BORDER_PX + 8);
+                     EMOJI_SUGGEST_Y_PX
+                     + (15 - 1) * 16  // dynamic Y shift for count=1
+                     + EMOJI_SUGGEST_BORDER_PX + 8);
 
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + 20), true, "completion render fires");

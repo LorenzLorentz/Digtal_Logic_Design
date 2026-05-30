@@ -458,8 +458,15 @@ module be_top
         click_in_msg_menu
         && (click_popup_dy >= 10'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX))
         && (click_popup_dy < 10'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX * 2));
+    // Dynamic Y matches the frontend's bottom-up alignment so click
+    // hit-testing stays in sync when the overlay shifts down.
+    logic [9:0] emoji_suggest_y;
+    assign emoji_suggest_y =
+        10'(EMOJI_SUGGEST_Y_PX)
+        + (10'(EMOJI_SUGGEST_MAX) - 10'(emoji_suggest_count_q))
+        * 10'(EMOJI_SUGGEST_ITEM_H_PX);
     assign click_emoji_dx  = click_x_q - 10'(EMOJI_SUGGEST_X_PX);
-    assign click_emoji_dy  = click_y_q - 10'(EMOJI_SUGGEST_Y_PX);
+    assign click_emoji_dy  = click_y_q - emoji_suggest_y;
     assign click_emoji_row =
         4'((click_emoji_dy - 10'(EMOJI_SUGGEST_BORDER_PX)) >> 4);
     assign click_in_emoji_suggest =

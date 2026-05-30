@@ -300,6 +300,36 @@ module fe_scan
     logic [3:0]        emoji_suggest_label_col_s0;
     logic [HWIDTH-1:0] emoji_suggest_label_dx_s0;
 
+    logic              emoji_suggest_icon_active_s0;
+    byte_t             emoji_suggest_icon_char_s0;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [HWIDTH-1:0] emoji_suggest_icon_dx_s0;
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic [2:0]        emoji_suggest_icon_gx_s0;
+    logic [3:0]        emoji_suggest_icon_gy_s0;
+
+    // Dynamic Y: slide the overlay down when fewer items match, so the
+    // list always grows bottom-up.
+    logic [HWIDTH-1:0] emoji_suggest_y;
+
+    // Sticker-picker big-emoji content (stage 0).
+    logic [5:0]        sticker_cell_dx;
+    logic [6:0]        sticker_cell_dy;
+    logic [5:0]        sticker_dx_from_off;
+    logic [6:0]        sticker_dy_from_off;
+    logic [2:0]        sticker_sub_col;
+    logic [1:0]        sticker_sub_row;
+    logic              sticker_content_active_s0;
+    logic [6:0]        sticker_tile_off_s0;
+    logic [2:0]        sticker_content_gx_s0;
+    logic [3:0]        sticker_content_gy_s0;
+    logic [2:0]        sticker_content_emoji_id_s0;
+
+    localparam int STICKER_EMOJI_X_OFF =
+        (POPUP_STICKER_CELL_W_PX - 8 * 6) / 2;   // (64 - 48) / 2 = 8
+    localparam int STICKER_EMOJI_Y_OFF =
+        (POPUP_STICKER_PICKER_H_PX - 16 * 3) / 2; // (80 - 48) / 2 = 16
+
     always_comb begin
         popup_w_s0 = '0;
         popup_h_s0 = '0;
@@ -401,17 +431,21 @@ module fe_scan
                                     + POPUP_MSG_TEXT_Y_PX))
         : 4'(popup_dy_s0 - HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_TEXT_Y_PX));
 
+    assign emoji_suggest_y =
+        HWIDTH'(EMOJI_SUGGEST_Y_PX)
+        + (HWIDTH'(EMOJI_SUGGEST_MAX) - HWIDTH'(emoji_suggest_count))
+        * HWIDTH'(EMOJI_SUGGEST_ITEM_H_PX);
     assign emoji_suggest_h_s0 =
         HWIDTH'(EMOJI_SUGGEST_BORDER_PX * 2)
         + (HWIDTH'(emoji_suggest_count) << 4);
     assign emoji_suggest_dx_s0 =
         hdata - HWIDTH'(EMOJI_SUGGEST_X_PX);
     assign emoji_suggest_dy_s0 =
-        vdata - HWIDTH'(EMOJI_SUGGEST_Y_PX);
+        vdata - emoji_suggest_y;
     assign emoji_suggest_mouse_dx =
         HWIDTH'(mouse_x) - HWIDTH'(EMOJI_SUGGEST_X_PX);
     assign emoji_suggest_mouse_dy =
-        HWIDTH'(mouse_y) - HWIDTH'(EMOJI_SUGGEST_Y_PX);
+        HWIDTH'(mouse_y) - emoji_suggest_y;
     assign emoji_suggest_row_s0 =
         4'((emoji_suggest_dy_s0 - HWIDTH'(EMOJI_SUGGEST_BORDER_PX)) >> 4);
     assign emoji_suggest_mouse_row =
@@ -472,6 +506,41 @@ module fe_scan
     assign emoji_suggest_label_gx_s0 = emoji_suggest_label_dx_s0[2:0];
     assign emoji_suggest_label_gy_s0 =
         4'(emoji_suggest_dy_s0 - HWIDTH'(EMOJI_SUGGEST_BORDER_PX));
+
+    // Emoji glyph icon: 8 px wide, sits left of the text label.
+    assign emoji_suggest_icon_active_s0 =
+        emoji_suggest_item_s0
+        && (emoji_suggest_dx_s0 >= HWIDTH'(EMOJI_SUGGEST_ICON_X_PX))
+        && (emoji_suggest_dx_s0 <  HWIDTH'(EMOJI_SUGGEST_ICON_X_PX + 8));
+    assign emoji_suggest_icon_dx_s0 =
+        emoji_suggest_dx_s0 - HWIDTH'(EMOJI_SUGGEST_ICON_X_PX);
+    assign emoji_suggest_icon_char_s0 =
+        emoji_token_glyph(emoji_suggest_label_token_s0);
+    assign emoji_suggest_icon_gx_s0 = emoji_suggest_icon_dx_s0[2:0];
+    assign emoji_suggest_icon_gy_s0 = emoji_suggest_label_gy_s0;
+
+    // Sticker-picker big-emoji content detection.
+    assign sticker_cell_dx = popup_dx_s0[5:0];
+    assign sticker_cell_dy = popup_dy_s0[6:0];
+    assign sticker_dx_from_off = sticker_cell_dx - 6'(STICKER_EMOJI_X_OFF);
+    assign sticker_dy_from_off = sticker_cell_dy - 7'(STICKER_EMOJI_Y_OFF);
+    assign sticker_sub_col = 3'(sticker_dx_from_off >> 3);
+    assign sticker_sub_row = 2'(sticker_dy_from_off >> 4);
+    assign sticker_content_active_s0 =
+        popup_is_sticker_s0
+        && popup_in_region_s0
+        && !popup_border_s0
+        && (sticker_cell_dx >= 6'(STICKER_EMOJI_X_OFF))
+        && (sticker_cell_dx <  6'(STICKER_EMOJI_X_OFF + 6 * 8))
+        && (sticker_cell_dy >= 7'(STICKER_EMOJI_Y_OFF))
+        && (sticker_cell_dy <  7'(STICKER_EMOJI_Y_OFF + 3 * 16));
+    assign sticker_content_emoji_id_s0 = popup_dx_s0[8:6];
+    assign sticker_tile_off_s0 =
+        {4'd0, sticker_content_emoji_id_s0} * 7'(BIG_EMOJI_N_TILES)
+        + {5'd0, sticker_sub_row} * 7'(BIG_EMOJI_N_COLS)
+        + {4'd0, sticker_sub_col};
+    assign sticker_content_gx_s0 = sticker_dx_from_off[2:0];
+    assign sticker_content_gy_s0 = sticker_dy_from_off[3:0];
 
     // True for the leftover 8 px past the last input row -- used to blank
     // the glyph so this strip renders as a solid titlebar-blue band.
@@ -606,6 +675,15 @@ module fe_scan
     byte_t             s1_emoji_suggest_label_char;
     logic [2:0]        s1_emoji_suggest_label_gx;
     logic [3:0]        s1_emoji_suggest_label_gy;
+    logic              s1_emoji_suggest_icon_active;
+    byte_t             s1_emoji_suggest_icon_char;
+    logic [2:0]        s1_emoji_suggest_icon_gx;
+    logic [3:0]        s1_emoji_suggest_icon_gy;
+    logic              s1_sticker_content_active;
+    logic [6:0]        s1_sticker_tile_off;
+    logic [2:0]        s1_sticker_content_gx;
+    logic [3:0]        s1_sticker_content_gy;
+    logic [2:0]        s1_sticker_content_emoji_id;
 
     always_ff @(posedge clk_pix or negedge rst_n) begin
         if (!rst_n) begin
@@ -643,6 +721,15 @@ module fe_scan
             s1_emoji_suggest_label_char <= 8'h20;
             s1_emoji_suggest_label_gx <= '0;
             s1_emoji_suggest_label_gy <= '0;
+            s1_emoji_suggest_icon_active <= 1'b0;
+            s1_emoji_suggest_icon_char <= 8'h20;
+            s1_emoji_suggest_icon_gx <= '0;
+            s1_emoji_suggest_icon_gy <= '0;
+            s1_sticker_content_active <= 1'b0;
+            s1_sticker_tile_off <= '0;
+            s1_sticker_content_gx <= '0;
+            s1_sticker_content_gy <= '0;
+            s1_sticker_content_emoji_id <= '0;
         end else begin
             s1_gy               <= s0_gy;
             s1_gx               <= s0_gx;
@@ -678,6 +765,15 @@ module fe_scan
             s1_emoji_suggest_label_char <= emoji_suggest_label_char_s0;
             s1_emoji_suggest_label_gx <= emoji_suggest_label_gx_s0;
             s1_emoji_suggest_label_gy <= emoji_suggest_label_gy_s0;
+            s1_emoji_suggest_icon_active <= emoji_suggest_icon_active_s0;
+            s1_emoji_suggest_icon_char <= emoji_suggest_icon_char_s0;
+            s1_emoji_suggest_icon_gx <= emoji_suggest_icon_gx_s0;
+            s1_emoji_suggest_icon_gy <= emoji_suggest_icon_gy_s0;
+            s1_sticker_content_active <= sticker_content_active_s0;
+            s1_sticker_tile_off <= sticker_tile_off_s0;
+            s1_sticker_content_gx <= sticker_content_gx_s0;
+            s1_sticker_content_gy <= sticker_content_gy_s0;
+            s1_sticker_content_emoji_id <= sticker_content_emoji_id_s0;
         end
     end
 
@@ -711,26 +807,36 @@ module fe_scan
 
     assign glyph_code = s1_popup_label_active
                         ? s1_popup_label_char
-                        : (s1_emoji_suggest_label_active
-                           ? s1_emoji_suggest_label_char : base_glyph_code);
+                        : (s1_emoji_suggest_icon_active
+                           ? s1_emoji_suggest_icon_char
+                           : (s1_emoji_suggest_label_active
+                              ? s1_emoji_suggest_label_char : base_glyph_code));
     assign glyph_gy   = s1_popup_label_active
                         ? s1_popup_label_gy
-                        : (s1_emoji_suggest_label_active
-                           ? s1_emoji_suggest_label_gy : base_glyph_gy);
+                        : (s1_emoji_suggest_icon_active
+                           ? s1_emoji_suggest_icon_gy
+                           : (s1_emoji_suggest_label_active
+                              ? s1_emoji_suggest_label_gy : base_glyph_gy));
 
     logic pixel_on;
     logic popup_text_pixel_on;
     logic emoji_suggest_text_pixel_on;
+    logic emoji_suggest_icon_pixel_on;
     assign popup_text_pixel_on =
         s1_popup_label_active
         && glyph_row[3'd7 - s1_popup_label_gx];
     assign emoji_suggest_text_pixel_on =
         s1_emoji_suggest_label_active
         && glyph_row[3'd7 - s1_emoji_suggest_label_gx];
+    assign emoji_suggest_icon_pixel_on =
+        s1_emoji_suggest_icon_active
+        && glyph_row[3'd7 - s1_emoji_suggest_icon_gx];
 
     always_comb begin
         if (s1_popup_label_active)
             pixel_on = popup_text_pixel_on;
+        else if (s1_emoji_suggest_icon_active)
+            pixel_on = emoji_suggest_icon_pixel_on;
         else if (s1_emoji_suggest_label_active)
             pixel_on = emoji_suggest_text_pixel_on;
         else if (in_connected)
@@ -765,16 +871,32 @@ module fe_scan
     // Constant-divisor synthesis: Vivado picks the right shift/add or LUT.
     assign big_emoji_id = 3'(big_tile_off / 7'(BIG_EMOJI_N_TILES));
 
+    // Mux ROM inputs: sticker picker wins when its content area is active;
+    // otherwise the big-emoji bubble path drives the ROMs.
+    logic [6:0]  big_pix_tile_off;
+    logic [3:0]  big_pix_gy;
+    logic [2:0]  big_pix_gx;
+    logic [2:0]  big_pal_emoji_id_mux;
+    logic [3:0]  big_pal_idx_mux;
+    logic [3:0]  sticker_pix_idx;
+
+    assign big_pix_tile_off = s1_sticker_content_active
+                              ? s1_sticker_tile_off : big_tile_off;
+    assign big_pix_gy = s1_sticker_content_active
+                        ? s1_sticker_content_gy : s1_gy;
+    assign big_pix_gx = s1_sticker_content_active
+                        ? s1_sticker_content_gx : s1_gx;
+
     fe_big_emoji_pixel_rom u_big_pix (
-        .tile_off (big_tile_off),
-        .gy       (s1_gy),
+        .tile_off (big_pix_tile_off),
+        .gy       (big_pix_gy),
         .row      (big_pixel_row)
     );
 
     // Nibble select: gx=0 is the MSB nibble (matches how gen_big_emoji.py
     // packs each row, mirroring the mono font ROM's MSB-first row byte).
     always_comb begin
-        unique case (s1_gx)
+        unique case (big_pix_gx)
             3'd0: big_pix_idx = big_pixel_row[31:28];
             3'd1: big_pix_idx = big_pixel_row[27:24];
             3'd2: big_pix_idx = big_pixel_row[23:20];
@@ -786,9 +908,29 @@ module fe_scan
         endcase
     end
 
+    // Sticker uses a separate pix_idx so the palette mux is clean.
+    // We recompute it from the same big_pixel_row with sticker gx.
+    always_comb begin
+        unique case (s1_sticker_content_gx)
+            3'd0: sticker_pix_idx = big_pixel_row[31:28];
+            3'd1: sticker_pix_idx = big_pixel_row[27:24];
+            3'd2: sticker_pix_idx = big_pixel_row[23:20];
+            3'd3: sticker_pix_idx = big_pixel_row[19:16];
+            3'd4: sticker_pix_idx = big_pixel_row[15:12];
+            3'd5: sticker_pix_idx = big_pixel_row[11: 8];
+            3'd6: sticker_pix_idx = big_pixel_row[ 7: 4];
+            3'd7: sticker_pix_idx = big_pixel_row[ 3: 0];
+        endcase
+    end
+
+    assign big_pal_emoji_id_mux = s1_sticker_content_active
+                                  ? s1_sticker_content_emoji_id : big_emoji_id;
+    assign big_pal_idx_mux = s1_sticker_content_active
+                             ? sticker_pix_idx : big_pix_idx;
+
     fe_big_emoji_palette_rom u_big_pal (
-        .emoji_id (big_emoji_id),
-        .idx      (big_pix_idx),
+        .emoji_id (big_pal_emoji_id_mux),
+        .idx      (big_pal_idx_mux),
         .r        (big_pal_r),
         .g        (big_pal_g),
         .b        (big_pal_b)
@@ -1046,7 +1188,8 @@ module fe_scan
                 video_red   = COL_POPUP_BORDER_R;
                 video_green = COL_POPUP_BORDER_G;
                 video_blue  = COL_POPUP_BORDER_B;
-            end else if (emoji_suggest_text_pixel_on) begin
+            end else if (emoji_suggest_text_pixel_on
+                      || emoji_suggest_icon_pixel_on) begin
                 video_red   = COL_POPUP_TEXT_R;
                 video_green = COL_POPUP_TEXT_G;
                 video_blue  = COL_POPUP_TEXT_B;
@@ -1064,7 +1207,17 @@ module fe_scan
         // Popup state is owned in the chat clock domain and synchronised
         // into this scan pipeline by fe_top.
         if (s1_de && s1_popup_in_region) begin
-            if (s1_popup_border || s1_popup_grid_line) begin
+            // Big-emoji pixels in sticker picker cells render before
+            // the border/grid overlay so they appear inside each cell.
+            if (s1_sticker_content_active && (sticker_pix_idx != 4'h0)) begin
+                video_red   = big_pal_r;
+                video_green = big_pal_g;
+                video_blue  = big_pal_b;
+            end else if (s1_sticker_content_active) begin
+                video_red   = COL_POPUP_BG_R;
+                video_green = COL_POPUP_BG_G;
+                video_blue  = COL_POPUP_BG_B;
+            end else if (s1_popup_border || s1_popup_grid_line) begin
                 video_red   = COL_POPUP_BORDER_R;
                 video_green = COL_POPUP_BORDER_G;
                 video_blue  = COL_POPUP_BORDER_B;

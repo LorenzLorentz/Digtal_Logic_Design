@@ -186,7 +186,11 @@ package chat_pkg;
     localparam int EMOJI_SUGGEST_W_PX      = 112;
     localparam int EMOJI_SUGGEST_BORDER_PX = 2;
     localparam int EMOJI_SUGGEST_ITEM_H_PX = 16;
-    localparam int EMOJI_SUGGEST_TEXT_X_PX = 8;
+    localparam int EMOJI_SUGGEST_ICON_X_PX = EMOJI_SUGGEST_BORDER_PX;
+    localparam int EMOJI_SUGGEST_TEXT_X_PX = EMOJI_SUGGEST_BORDER_PX + 8;
+
+    // Small-emoji glyph codes occupy 0xE0..0xEE, one per token.
+    localparam byte_t EMOJI_GLYPH_BASE = 8'hE0;
 
     typedef logic [EMOJI_TOKEN_ID_W-1:0] emoji_token_id_t;
 
@@ -392,6 +396,12 @@ package chat_pkg;
                 end
                 default: ;
             endcase
+        end
+    endfunction
+
+    function automatic byte_t emoji_token_glyph(input emoji_token_id_t token_id);
+        begin
+            emoji_token_glyph = EMOJI_GLYPH_BASE + byte_t'(token_id);
         end
     endfunction
 
