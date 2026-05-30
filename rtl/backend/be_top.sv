@@ -1901,6 +1901,17 @@ module be_top
             end
 
             // -------------------------------------------------------------
+            // After remote render: clear the display payload so a
+            // subsequent local send (S_ENTER_RENDER_LOCAL) doesn't
+            // reuse the stale disp_payload_q / disp_len_q from a
+            // prior remote-quote render.
+            // -------------------------------------------------------------
+            if ((state_d != state_q) && (state_q == S_RX_RENDER)) begin
+                disp_len_q        <= '0;
+                disp_for_remote_q <= 1'b0;
+            end
+
+            // -------------------------------------------------------------
             // ESC -> S_TX_GOODBYE: also clear the in-flight input line
             // (so reconnect doesn't show stale typing).
             // -------------------------------------------------------------
@@ -1988,16 +1999,47 @@ module be_top
     logic [STORE_IDX_W-1:0]     store_upd_idx;
     logic [1:0]                 store_upd_status;
 
-    assign store_lookup_side   = (state_q == S_BUILD_QUOTE_DISP) ? quote_lkup_side
+    // Quote display builder uses the store lookup port to find the
+    // quoted message. The lookup must be active on BOTH the transition
+    // cycle (when the entry block computes disp_len_q) and every
+    // builder cycle thereafter (when the byte writer runs).
+    //
+    // We derive the transition conditions directly from the FSM inputs
+    // rather than checking state_d, to avoid a combinational loop
+    // (store_lookup_hit feeds state_d through the recall path, so
+    // state_d cannot feed back into the lookup mux).
+    //
+    // On the remote rx -> S_BUILD_QUOTE_DISP transition, quoted_msg_id_q
+    // / quoted_side_q are updated non-blockingly in the same always_ff
+    // block and therefore still hold stale values. For that specific
+    // cycle we route cm_rx_payload / MSG_LOCAL directly into the lookup.
+    logic        use_quote_lkup;
+    logic        rx_quote_entry;
+    logic        local_quote_entry;
+    logic [1:0]  eff_quote_lkup_side;
+    msg_id_t     eff_quote_lkup_msg_id;
+
+    assign rx_quote_entry        = accept_rx && rx_is_data
+                                 && (cm_rx_payload[7:0] == QUOTE_MARKER);
+    assign local_quote_entry     = enc_done && has_quote_q;
+    assign use_quote_lkup        = (state_q == S_BUILD_QUOTE_DISP)
+                                 || rx_quote_entry
+                                 || local_quote_entry;
+    assign eff_quote_lkup_side   = rx_quote_entry ? 2'(MSG_LOCAL)
+                                                   : quote_lkup_side;
+    assign eff_quote_lkup_msg_id = rx_quote_entry ? msg_id_t'(cm_rx_payload[15:8])
+                                                   : quote_lkup_msg_id;
+
+    assign store_lookup_side   = use_quote_lkup ? eff_quote_lkup_side
                                : (accept_rx && rx_is_recall) ? 2'(MSG_REMOTE)
                                : 2'(MSG_LOCAL);
-    assign store_lookup_msg_id = (state_q == S_BUILD_QUOTE_DISP) ? quote_lkup_msg_id
+    assign store_lookup_msg_id = use_quote_lkup ? eff_quote_lkup_msg_id
                                : (accept_rx && rx_is_recall) ? msg_id_t'(cm_rx_seq)
                                : cm_status_msg_id;
 
     // Capture store lookup result for quote display builder use.
-    assign quote_lkup_hit = (state_q == S_BUILD_QUOTE_DISP) ? store_lookup_hit : 1'b0;
-    assign quote_lkup_idx = (state_q == S_BUILD_QUOTE_DISP) ? store_lookup_idx : '0;
+    assign quote_lkup_hit = use_quote_lkup ? store_lookup_hit : 1'b0;
+    assign quote_lkup_idx = use_quote_lkup ? store_lookup_idx : '0;
 
     assign store_upd_en     = ((state_q == S_IDLE) && accept_status && store_lookup_hit)
                            || (state_q == S_RECALL_RENDER);

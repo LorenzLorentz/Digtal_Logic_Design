@@ -2221,6 +2221,63 @@ static void test_context_menu_quote_sets_quote_state() {
     CHECK_EQ(dut->ui_popup_active, 0, "menu closes after quote");
 }
 
+static void test_local_send_after_remote_quote_uses_local_payload() {
+    printf("== test_local_send_after_remote_quote_uses_local_payload\n");
+    reset();
+
+    // Step 1: commit "hello" so the store has a message at msg_id=0 for
+    // the remote peer to quote.
+    for (char c : std::string("hello")) {
+        send_key(KEY_CHAR, (uint8_t)c);
+        drain_render();
+    }
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+
+    // Step 2: inject a remote DATA frame that quotes our msg_id=0.
+    // Wire format: [0]=QUOTE_MARKER(0x01) [1]=quoted_msg_id(0) [2..4]="hey"
+    std::vector<uint8_t> quote_bytes = {0x01, 0x00, 'h', 'e', 'y'};
+    inject_rx(/*seq=*/0, (uint16_t)quote_bytes.size(), quote_bytes);
+
+    // Step 3: drain the remote-quote render.
+    // S_BUILD_QUOTE_DISP assembles ">hello\nhey" (10 bytes), then
+    // S_RX_RENDER fires with RENDER_APPEND_REMOTE.
+    RenderEvent r_remote;
+    CHECK_EQ(wait_render(r_remote, MAX_LINE_LEN + 30), true,
+             "remote quote render fires");
+    CHECK_EQ(r_remote.cmd, RENDER_APPEND_REMOTE, "remote quote cmd");
+    CHECK_EQ(r_remote.len, 10, "quote display len = 10");
+    CHECK_EQ(payload_get_byte(r_remote.payload, 0), (uint8_t)'>',
+             "quote display[0] = '>'");
+    CHECK_EQ(payload_get_byte(r_remote.payload, 6), (uint8_t)'\n',
+             "quote display[6] = newline sep");
+
+    // Step 4: send a plain local message "ok".
+    // Before the disp_len_q fix, S_ENTER_RENDER_LOCAL would see the
+    // stale disp_len_q (10) left over from the remote quote and reuse
+    // the old display payload ">hello\nhey" instead of "ok".
+    // After the fix, disp_len_q is cleared on exit from S_RX_RENDER.
+    send_key(KEY_CHAR, 'o'); drain_render();
+    send_key(KEY_CHAR, 'k'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r_local;
+    CHECK_EQ(wait_render(r_local, MAX_LINE_LEN + 30), true,
+             "local commit render fires");
+    CHECK_EQ(r_local.cmd, RENDER_APPEND_LOCAL_PENDING, "local append cmd");
+    CHECK_EQ(r_local.len, 2, "local payload len = 2 (ok, not 10)");
+    CHECK_EQ(payload_get_byte(r_local.payload, 0), (uint8_t)'o',
+             "local payload[0] = 'o'");
+    CHECK_EQ(payload_get_byte(r_local.payload, 1), (uint8_t)'k',
+             "local payload[1] = 'k'");
+
+    // Drain remaining pipeline (tx + input clear).
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx, 10), true, "local tx fires");
+    RenderEvent r_clear;
+    CHECK_EQ(wait_render(r_clear, 10), true, "input clear render fires");
+}
+
 static void test_context_menu_recall_marks_local_message() {
     printf("== test_context_menu_recall_marks_local_message\n");
     reset();
@@ -2296,6 +2353,7 @@ int main(int argc, char** argv) {
     test_ctrl_e_sticker_picker_sends_big_emoji();
     test_right_click_message_opens_context_menu();
     test_context_menu_quote_sets_quote_state();
+    test_local_send_after_remote_quote_uses_local_payload();
     test_context_menu_recall_marks_local_message();
     test_big_emoji_tokens_mixed_text_passthrough();
     test_big_emoji_unknown_token_passthrough();
