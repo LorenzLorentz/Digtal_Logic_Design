@@ -218,6 +218,8 @@ def emit_tokens_svh(emojis):
         "// (capital first letter) only when it is the entire input line,",
         "// then emits the single anchor byte; the frontend expands the",
         "// anchor into a 3x6 tile bubble on render.",
+        "// Suppressed while a quote is active (has_quote_q): a big emoji",
+        "// cannot carry a quote, so the token stays literal text instead.",
         "",
     ]
     for i, (name, _, _) in enumerate(emojis):
@@ -234,6 +236,7 @@ def emit_tokens_svh(emojis):
         token_len = n_chars + 1
         body = [
             "else if ((src == 0)",
+            "      && !has_quote_q",
             f"      && ({token_len} == int'(len_q))",
             "      && (src + " + str(n_chars) + " < int'(len_q))",
         ]

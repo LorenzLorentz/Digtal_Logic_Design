@@ -695,15 +695,25 @@ module fe_render_decoder
             else
                 input_cell = " ";
         end
+        // Quote indicator ">" sits in the bottom-right corner of the
+        // *visible* input window. The visible window shows buffer rows
+        // [input_scroll_offset_q .. +N_INPUT_VISIBLE-1] (see fe_scan), so
+        // pin the marker to that bottom row -- otherwise (when fixed to
+        // the last physical buffer row) it lands off-screen for short
+        // messages and is never seen.
+        if (has_quote
+         && (input_row_cnt_q == INPUT_LINE_W'(
+                 INPUT_LINE_W'(input_scroll_offset_q)
+                 + INPUT_LINE_W'(N_INPUT_VISIBLE - 1)))
+         && (col_cnt_q == FE_COL_W'(INPUT_LIMIT_MARK_COL))) begin
+            input_cell = ">";
+        end
+        // Newline-overflow "!" shares the same corner cell and takes
+        // priority over the quote marker (placed last so it overrides).
         if ((input_n_lines_q >= LINE_CNT_W'(MAX_INPUT_LINES))
          && (input_row_cnt_q == INPUT_LINE_W'(MAX_INPUT_LINES - 1))
          && (col_cnt_q == FE_COL_W'(INPUT_LIMIT_MARK_COL))) begin
             input_cell = "!";
-        end
-        if (has_quote
-         && (input_row_cnt_q == INPUT_LINE_W'(MAX_INPUT_LINES - 1))
-         && (col_cnt_q == FE_COL_W'(QUOTE_MARK_COL))) begin
-            input_cell = ">";
         end
     end
 

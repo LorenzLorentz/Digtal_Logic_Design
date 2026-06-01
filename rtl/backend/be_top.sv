@@ -245,6 +245,11 @@ module be_top
         // Runs after S_LINE_ENCODE (or rx accept) when payload carries
         // a QUOTE_MARKER prefix.
         S_BUILD_QUOTE_DISP         = 6'd30,
+        // Sticker picked while a quote is active: a big emoji cannot
+        // carry a quote, so instead of a standalone send we insert the
+        // "\Name" token as literal text (then PACK/RENDER like the small
+        // emoji completion path) so the quote rides a normal message.
+        S_STICKER_INSERT           = 6'd31,
         S_RECALL_RENDER            = 6'd34,
         S_RECALL_SEND_COMM         = 6'd35
     } state_e;
@@ -351,8 +356,165 @@ module be_top
     // in S_BUILD_QUOTE_DISP before the render command.
     logic [MAX_MSG_LEN*8-1:0]           disp_payload_q;
     msg_len_t                           disp_len_q;
-    msg_len_t                           disp_build_idx_q;
+    msg_len_t                           disp_build_idx_q;   // output write idx
     logic                               disp_for_remote_q;
+
+    // Variable-length quote-preview builder. The quoted preview is no
+    // longer a 1:1 byte copy -- it is transformed so we decouple the
+    // source read index (qb_rd_q) from the output write index
+    // (disp_build_idx_q):
+    //   * big-emoji quoted message (1 byte, anchor)  -> emit "\Name"
+    //   * nested quote (starts with QUOTE_MARKER)     -> emit a
+    //       "> [quoted]" placeholder + the body, WITHOUT recursing
+    //   * plain message                               -> verbatim copy
+    //       (newlines preserved; only the first line carries the ">")
+    typedef enum logic [2:0] {
+        QB_MARK,    // write outer ">", measure user text, prefetch byte0
+        QB_DECIDE,  // quoted byte0 ready: pick transform + bounds
+        QB_SUBSTR,  // emit a fixed substring (token name / placeholder)
+        QB_COPY,    // copy quoted source bytes (BRAM, 1-cycle prefetch)
+        QB_SEP,     // write "\n" separator between preview and user text
+        QB_USER,    // copy user text from pending_payload_q
+        QB_FIN      // done; disp_len_q is latched, leave the state
+    } qb_phase_e;
+    localparam int MSG_BYTE_W = $clog2(MAX_MSG_LEN);
+    qb_phase_e                          qb_phase_q;
+    logic [MSG_BYTE_W-1:0]              qb_rd_q;        // quoted source idx
+    logic [3:0]                         qb_sub_q;       // substring emit idx
+    logic [3:0]                         qb_sub_len_q;   // substring length
+    msg_len_t                           qb_rd_end_q;    // copy until this idx
+    msg_len_t                           qb_out_max_q;   // max preview out bytes
+    msg_len_t                           qb_user_len_q;  // user text length
+    byte_t                              qb_anchor_q;    // big-emoji anchor
+
+    localparam int QB_NESTED_PH_LEN = 12;  // " > [quoted]\n"
+
+    // Big-emoji anchor -> "\Name" token length (incl. a leading space and
+    // the backslash). Returns 0 for non-anchor bytes.
+    function automatic logic [3:0] qb_token_len(input byte_t a);
+        unique case (a)
+            8'h80:   qb_token_len = 4'd13; // " \Heartbroken"
+            8'h92:   qb_token_len = 4'd9;  // " \Hissing"
+            8'hA4:   qb_token_len = 4'd7;  // " \Shrug"
+            8'hB6:   qb_token_len = 4'd7;  // " \Sweat"
+            8'hC8:   qb_token_len = 4'd8;  // " \Xiucai"
+            default: qb_token_len = 4'd0;
+        endcase
+    endfunction
+
+    // idx-th byte of the big-emoji "\Name" token: idx 0 = ' ',
+    // idx 1 = '\\', idx >= 2 = name char.
+    function automatic byte_t qb_token_name(input byte_t a,
+                                            input logic [3:0] j);
+        begin
+            qb_token_name = " ";
+            unique case (a)
+                8'h80: begin // Heartbroken
+                    unique case (j)
+                        4'd0: qb_token_name = "H";
+                        4'd1: qb_token_name = "e";
+                        4'd2: qb_token_name = "a";
+                        4'd3: qb_token_name = "r";
+                        4'd4: qb_token_name = "t";
+                        4'd5: qb_token_name = "b";
+                        4'd6: qb_token_name = "r";
+                        4'd7: qb_token_name = "o";
+                        4'd8: qb_token_name = "k";
+                        4'd9: qb_token_name = "e";
+                        4'd10: qb_token_name = "n";
+                        default: qb_token_name = " ";
+                    endcase
+                end
+                8'h92: begin // Hissing
+                    unique case (j)
+                        4'd0: qb_token_name = "H";
+                        4'd1: qb_token_name = "i";
+                        4'd2: qb_token_name = "s";
+                        4'd3: qb_token_name = "s";
+                        4'd4: qb_token_name = "i";
+                        4'd5: qb_token_name = "n";
+                        4'd6: qb_token_name = "g";
+                        default: qb_token_name = " ";
+                    endcase
+                end
+                8'hA4: begin // Shrug
+                    unique case (j)
+                        4'd0: qb_token_name = "S";
+                        4'd1: qb_token_name = "h";
+                        4'd2: qb_token_name = "r";
+                        4'd3: qb_token_name = "u";
+                        4'd4: qb_token_name = "g";
+                        default: qb_token_name = " ";
+                    endcase
+                end
+                8'hB6: begin // Sweat
+                    unique case (j)
+                        4'd0: qb_token_name = "S";
+                        4'd1: qb_token_name = "w";
+                        4'd2: qb_token_name = "e";
+                        4'd3: qb_token_name = "a";
+                        4'd4: qb_token_name = "t";
+                        default: qb_token_name = " ";
+                    endcase
+                end
+                8'hC8: begin // Xiucai
+                    unique case (j)
+                        4'd0: qb_token_name = "X";
+                        4'd1: qb_token_name = "i";
+                        4'd2: qb_token_name = "u";
+                        4'd3: qb_token_name = "c";
+                        4'd4: qb_token_name = "a";
+                        4'd5: qb_token_name = "i";
+                        default: qb_token_name = " ";
+                    endcase
+                end
+                default: qb_token_name = " ";
+            endcase
+        end
+    endfunction
+
+    function automatic byte_t qb_token_byte(input byte_t a,
+                                            input logic [3:0] idx);
+        begin
+            if (idx == 4'd0)      qb_token_byte = " ";
+            else if (idx == 4'd1) qb_token_byte = 8'h5C;       // '\'
+            else                  qb_token_byte = qb_token_name(a, idx - 4'd2);
+        end
+    endfunction
+
+    // " > [quoted]\n" placeholder for a nested quote (not recursed).
+    function automatic byte_t qb_nested_byte(input logic [3:0] idx);
+        unique case (idx)
+            4'd0:    qb_nested_byte = " ";
+            4'd1:    qb_nested_byte = ">";
+            4'd2:    qb_nested_byte = " ";
+            4'd3:    qb_nested_byte = "[";
+            4'd4:    qb_nested_byte = "q";
+            4'd5:    qb_nested_byte = "u";
+            4'd6:    qb_nested_byte = "o";
+            4'd7:    qb_nested_byte = "t";
+            4'd8:    qb_nested_byte = "e";
+            4'd9:    qb_nested_byte = "d";
+            4'd10:   qb_nested_byte = "]";
+            4'd11:   qb_nested_byte = 8'h0A;
+            default: qb_nested_byte = " ";
+        endcase
+    endfunction
+
+    // Big-emoji "\Name" token as LITERAL input text (no leading space):
+    // idx 0 = '\\', idx >= 1 = name char. Length excludes that space.
+    function automatic logic [3:0] sticker_token_len(input byte_t a);
+        sticker_token_len = (qb_token_len(a) != 4'd0)
+                            ? (qb_token_len(a) - 4'd1) : 4'd0;
+    endfunction
+    function automatic byte_t sticker_token_char(input byte_t a,
+                                                 input logic [3:0] idx);
+        sticker_token_char = (idx == 4'd0) ? 8'h5C            // '\'
+                                           : qb_token_name(a, idx - 4'd1);
+    endfunction
+
+    // Latched anchor for S_STICKER_INSERT (quote-mode literal insert).
+    byte_t                              sticker_ins_anchor_q;
 
     // Quote lookup: combinational read ports for the quoted message.
     logic [STORE_IDX_W-1:0]             quoted_store_idx;
@@ -393,9 +555,17 @@ module be_top
     // -----------------------------------------------------------------
     // Combinational helpers
     // -----------------------------------------------------------------
+    // When a quote is active the wire payload carries a QUOTE_MARKER_LEN
+    // prefix on top of the user text, so the effective input budget
+    // shrinks by that many bytes -- enter the "can't type" state earlier.
+    logic [LEN_WIDTH-1:0] input_len_limit;
+    assign input_len_limit = has_quote_q
+        ? LEN_WIDTH'(MAX_LINE_LEN - QUOTE_MARKER_LEN)
+        : LEN_WIDTH'(MAX_LINE_LEN);
+
     logic key_char_insert_allowed;
     assign key_char_insert_allowed =
-        (len_q < LEN_WIDTH'(MAX_LINE_LEN))
+        (len_q < input_len_limit)
         && ((io_key_ascii != 8'h0A)
          || ((!fe_input_at_limit)
           && (input_newline_count_q
@@ -497,7 +667,7 @@ module be_top
         (click_emoji_token_len > click_emoji_prefix_len)
         ? (click_emoji_token_len - click_emoji_prefix_len) : '0;
     assign click_emoji_fits =
-        (len_q + click_emoji_suffix_len) <= LEN_WIDTH'(MAX_LINE_LEN);
+        (len_q + click_emoji_suffix_len) <= input_len_limit;
 
     assign click_in_hist_window =
         (click_screen_row_q >= 6'(HIST_ROW_START))
@@ -568,25 +738,18 @@ module be_top
     assign quoted_store_len   = store_ui_rd_len;
 
     // BRAM byte pre-fetch index for the quote display builder.
-    // Phase A (disp_build_idx_q==0): pre-fetch quoted byte 0.
-    // Phase B (1 <= disp_build_idx_q <= copy_len): pre-fetch next byte.
-    // Phases C/D: idle (don't care).
-    // The BRAM has 1-cycle read latency, so the pre-fetched byte
-    // lands in store_ui_rd_byte one cycle later — exactly when the
-    // builder loop needs it for the current disp_payload_q slot.
+    // The payload BRAM has 1-cycle read latency, so we pre-fetch the
+    // source byte one cycle before it is consumed:
+    //   QB_MARK / QB_DECIDE / QB_SUBSTR : hold qb_rd_q (the first body
+    //       byte) so it is ready when QB_COPY begins.
+    //   QB_COPY                         : pre-fetch qb_rd_q + 1 (the
+    //       byte after the one being written this cycle).
     always_comb begin
-        automatic msg_len_t _user_len, _copy_len;
-        _user_len = (pending_len_q > LEN_WIDTH'(QUOTE_MARKER_LEN))
-                    ? (pending_len_q - LEN_WIDTH'(QUOTE_MARKER_LEN)) : '0;
-        _copy_len = (disp_len_q > LEN_WIDTH'(2 + _user_len))
-                    ? (disp_len_q - LEN_WIDTH'(2 + _user_len)) : '0;
         if (state_q == S_BUILD_QUOTE_DISP) begin
-            if (disp_build_idx_q == '0)
-                quoted_rd_byte_idx = '0;
-            else if (disp_build_idx_q <= _copy_len)
-                quoted_rd_byte_idx = disp_build_idx_q[$clog2(MAX_MSG_LEN)-1:0];
+            if (qb_phase_q == QB_COPY)
+                quoted_rd_byte_idx = qb_rd_q + 1'b1;
             else
-                quoted_rd_byte_idx = '0;
+                quoted_rd_byte_idx = qb_rd_q;
         end else begin
             quoted_rd_byte_idx = '0;
         end
@@ -1039,7 +1202,18 @@ module be_top
                             && (store_ui_rd_status != 2'(MSG_RECALLED))) begin
                             state_d = S_RECALL_RENDER;
                         end else if (click_in_sticker_picker) begin
-                            state_d = S_STICKER_COMMIT;
+                            // In quote mode a big emoji can't be a
+                            // standalone bubble; insert "\Name" literally
+                            // so it rides a normal (quotable) message.
+                            // If it wouldn't fit, just close the popup.
+                            if (has_quote_q)
+                                state_d = ((len_q
+                                    + LEN_WIDTH'(sticker_token_len(
+                                        click_sticker_anchor)))
+                                    <= input_len_limit)
+                                    ? S_STICKER_INSERT : S_IDLE;
+                            else
+                                state_d = S_STICKER_COMMIT;
                         end
                     end else if (emoji_suggest_active_q) begin
                         if (click_in_emoji_suggest && click_emoji_fits) begin
@@ -1092,6 +1266,14 @@ module be_top
             // the render command once cursor_pos_q has been resolved.
             S_MOUSE_CLICK: if (click_walk_done_q && be_render_ready) state_d = S_IDLE;
             S_STICKER_COMMIT: if (!store_wr_busy) state_d = S_ENTER_RENDER_LOCAL;
+            S_STICKER_INSERT: begin
+                // Insert the "\Name" token at the cursor (shifting the
+                // tail right), then PACK + RENDER like emoji completion.
+                if ((shift_idx_q == cursor_pos_q)
+                 && (emoji_complete_char_idx_q + LEN_WIDTH'(1)
+                     >= emoji_complete_token_len_q))
+                    state_d = S_EMOJI_COMPLETE_PACK;
+            end
             S_EMOJI_COMPLETE_INSERT: begin
                 if ((shift_idx_q == cursor_pos_q)
                  && (emoji_complete_char_idx_q + LEN_WIDTH'(1)
@@ -1104,10 +1286,10 @@ module be_top
             end
             S_EMOJI_COMPLETE_RENDER: if (be_render_ready) state_d = S_IDLE;
             S_BUILD_QUOTE_DISP: begin
-                // Multi-cycle display-payload builder.
-                // disp_build_idx_q advances each cycle; done when it
-                // reaches disp_len_q (latched on entry, see seq block).
-                if (disp_build_idx_q + LEN_WIDTH'(1) >= disp_len_q)
+                // Multi-cycle, variable-length display-payload builder
+                // (phase machine in the sequential block). disp_len_q is
+                // latched as it goes; exit once the builder reaches QB_FIN.
+                if (qb_phase_q == QB_FIN)
                     state_d = disp_for_remote_q ? S_RX_RENDER
                                                 : S_ENTER_RENDER_LOCAL;
             end
@@ -1436,6 +1618,15 @@ module be_top
             disp_len_q        <= '0;
             disp_build_idx_q  <= '0;
             disp_for_remote_q <= 1'b0;
+            qb_phase_q        <= QB_MARK;
+            qb_rd_q           <= '0;
+            qb_sub_q          <= '0;
+            qb_sub_len_q      <= '0;
+            qb_rd_end_q       <= '0;
+            qb_out_max_q      <= '0;
+            qb_user_len_q     <= '0;
+            qb_anchor_q       <= '0;
+            sticker_ins_anchor_q <= '0;
             recall_msg_id_q    <= '0;
             recall_store_idx_q <= '0;
             recall_side_q      <= 2'(MSG_LOCAL);
@@ -1655,13 +1846,14 @@ module be_top
                     if (cm_rx_payload[7:0] == QUOTE_MARKER) begin
                         // Remote quote: set up the display-payload
                         // builder. pending_payload_q holds the wire-
-                        // format payload (user text starts at byte 2).
-                        // The sender quoted OUR message, so on our side
-                        // the quoted message is MSG_LOCAL.
+                        // format payload (user text starts at byte 3).
+                        // The sender already inverted the side to our
+                        // perspective, so use it directly (byte 1) along
+                        // with the quoted msg_id (byte 2).
                         pending_payload_q <= cm_rx_payload;
                         pending_len_q     <= rx_len_clamped;
-                        quoted_msg_id_q   <= cm_rx_payload[15:8];
-                        quoted_side_q     <= 2'(MSG_LOCAL);
+                        quoted_msg_id_q   <= cm_rx_payload[23:16];
+                        quoted_side_q     <= cm_rx_payload[9:8];
                         disp_for_remote_q <= 1'b1;
                         disp_len_q        <= '0;
                     end else begin
@@ -1731,7 +1923,15 @@ module be_top
                                 if (has_quote_q) begin
                                     pending_payload_q[7:0]
                                         <= QUOTE_MARKER;
+                                    // Invert side: the quoted message is
+                                    // LOCAL/REMOTE on our side, but the
+                                    // opposite on the receiver's side.
                                     pending_payload_q[15:8]
+                                        <= {6'b0,
+                                            (quoted_side_q == 2'(MSG_LOCAL))
+                                              ? 2'(MSG_REMOTE)
+                                              : 2'(MSG_LOCAL)};
+                                    pending_payload_q[23:16]
                                         <= quoted_msg_id_q;
                                     enc_dst_q <= LEN_WIDTH'(QUOTE_MARKER_LEN);
                                 end else begin
@@ -1789,6 +1989,18 @@ module be_top
                             recall_store_idx_q <= menu_store_idx_q;
                             recall_side_q      <= 2'(MSG_LOCAL);
                             recall_send_q      <= 1'b1;
+                        end else if (click_in_sticker_picker
+                            && has_quote_q
+                            && ((len_q + LEN_WIDTH'(sticker_token_len(
+                                  click_sticker_anchor)))
+                                <= input_len_limit)) begin
+                            // Quote active: arm the literal "\Name" insert.
+                            sticker_ins_anchor_q       <= click_sticker_anchor;
+                            emoji_complete_char_idx_q  <= '0;
+                            emoji_complete_token_len_q <=
+                                LEN_WIDTH'(sticker_token_len(
+                                    click_sticker_anchor));
+                            shift_idx_q                <= len_q;
                         end else if (click_in_sticker_picker) begin
                             pending_msg_id_q       <= next_msg_id_q;
                             pending_store_idx_q    <= wr_ptr_q;
@@ -1833,6 +2045,28 @@ module be_top
                 end
             end
 
+            // S_STICKER_INSERT mirrors the emoji insert but pulls bytes
+            // from the big-emoji "\Name" token (sticker_token_char) and
+            // starts at char 0 (the user typed nothing).
+            if (state_q == S_STICKER_INSERT) begin
+                if (shift_idx_q == cursor_pos_q) begin
+                    line_buf[shift_addr] <= sticker_token_char(
+                        sticker_ins_anchor_q, 4'(emoji_complete_char_idx_q));
+                    len_q        <= len_q        + LEN_WIDTH'(1);
+                    cursor_pos_q <= cursor_pos_q + LEN_WIDTH'(1);
+                    emoji_complete_char_idx_q <=
+                        emoji_complete_char_idx_q + LEN_WIDTH'(1);
+                    if (emoji_complete_char_idx_q + LEN_WIDTH'(1)
+                        < emoji_complete_token_len_q) begin
+                        shift_idx_q <= len_q + LEN_WIDTH'(1);
+                    end
+                end else begin
+                    line_buf[shift_addr] <= line_buf[
+                        LINE_IDX_W'(shift_idx_q - LEN_WIDTH'(1))];
+                    shift_idx_q <= shift_idx_q - LEN_WIDTH'(1);
+                end
+            end
+
             if ((state_q != S_EMOJI_COMPLETE_PACK)
              && (state_d == S_EMOJI_COMPLETE_PACK)) begin
                 pending_payload_q <= '0;
@@ -1846,70 +2080,137 @@ module be_top
                 end
             end
 
-            // S_BUILD_QUOTE_DISP: multi-cycle display-payload builder.
-            // Writes ">", then up to QUOTE_DISP_MAX bytes of quoted
-            // text, then "\n", then user text (skipping the 2-byte
-            // QUOTE_MARKER prefix in pending_payload_q).
+            // S_BUILD_QUOTE_DISP: variable-length display-payload builder.
+            // Lays out: ">" + quoted preview + "\n" + user text. The
+            // quoted preview is transformed (big-emoji -> "\Name",
+            // nested quote -> "> [quoted]" placeholder + body, plain ->
+            // verbatim with newlines kept). See the qb_phase_e comments.
+            //
+            // Entry init: pending_len_q is being assigned the wire length
+            // THIS cycle (enc_dst_q local / rx_len_clamped remote), so we
+            // defer all measurement to QB_MARK (next cycle, register
+            // settled) and just arm the phase machine here.
             if ((state_q != S_BUILD_QUOTE_DISP)
              && (state_d == S_BUILD_QUOTE_DISP)) begin
-                automatic msg_len_t src_len;
-                automatic msg_len_t copy_max;
-                automatic msg_len_t user_start;
-                automatic msg_len_t user_len;
-                // Source: pending_payload_q holds the wire-format payload
-                // (QUOTE_MARKER + msg_id + user text for local, or the
-                // raw rx_payload for remote after copy below).
-                src_len    = pending_len_q;
-                user_start = msg_len_t'(QUOTE_MARKER_LEN);  // skip 0x01 + msg_id
-                user_len   = (src_len > user_start)
-                             ? (src_len - user_start) : '0;
-                // Truncate quoted text so total fits in MAX_MSG_LEN.
-                // If quoted message not found in store, show no text.
-                copy_max   = quoted_store_valid
-                             ? LEN_WIDTH'(QUOTE_DISP_MAX) : '0;
-                if (quoted_store_valid && (msg_len_t'(1) + copy_max
-                    + msg_len_t'(1) + user_len)
-                    > LEN_WIDTH'(MAX_MSG_LEN)) begin
-                    copy_max = LEN_WIDTH'(MAX_MSG_LEN)
-                               - msg_len_t'(1) - msg_len_t'(1) - user_len;
-                end
-                if (quoted_store_valid && (quoted_store_len < copy_max))
-                    copy_max = quoted_store_len;
-                disp_len_q        <= msg_len_t'(1) + copy_max
-                                    + msg_len_t'(1) + user_len;
-                disp_build_idx_q  <= '0;
+                qb_phase_q       <= QB_MARK;
+                disp_build_idx_q <= '0;
+                disp_len_q       <= '0;
+                qb_rd_q          <= '0;
+                qb_sub_q         <= '0;
+                qb_anchor_q      <= '0;
             end
             if (state_q == S_BUILD_QUOTE_DISP) begin
-                automatic msg_len_t src_len;
-                automatic msg_len_t copy_len;
-                automatic msg_len_t user_start;
-                automatic msg_len_t user_len;
-                automatic byte_t    wr_byte;
-                src_len    = pending_len_q;
-                user_start = msg_len_t'(QUOTE_MARKER_LEN);
-                user_len   = (src_len > user_start)
-                             ? (src_len - user_start) : '0;
-                copy_len   = disp_len_q - msg_len_t'(2) - user_len;
-                wr_byte    = 8'h20;
-                if (disp_build_idx_q == msg_len_t'(0)) begin
-                    // Phase A: ">"
-                    wr_byte = ">";
-                end else if (disp_build_idx_q <= copy_len) begin
-                    // Phase B: quoted text (pre-fetched from BRAM one
-                    // cycle earlier via quoted_rd_byte_idx).
-                    wr_byte = store_ui_rd_byte;
-                    if (wr_byte == 8'h0A) wr_byte = 8'h20;  // flatten newlines
-                end else if (disp_build_idx_q == copy_len + msg_len_t'(1)) begin
-                    // Phase C: "\n" separator
-                    wr_byte = 8'h0A;
-                end else begin
-                    // Phase D: user text (skip QUOTE_MARKER prefix)
-                    wr_byte = pending_payload_q[
-                        ((disp_build_idx_q - copy_len - msg_len_t'(2)
-                          + user_start)*8) +: 8];
-                end
-                disp_payload_q[disp_build_idx_q*8 +: 8] <= wr_byte;
-                disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
+                unique case (qb_phase_q)
+                    QB_MARK: begin
+                        automatic msg_len_t ul, om;
+                        // Outer ">" (only the first preview line gets it).
+                        disp_payload_q[disp_build_idx_q*8 +: 8] <= ">";
+                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
+                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
+                        // User text length (pending_len_q settled now).
+                        ul = (pending_len_q > LEN_WIDTH'(QUOTE_MARKER_LEN))
+                             ? (pending_len_q - LEN_WIDTH'(QUOTE_MARKER_LEN))
+                             : '0;
+                        qb_user_len_q <= ul;
+                        // Preview budget: fit ">" + out + "\n" + user in
+                        // MAX_MSG_LEN, and never exceed QUOTE_DISP_MAX.
+                        om = (LEN_WIDTH'(MAX_MSG_LEN) > (msg_len_t'(2) + ul))
+                             ? (LEN_WIDTH'(MAX_MSG_LEN) - msg_len_t'(2) - ul)
+                             : '0;
+                        if (om > LEN_WIDTH'(QUOTE_DISP_MAX))
+                            om = LEN_WIDTH'(QUOTE_DISP_MAX);
+                        qb_out_max_q <= om;
+                        qb_rd_q      <= '0;   // prefetch quoted byte 0
+                        qb_phase_q   <= QB_DECIDE;
+                    end
+                    QB_DECIDE: begin
+                        // Quoted byte 0 is in store_ui_rd_byte now.
+                        if (!quoted_store_valid
+                            || (qb_out_max_q == '0)) begin
+                            // Nothing to preview -> straight to separator.
+                            qb_rd_end_q <= '0;
+                            qb_rd_q     <= '0;
+                            qb_phase_q  <= QB_SEP;
+                        end else if ((quoted_store_len == msg_len_t'(1))
+                            && (qb_token_len(store_ui_rd_byte) != 4'd0)) begin
+                            // Big-emoji message: render its "\Name" token.
+                            qb_anchor_q  <= store_ui_rd_byte;
+                            qb_sub_len_q <= qb_token_len(store_ui_rd_byte);
+                            qb_sub_q     <= '0;
+                            qb_rd_end_q  <= '0;          // no body copy
+                            qb_rd_q      <= '0;
+                            qb_phase_q   <= QB_SUBSTR;
+                        end else if ((store_ui_rd_byte == QUOTE_MARKER)
+                            && (quoted_store_len
+                                > LEN_WIDTH'(QUOTE_MARKER_LEN))) begin
+                            // Nested quote: "> [quoted]" placeholder, then
+                            // the body -- do NOT recurse into the deeper
+                            // quote. qb_anchor_q == 0 selects the nested
+                            // substring in QB_SUBSTR.
+                            qb_anchor_q  <= '0;
+                            qb_sub_len_q <= 4'(QB_NESTED_PH_LEN);
+                            qb_sub_q     <= '0;
+                            qb_rd_q      <= MSG_BYTE_W'(QUOTE_MARKER_LEN);
+                            qb_rd_end_q  <= quoted_store_len;
+                            qb_phase_q   <= QB_SUBSTR;
+                        end else begin
+                            // Plain message: verbatim copy (newlines kept).
+                            qb_rd_q     <= '0;
+                            qb_rd_end_q <= quoted_store_len;
+                            qb_phase_q  <= QB_COPY;
+                        end
+                    end
+                    QB_SUBSTR: begin
+                        automatic byte_t b;
+                        b = (qb_anchor_q != 8'd0)
+                            ? qb_token_byte(qb_anchor_q, qb_sub_q)
+                            : qb_nested_byte(qb_sub_q);
+                        disp_payload_q[disp_build_idx_q*8 +: 8] <= b;
+                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
+                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
+                        qb_sub_q         <= qb_sub_q + 4'd1;
+                        if (disp_build_idx_q >= qb_out_max_q)
+                            qb_phase_q <= QB_SEP;          // preview budget hit
+                        else if (qb_sub_q + 4'd1 >= qb_sub_len_q)
+                            qb_phase_q <= (LEN_WIDTH'(qb_rd_q) < qb_rd_end_q)
+                                          ? QB_COPY : QB_SEP;
+                    end
+                    QB_COPY: begin
+                        // store_ui_rd_byte holds quoted source[qb_rd_q]
+                        // (pre-fetched last cycle). Newlines preserved.
+                        disp_payload_q[disp_build_idx_q*8 +: 8]
+                            <= store_ui_rd_byte;
+                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
+                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
+                        qb_rd_q          <= qb_rd_q + 1'b1;
+                        if ((disp_build_idx_q >= qb_out_max_q)
+                            || (LEN_WIDTH'(qb_rd_q) + LEN_WIDTH'(1)
+                                >= qb_rd_end_q))
+                            qb_phase_q <= QB_SEP;
+                    end
+                    QB_SEP: begin
+                        disp_payload_q[disp_build_idx_q*8 +: 8] <= 8'h0A;
+                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
+                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
+                        qb_rd_q    <= MSG_BYTE_W'(QUOTE_MARKER_LEN);
+                        qb_phase_q <= (qb_user_len_q != '0) ? QB_USER : QB_FIN;
+                    end
+                    QB_USER: begin
+                        // User text from pending_payload_q (skip prefix).
+                        disp_payload_q[disp_build_idx_q*8 +: 8]
+                            <= pending_payload_q[qb_rd_q*8 +: 8];
+                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
+                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
+                        qb_rd_q          <= qb_rd_q + 1'b1;
+                        if ((LEN_WIDTH'(qb_rd_q) + LEN_WIDTH'(1)
+                             >= pending_len_q)
+                            || (disp_build_idx_q + LEN_WIDTH'(1)
+                                >= LEN_WIDTH'(MAX_MSG_LEN)))
+                            qb_phase_q <= QB_FIN;
+                    end
+                    QB_FIN: ;  // hold; next-state leaves on qb_phase_q==QB_FIN
+                    default: qb_phase_q <= QB_FIN;
+                endcase
             end
 
             if (suggest_recompute) begin
@@ -2080,9 +2381,9 @@ module be_top
     assign use_quote_lkup        = (state_q == S_BUILD_QUOTE_DISP)
                                  || rx_quote_entry
                                  || local_quote_entry;
-    assign eff_quote_lkup_side   = rx_quote_entry ? 2'(MSG_LOCAL)
+    assign eff_quote_lkup_side   = rx_quote_entry ? cm_rx_payload[9:8]
                                                    : quote_lkup_side;
-    assign eff_quote_lkup_msg_id = rx_quote_entry ? msg_id_t'(cm_rx_payload[15:8])
+    assign eff_quote_lkup_msg_id = rx_quote_entry ? msg_id_t'(cm_rx_payload[23:16])
                                                    : quote_lkup_msg_id;
 
     assign store_lookup_side   = use_quote_lkup ? eff_quote_lkup_side

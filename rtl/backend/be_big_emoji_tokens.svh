@@ -3,8 +3,11 @@
 // (capital first letter) only when it is the entire input line,
 // then emits the single anchor byte; the frontend expands the
 // anchor into a 3x6 tile bubble on render.
+// Suppressed while a quote is active (has_quote_q): a big emoji
+// cannot carry a quote, so the token stays literal text instead.
 
 else if ((src == 0)
+      && !has_quote_q
       && (12 == int'(len_q))
       && (src + 11 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -23,6 +26,7 @@ else if ((src == 0)
     enc_src_delta = 4'd12;
 end
 else if ((src == 0)
+      && !has_quote_q
       && (8 == int'(len_q))
       && (src + 7 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -37,6 +41,7 @@ else if ((src == 0)
     enc_src_delta = 4'd8;
 end
 else if ((src == 0)
+      && !has_quote_q
       && (6 == int'(len_q))
       && (src + 5 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -49,6 +54,7 @@ else if ((src == 0)
     enc_src_delta = 4'd6;
 end
 else if ((src == 0)
+      && !has_quote_q
       && (6 == int'(len_q))
       && (src + 5 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)
@@ -61,6 +67,7 @@ else if ((src == 0)
     enc_src_delta = 4'd6;
 end
 else if ((src == 0)
+      && !has_quote_q
       && (7 == int'(len_q))
       && (src + 6 < int'(len_q))
       && (line_buf[src + 0] == 8'h5C)

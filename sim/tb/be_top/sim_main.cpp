@@ -225,6 +225,15 @@ static bool no_render_for(int cycles) {
     return true;
 }
 
+static bool no_tx_for(int cycles) {
+    for (int i = 0; i < cycles; i++) {
+        dut->eval();
+        if (dut->be_tx_valid) return false;
+        tick();
+    }
+    return true;
+}
+
 // ---- Reset ----------------------------------------------------------
 static void clear_inputs() {
     dut->io_key_valid      = 0;
@@ -2262,8 +2271,10 @@ static void test_local_send_after_remote_quote_uses_local_payload() {
     drain_commit_pipeline();
 
     // Step 2: inject a remote DATA frame that quotes our msg_id=0.
-    // Wire format: [0]=QUOTE_MARKER(0x01) [1]=quoted_msg_id(0) [2..4]="hey"
-    std::vector<uint8_t> quote_bytes = {0x01, 0x00, 'h', 'e', 'y'};
+    // Wire format: [0]=QUOTE_MARKER(0x01) [1]=quoted_side [2]=quoted_msg_id
+    //              [3..5]="hey". The peer quoted OUR message, which is
+    // LOCAL (=0) from our perspective (the peer already inverted it).
+    std::vector<uint8_t> quote_bytes = {0x01, 0x00, 0x00, 'h', 'e', 'y'};
     inject_rx(/*seq=*/0, (uint16_t)quote_bytes.size(), quote_bytes);
 
     // Step 3: drain the remote-quote render.
@@ -2332,6 +2343,192 @@ static void test_context_menu_recall_marks_local_message() {
 	    CHECK_EQ(tx.len, 0, "recall tx len");
 	}
 
+// ---------------------------------------------------------------------
+// Quote builder: variable-length preview transforms (#2(1), #4, #5),
+// plus the cross-side side byte (#1) and quote-mode token handling (#2).
+// ---------------------------------------------------------------------
+
+// Right-click the exposed hist owner and click "Quote"; drain the
+// RENDER_MOVE_CURSOR that arming a quote emits.
+static void arm_quote_on_owner() {
+    send_mouse_right_click(/*x=*/95 * 8 + 1, /*y=*/30 * 16 + 8);
+    tick();
+    send_mouse_click(dut->ui_popup_x + 10, dut->ui_popup_y + 10);
+    RenderEvent r; wait_render(r, MAX_LINE_LEN + 30);  // MOVE_CURSOR
+}
+
+// Commit `text` as a fresh single message, then expose it as the
+// right-click hist owner at store slot `idx`.
+static void commit_text_and_expose(const char* text, uint8_t idx,
+                                   uint8_t side = MSG_LOCAL) {
+    for (const char* p = text; *p; ++p) {
+        send_key(KEY_CHAR, (uint8_t)*p);
+        drain_render();
+    }
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+    dut->fe_hist_wr_row = 1;
+    dut->fe_hist_scroll_offset = 0;
+    set_hist_owner(/*hist_slot=*/0, true, idx, side, /*width=*/2);
+}
+
+static void check_disp(const RenderEvent& r, const char* exp, int n,
+                       const char* tag) {
+    CHECK_EQ(r.cmd, RENDER_APPEND_LOCAL_PENDING, tag);
+    CHECK_EQ(r.len, n, tag);
+    for (int i = 0; i < n; i++)
+        CHECK_EQ(payload_get_byte(r.payload, i), (uint8_t)exp[i], tag);
+}
+
+// Plain quote: ">" + quoted + "\n" + user. Also verifies the wire side
+// byte is inverted (the quoted msg is LOCAL on us -> REMOTE for the peer).
+static void test_local_quote_plain_preview() {
+    printf("== test_local_quote_plain_preview\n");
+    reset();
+    commit_hi_and_expose_hist_owner();   // store[0]="hi", msg_id 0, LOCAL
+    arm_quote_on_owner();
+    CHECK_EQ(dut->be_has_quote, 1, "quote armed");
+
+    send_key(KEY_CHAR, 'o'); drain_render();
+    send_key(KEY_CHAR, 'k'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "local quote render fires");
+    check_disp(r, ">hi\nok", 6, "plain quote disp = >hi\\nok");
+
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx, 20), true, "quote tx fires");
+    CHECK_EQ(tx.len, 5, "wire len = 3 prefix + 2 user");
+    CHECK_EQ(payload_get_byte(tx.payload, 0), 0x01, "wire[0] = QUOTE_MARKER");
+    CHECK_EQ(payload_get_byte(tx.payload, 1), MSG_REMOTE, "wire[1] = inverted side");
+    CHECK_EQ(payload_get_byte(tx.payload, 2), 0x00, "wire[2] = quoted msg_id");
+    CHECK_EQ(payload_get_byte(tx.payload, 3), (uint8_t)'o', "wire[3] = user 'o'");
+}
+
+// #5: a multi-line quoted message keeps its newlines; only the first
+// preview line carries the ">".
+static void test_local_quote_multiline_preview() {
+    printf("== test_local_quote_multiline_preview\n");
+    reset();
+    // Commit "a\nb" (newline via KEY_CHAR 0x0A).
+    send_key(KEY_CHAR, 'a'); drain_render();
+    send_key(KEY_CHAR, 0x0A); drain_render();
+    send_key(KEY_CHAR, 'b'); drain_render();
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+    dut->fe_hist_wr_row = 1; dut->fe_hist_scroll_offset = 0;
+    set_hist_owner(0, true, 0, MSG_LOCAL, 2);
+
+    arm_quote_on_owner();
+    send_key(KEY_CHAR, 'x'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "multiline quote render fires");
+    // ">" + "a\nb" + "\n" + "x"
+    check_disp(r, ">a\nb\nx", 6, "multiline quote keeps newlines");
+}
+
+// #2(1): quoting a big-emoji message renders its "\Name" token, not the
+// raw anchor byte.
+static void test_local_quote_big_emoji_preview() {
+    printf("== test_local_quote_big_emoji_preview\n");
+    reset();
+    commit_text_and_expose("\\Hissing", 0);   // store[0] = anchor 0x92, len 1
+    StoreRead s = read_store(0);
+    CHECK_EQ(s.len, 1, "big-emoji stored as single anchor");
+
+    arm_quote_on_owner();
+    send_key(KEY_CHAR, 'l'); drain_render();
+    send_key(KEY_CHAR, 'o'); drain_render();
+    send_key(KEY_CHAR, 'l'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "big-emoji quote render fires");
+    // ">" + " \Hissing" + "\n" + "lol"
+    check_disp(r, "> \\Hissing\nlol", 14, "big-emoji quote -> token text");
+}
+
+// #4: quoting a message that itself is a quote shows a "> [quoted]"
+// placeholder + the body, WITHOUT recursing into the deeper quote.
+static void test_local_quote_nested_preview() {
+    printf("== test_local_quote_nested_preview\n");
+    reset();
+    commit_hi_and_expose_hist_owner();   // store[0]="hi", msg_id 0
+
+    // First quote: quote "hi" and send "a" -> store[1] = quote wire msg.
+    arm_quote_on_owner();
+    send_key(KEY_CHAR, 'a'); drain_render();
+    send_key(KEY_ENTER, 0);
+    { RenderEvent r; wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40);
+      TxEvent tx; wait_tx(tx, 20);
+      RenderEvent c; wait_render(c, 20); }
+
+    // Expose store[1] (the quote message, msg_id 1) and quote IT.
+    dut->fe_hist_wr_row = 1; dut->fe_hist_scroll_offset = 0;
+    set_hist_owner(0, true, 1, MSG_LOCAL, 2);
+    arm_quote_on_owner();
+    send_key(KEY_CHAR, 'b'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "nested quote render fires");
+    // ">" + " > [quoted]\n" + "a" + "\n" + "b"
+    check_disp(r, "> > [quoted]\na\nb", 16, "nested quote placeholder + body");
+}
+
+// #2(2.2): with a quote active, a typed "\Hissing" stays LITERAL text
+// (the big-emoji expansion is suppressed) so the quote rides a normal msg.
+static void test_quote_mode_keeps_typed_token_literal() {
+    printf("== test_quote_mode_keeps_typed_token_literal\n");
+    reset();
+    commit_hi_and_expose_hist_owner();
+    arm_quote_on_owner();
+    for (const char* p = "\\Hissing"; *p; ++p) {
+        send_key(KEY_CHAR, (uint8_t)*p);
+        drain_render();
+    }
+    CHECK_EQ(dut->line_len, 8, "literal token typed (not collapsed)");
+    send_key(KEY_ENTER, 0);
+
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx, MAX_LINE_LEN + MAX_MSG_LEN + 40), true, "tx fires");
+    CHECK_EQ(tx.len, 11, "wire = 3 prefix + 8 literal chars");
+    CHECK_EQ(payload_get_byte(tx.payload, 3), (uint8_t)'\\', "user[0] = '\\'");
+    CHECK_EQ(payload_get_byte(tx.payload, 4), (uint8_t)'H', "user[1] = 'H'");
+    CHECK_EQ(payload_get_byte(tx.payload, 10), (uint8_t)'g', "user[7] = 'g'");
+}
+
+// #2(2.1): clicking a big emoji in the picker while a quote is active
+// inserts the "\Name" token as literal input text instead of sending a
+// standalone big-emoji message.
+static void test_sticker_picker_inserts_token_in_quote_mode() {
+    printf("== test_sticker_picker_inserts_token_in_quote_mode\n");
+    reset();
+    commit_hi_and_expose_hist_owner();
+    arm_quote_on_owner();
+
+    send_key(KEY_CHAR, KEY_CTRL_E);
+    CHECK_EQ(dut->ui_popup_type, POPUP_STICKER_PICKER, "picker open");
+    // Column 1 = Hissing (0x92).
+    send_mouse_click(240 + 1 * 64 + 10, 424 + 10);
+    // Drain the input-line redraw from the literal insert.
+    RenderEvent r; wait_render(r, MAX_LINE_LEN + 40);
+
+    CHECK_EQ(dut->be_has_quote, 1, "quote still armed");
+    CHECK_EQ(dut->line_len, 8, "\\Hissing inserted as literal text");
+    CHECK_EQ(read_buf(0), (uint8_t)'\\', "buf[0] = '\\'");
+    CHECK_EQ(read_buf(1), (uint8_t)'H', "buf[1] = 'H'");
+    CHECK_EQ(read_buf(7), (uint8_t)'g', "buf[7] = 'g'");
+    CHECK_EQ(no_tx_for(5), true, "no standalone big-emoji sent");
+}
+
 // =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
@@ -2381,6 +2578,12 @@ int main(int argc, char** argv) {
     test_right_click_message_opens_context_menu();
     test_context_menu_quote_sets_quote_state();
     test_local_send_after_remote_quote_uses_local_payload();
+    test_local_quote_plain_preview();
+    test_local_quote_multiline_preview();
+    test_local_quote_big_emoji_preview();
+    test_local_quote_nested_preview();
+    test_quote_mode_keeps_typed_token_literal();
+    test_sticker_picker_inserts_token_in_quote_mode();
     test_context_menu_recall_marks_local_message();
     test_big_emoji_tokens_mixed_text_passthrough();
     test_big_emoji_unknown_token_passthrough();

@@ -423,13 +423,18 @@ package chat_pkg;
     // -----------------------------------------------------------------
     // Quote wire-format marker. Payload for a quoted message is:
     //   [0] = QUOTE_MARKER (0x01)
-    //   [1] = quoted_msg_id
-    //   [2..N-1] = user text
+    //   [1] = quoted_side   (the quoted message's side FROM THE
+    //         RECEIVER's perspective: the sender stores the side it sees
+    //         and inverts it so the receiver can resolve the right
+    //         message — LOCAL<->REMOTE — since msg_id alone is ambiguous
+    //         across the two independent side namespaces.)
+    //   [2] = quoted_msg_id
+    //   [3..N-1] = user text
     // The marker cannot appear in user-typed text because the PS/2
     // input path only admits printable ASCII (0x20..0x7E) and LF (0x0A).
     // -----------------------------------------------------------------
     localparam byte_t QUOTE_MARKER     = 8'h01;
-    localparam int    QUOTE_MARKER_LEN = 2;          // marker + msg_id
+    localparam int    QUOTE_MARKER_LEN = 3;          // marker + side + msg_id
     localparam int    QUOTE_DISP_MAX   = 60;         // max quoted chars to show
 
 endpackage : chat_pkg
