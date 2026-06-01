@@ -526,8 +526,16 @@ module fe_render_decoder
     // caps message width at MAX_BUBBLE_INNER_W = 80), so the -1 is safe.
     logic [FE_COL_W-1:0] fail_x_col;
     logic              hist_in_bubble_span;
+    // A recalled message collapses to a single-line "[recalled]" bubble
+    // regardless of how many rows it originally spanned (multi-line text,
+    // a quoted-message preview, or a big emoji). We still sweep all of the
+    // rows it used to occupy in S_UPDATE_STATUS (n_lines_q stays at the
+    // original count) so the stale multi-line content gets cleared, but
+    // only the first row draws the bubble -- the rest are blanked.
+    logic              is_recalled;
 
     assign show_fail = (side_q == 2'(MSG_LOCAL)) && (status_q == 2'(MSG_FAIL));
+    assign is_recalled = (status_q == 2'(MSG_RECALLED));
     assign cur_sub_len = ml_len_q[cur_line_sel];
     assign fail_x_col  = bubble_left - FE_COL_W'(1);
     assign hist_in_bubble_span = (col_cnt_q >= bubble_left)
@@ -619,19 +627,26 @@ module fe_render_decoder
         // history row -- bubble layout (multi-line aware). Failed local
         // messages get an explicit X mark in the first visual row at
         // col bubble_left - 1.
-        hist_attr = (!is_big_emoji_q && hist_in_bubble_span)
+        // A recalled message draws its single-line bubble only on the
+        // first row; every other (now-stale) row it used to span is
+        // blanked, so it never keeps the bubble background there either.
+        hist_attr = (!is_big_emoji_q && hist_in_bubble_span
+                     && !(is_recalled && (cur_line_q != '0)))
                     ? bubble_attr_for_side(side_q)
                     : BUBBLE_ATTR_NONE;
-        // For single-line bubbles (n_lines_q == 1) use the existing
-        // single-cell SPRITE_BL/BR (or FBL/FBR for fail). For multi-
-        // line bubbles, swap in the stack-aware TOP/MID/BOT sprite so
-        // the cells visually form one tall (...) bracket spanning the
+        // For single-line bubbles (n_lines_q == 1) -- and for any
+        // recalled message, which always renders as a single line --
+        // use the single-cell SPRITE_BL/BR (or FBL/FBR for fail). For
+        // multi-line bubbles, swap in the stack-aware TOP/MID/BOT sprite
+        // so the cells visually form one tall (...) bracket spanning the
         // whole message. Fail multi-line uses the same TOP/MID/BOT
         // rounded sprites + the X mark to signal failure.
-        if (show_fail && (cur_line_q == '0) && (col_cnt_q == fail_x_col))
+        if (is_recalled && (cur_line_q != '0))
+            hist_cell = " ";
+        else if (show_fail && (cur_line_q == '0) && (col_cnt_q == fail_x_col))
             hist_cell = SPRITE_FAIL_X;
         else if (col_cnt_q == bubble_left) begin
-            if (n_lines_q == LINE_CNT_W'(1))
+            if ((n_lines_q == LINE_CNT_W'(1)) || is_recalled)
                 hist_cell = show_fail ? SPRITE_FBL : SPRITE_BL;
             else if (cur_line_q == '0)
                 hist_cell = SPRITE_BL_TOP;
@@ -641,7 +656,7 @@ module fe_render_decoder
                 hist_cell = SPRITE_BL_MID;
         end
         else if (col_cnt_q == bubble_right) begin
-            if (n_lines_q == LINE_CNT_W'(1))
+            if ((n_lines_q == LINE_CNT_W'(1)) || is_recalled)
                 hist_cell = show_fail ? SPRITE_FBR : SPRITE_BR;
             else if (cur_line_q == '0)
                 hist_cell = SPRITE_BR_TOP;

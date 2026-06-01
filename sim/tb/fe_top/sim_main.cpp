@@ -70,7 +70,7 @@ enum : uint8_t {
 enum : uint8_t { CONN_BOOT = 0, CONN_HANDSHAKE = 1, CONN_CONNECTED = 2,
                  CONN_DISCONNECTED = 3 };
 enum : uint8_t { MSG_LOCAL = 0, MSG_REMOTE = 1, MSG_SYSTEM = 2 };
-enum : uint8_t { MSG_PENDING = 0, MSG_SUCCESS = 1, MSG_FAIL = 2 };
+enum : uint8_t { MSG_PENDING = 0, MSG_SUCCESS = 1, MSG_FAIL = 2, MSG_RECALLED = 3 };
 
 // Layout constants must match fe_top defaults.
 static constexpr int TITLE_ROW        = 0;
@@ -1337,6 +1337,52 @@ static void test_bubble_multiline_aligned() {
     CHECK_EQ(read_cell(row2, 97), (uint8_t)SPRITE_BR_BOT, "row2 BR_BOT");
 }
 
+// Recalling a message collapses it to a single-line "[recalled]" bubble,
+// even when the original message spanned multiple rows. The first row
+// shows a single-line bubble (SPRITE_BL/BR, not the TOP/MID/BOT stack)
+// and every other row the message used to occupy is cleared to spaces.
+// This covers both plain multi-line text and quote messages (which the
+// backend renders as a multi-line payload with an embedded preview).
+static void test_recall_collapses_multiline_to_single_line() {
+    printf("== test_recall_collapses_multiline_to_single_line\n");
+    reset();
+    bring_up();
+    // 3-line local message, same as test_bubble_multiline_aligned.
+    uint8_t msg[] = {'a','b', 0x0A, 'w','x','y','z', 0x0A, 'c'};
+    RenderCmd c;
+    c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 99;
+    c.side = MSG_LOCAL; c.status = MSG_PENDING;
+    c.payload = msg; c.payload_n = sizeof(msg); c.len = (uint16_t)sizeof(msg);
+    send_cmd(c);
+
+    // Recall it.
+    RenderCmd r;
+    r.cmd = RENDER_UPDATE_STATUS; r.msg_id = 99;
+    r.side = MSG_LOCAL; r.status = MSG_RECALLED;
+    send_cmd(r);
+
+    // "[recalled]" is 10 chars. Local right-aligned: bubble_right = 97,
+    // width = 10 -> bubble_left = 97 - 10 - 1 = 86, payload at 87..96.
+    int row0 = HIST_ROW_START;
+    int row1 = HIST_ROW_START + 1;
+    int row2 = HIST_ROW_START + 2;
+    const char* recalled = "[recalled]";
+
+    // Row 0: single-line bubble, NOT the multi-line TOP sprites.
+    CHECK_EQ(read_cell(row0, 86), (uint8_t)SPRITE_BL, "recall row0 single-line BL");
+    for (int i = 0; i < 10; i++)
+        CHECK_EQ(read_cell(row0, 87 + i), (uint8_t)recalled[i],
+                 "recall row0 text");
+    CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR, "recall row0 single-line BR");
+
+    // Rows 1 and 2 (the old message's MID/BOT rows) are fully blanked:
+    // no leftover borders or characters anywhere across the bubble span.
+    for (int col = 86; col <= 97; col++) {
+        CHECK_EQ(read_cell(row1, col), ' ', "recall row1 cleared");
+        CHECK_EQ(read_cell(row2, col), ' ', "recall row2 cleared");
+    }
+}
+
 // P3.1 input area: Shift+Enter inserts a 0x0A byte; the input region
 // renders this as a real newline -- subsequent characters land on the
 // next text_ram row (INPUT_ROW_START+1), with no "> " prefix on rows
@@ -2033,6 +2079,7 @@ int main(int argc, char** argv) {
     test_cursor_auto_follow_scroll();
     test_bubble_soft_wrap_long_line();
     test_bubble_multiline_aligned();
+    test_recall_collapses_multiline_to_single_line();
     test_input_soft_wrap_long_line();
     test_input_soft_wrap_cursor_pre_wrap();
     test_input_newline_marker_hidden_at_end_of_line();
