@@ -45,7 +45,10 @@ static constexpr uint8_t POPUP_STICKER_PICKER = 2;
 static constexpr int EMOJI_SUGGEST_X_PX = 16;
 static constexpr int EMOJI_SUGGEST_Y_PX = 260;
 static constexpr int EMOJI_SUGGEST_BORDER_PX = 2;
-static constexpr int EMOJI_SUGGEST_TEXT_X_PX = 10;
+// Token text sits on the left (at the border); the emoji glyph is
+// column-aligned 8 char-cells to its right.
+static constexpr int EMOJI_SUGGEST_TEXT_X_PX = EMOJI_SUGGEST_BORDER_PX;
+static constexpr int EMOJI_SUGGEST_ICON_X_PX = EMOJI_SUGGEST_BORDER_PX + 8 * 8;
 
 static constexpr uint8_t SPRITE_BL = 0xF3;
 static constexpr uint8_t SPRITE_BR = 0xF4;
@@ -328,7 +331,7 @@ static void test_emoji_suggest_overlay() {
     CHECK_EQ(dut->video_blue,  POPUP_BG_B, "suggest bg blue");
 
     // Icon area: glyph should be the emoji code (0xE0 = HAPPY).
-    drive_visible_pixel(EMOJI_SUGGEST_X_PX + EMOJI_SUGGEST_BORDER_PX + 4,
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX + EMOJI_SUGGEST_ICON_X_PX + 4,
                         SUGGEST_Y + EMOJI_SUGGEST_BORDER_PX,
                         BUBBLE_ATTR_NONE, ' ', 0x80);
     CHECK_EQ(dut->glyph_code, (uint8_t)0xE0, "suggest icon glyph");
@@ -341,6 +344,45 @@ static void test_emoji_suggest_overlay() {
     CHECK_EQ(dut->video_red,   POPUP_TEXT_R, "suggest text red");
     CHECK_EQ(dut->video_green, POPUP_TEXT_G, "suggest text green");
     CHECK_EQ(dut->video_blue,  POPUP_TEXT_B, "suggest text blue");
+}
+
+static void test_emoji_suggest_overflow_ellipsis() {
+    printf("== test_emoji_suggest_overflow_ellipsis\n");
+    reset();
+
+    // 15 matches -> capped to 10 rows + one "......" row = 11 rows.
+    // dynamic Y = 260 + (15-11)*16 = 324; bottom edge stays at 504.
+    static constexpr int VISIBLE_MAX = 10;
+    static constexpr int ROWS = VISIBLE_MAX + 1;
+    static constexpr int SUGGEST_Y =
+        EMOJI_SUGGEST_Y_PX + (EMOJI_SUGGEST_MAX - ROWS) * EMOJI_SUGGEST_ITEM_H_PX;
+
+    dut->emoji_suggest_active = 1;
+    dut->emoji_suggest_count = 15;
+    dut->emoji_suggest_ids = 0;
+    dut->mouse_x = 1023;
+    dut->mouse_y = 1023;
+
+    // Just above the overlay top there is no box (bottom-up growth caps
+    // the height at 11 rows).
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX + 4, SUGGEST_Y - 4, BUBBLE_ATTR_NONE);
+    CHECK_NEQ(dut->video_red, POPUP_BG_R, "above overlay is not box bg");
+
+    // The 11th (bottom) row is the ellipsis row: text-region glyph is '.'.
+    int ellipsis_y =
+        SUGGEST_Y + EMOJI_SUGGEST_BORDER_PX + VISIBLE_MAX * EMOJI_SUGGEST_ITEM_H_PX;
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX + EMOJI_SUGGEST_TEXT_X_PX,
+                        ellipsis_y, BUBBLE_ATTR_NONE, ' ', 0x80);
+    CHECK_EQ(dut->glyph_code, (uint8_t)'.', "ellipsis row glyph is dot");
+
+    // The ellipsis row carries no emoji icon.
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX + EMOJI_SUGGEST_ICON_X_PX + 4,
+                        ellipsis_y, BUBBLE_ATTR_NONE, ' ', 0x80);
+    CHECK_NEQ(dut->glyph_code, (uint8_t)0xE0, "ellipsis row has no icon");
+
+    // Bottom edge is unchanged at 504 regardless of the cap.
+    drive_visible_pixel(EMOJI_SUGGEST_X_PX, 502, BUBBLE_ATTR_NONE);
+    CHECK_EQ(dut->video_red, POPUP_BORDER_R, "overflow bottom border");
 }
 
 static constexpr int STICKER_CELL_W = 64;
@@ -439,6 +481,7 @@ int main(int argc, char** argv) {
     test_popup_menu_overlay();
     test_popup_menu_text_uses_glyph_rom_bus();
     test_emoji_suggest_overlay();
+    test_emoji_suggest_overflow_ellipsis();
     test_sticker_picker_display();
 
     if (g_failures == 0) { printf("\nPASS  (all checks)\n"); return 0; }

@@ -2348,14 +2348,17 @@ static void test_context_menu_recall_marks_local_message() {
 // plus the cross-side side byte (#1) and quote-mode token handling (#2).
 // ---------------------------------------------------------------------
 
-// Right-click the exposed hist owner and click "Quote"; drain the
-// RENDER_MOVE_CURSOR that arming a quote emits.
-static void arm_quote_on_owner() {
-    send_mouse_right_click(/*x=*/95 * 8 + 1, /*y=*/30 * 16 + 8);
+// Right-click the exposed hist owner (at pixel column `x_px`, which must
+// land inside the bubble) and click "Quote"; drain the RENDER_MOVE_CURSOR
+// that arming a quote emits. LOCAL bubbles are right-aligned (col ~95);
+// REMOTE bubbles are left-aligned (cols 2..), so the column differs.
+static void arm_quote_on_owner_at(uint16_t x_px) {
+    send_mouse_right_click(x_px, /*y=*/30 * 16 + 8);
     tick();
     send_mouse_click(dut->ui_popup_x + 10, dut->ui_popup_y + 10);
     RenderEvent r; wait_render(r, MAX_LINE_LEN + 30);  // MOVE_CURSOR
 }
+static void arm_quote_on_owner() { arm_quote_on_owner_at(95 * 8 + 1); }
 
 // Commit `text` as a fresh single message, then expose it as the
 // right-click hist owner at store slot `idx`.
@@ -2529,6 +2532,209 @@ static void test_sticker_picker_inserts_token_in_quote_mode() {
     CHECK_EQ(no_tx_for(5), true, "no standalone big-emoji sent");
 }
 
+// ---------------------------------------------------------------------
+// Coverage gap fills: quote a REMOTE message (quote 对方), the peer-side
+// RX quote display (对方那边), a small-emoji message, and quoting a
+// message whose source has been recalled (#6/#7, the already-recalled
+// case). Plus recalling a big-emoji message (#3 backend half).
+// ---------------------------------------------------------------------
+
+// Small-emoji glyph base: "\happy" encodes to 0xE0 (see
+// test_emoji_tokens_encoded_on_commit). Small emojis are inline glyph
+// bytes that the quote builder copies verbatim into the preview.
+static constexpr uint8_t SMALL_EMOJI_HAPPY = 0xE0;
+
+// Inject a remote DATA message and expose it as the right-click hist
+// owner at store slot 0 so it can be quoted (quote 对方).
+static void inject_remote_and_expose(uint8_t seq, uint16_t len,
+                                     const std::vector<uint8_t>& bytes) {
+    inject_rx(seq, len, bytes);
+    RenderEvent r; wait_render(r, MAX_LINE_LEN + 30);   // RENDER_APPEND_REMOTE
+    wait_store_idle();
+    dut->fe_hist_wr_row = 1;
+    dut->fe_hist_scroll_offset = 0;
+    set_hist_owner(/*hist_slot=*/0, true, /*store_idx=*/0,
+                   MSG_REMOTE, /*width=*/2);
+}
+
+// Quote 对方: quote a message the peer sent us. The preview copies the
+// remote text, and the wire side byte inverts REMOTE -> LOCAL so the peer
+// resolves the quote against ITS local message.
+static void test_local_quote_remote_message() {
+    printf("== test_local_quote_remote_message\n");
+    reset();
+    inject_remote_and_expose(/*seq=*/5, 3, {'h','e','y'});  // store[0]=REMOTE msg5
+
+    // REMOTE bubble is left-aligned (cols 2..5 for width 2); right-click col 3.
+    arm_quote_on_owner_at(/*x=*/3 * 8 + 1);
+    CHECK_EQ(dut->be_has_quote, 1, "quote armed on remote msg");
+
+    send_key(KEY_CHAR, 'o'); drain_render();
+    send_key(KEY_CHAR, 'k'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "remote-quote render fires");
+    check_disp(r, ">hey\nok", 7, "quote remote -> >hey\\nok");
+
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx, 20), true, "remote-quote tx fires");
+    CHECK_EQ(tx.len, 5, "wire len = 3 prefix + 2 user");
+    CHECK_EQ(payload_get_byte(tx.payload, 0), 0x01, "wire[0] = QUOTE_MARKER");
+    CHECK_EQ(payload_get_byte(tx.payload, 1), MSG_LOCAL,
+             "wire[1] = inverted side (remote->local)");
+    CHECK_EQ(payload_get_byte(tx.payload, 2), 5, "wire[2] = quoted msg_id");
+}
+
+// 对方那边: the peer quoted OUR message and sent the quote frame. We
+// resolve the quoted msg_id against our LOCAL store and assemble the full
+// ">hello\nhey" preview as a remote bubble. Checks every preview byte.
+static void test_rx_quote_display_full_preview() {
+    printf("== test_rx_quote_display_full_preview\n");
+    reset();
+
+    // Our local msg_id 0 = "hello" (the message the peer quotes).
+    for (char c : std::string("hello")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+
+    // Peer's quote frame: [marker][side=LOCAL][msg_id=0]["hey"]. The peer
+    // already inverted the side so we look it up as LOCAL.
+    std::vector<uint8_t> wire = {0x01, MSG_LOCAL, 0x00, 'h','e','y'};
+    inject_rx(/*seq=*/9, (uint16_t)wire.size(), wire);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + 30), true, "rx-quote render fires");
+    CHECK_EQ(r.cmd, RENDER_APPEND_REMOTE, "rx-quote cmd = APPEND_REMOTE");
+    const char* exp = ">hello\nhey";
+    CHECK_EQ(r.len, 10, "rx-quote disp len = 10");
+    for (int i = 0; i < 10; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "rx-quote disp[%d]", i);
+        CHECK_EQ(payload_get_byte(r.payload, i), (uint8_t)exp[i], lbl);
+    }
+}
+
+// #2: quoting a message that contains a small-emoji glyph keeps the glyph
+// byte verbatim in the preview (it is not a big-emoji anchor).
+static void test_local_quote_small_emoji_preview() {
+    printf("== test_local_quote_small_emoji_preview\n");
+    reset();
+    // Commit "hi\happy" -> 'h','i',0xE0 (small emoji is an inline glyph).
+    for (char c : std::string("hi\\happy")) { send_key(KEY_CHAR, (uint8_t)c); drain_render(); }
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+    StoreRead s = read_store(0);
+    CHECK_EQ(s.len, 3, "small-emoji msg stored as 'h','i',glyph");
+    CHECK_EQ(store_payload_byte(2), SMALL_EMOJI_HAPPY, "stored small-emoji glyph");
+
+    dut->fe_hist_wr_row = 1; dut->fe_hist_scroll_offset = 0;
+    set_hist_owner(0, true, 0, MSG_LOCAL, 2);
+    arm_quote_on_owner();
+
+    send_key(KEY_CHAR, 'o'); drain_render();
+    send_key(KEY_CHAR, 'k'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "small-emoji quote render fires");
+    // ">" + "hi" + glyph + "\n" + "ok"
+    const uint8_t exp[] = {'>', 'h', 'i', SMALL_EMOJI_HAPPY, '\n', 'o', 'k'};
+    CHECK_EQ(r.cmd, RENDER_APPEND_LOCAL_PENDING, "small-emoji quote cmd");
+    CHECK_EQ(r.len, 7, "small-emoji quote disp len = 7");
+    for (int i = 0; i < 7; i++) {
+        char lbl[40]; snprintf(lbl, sizeof(lbl), "small-emoji quote disp[%d]", i);
+        CHECK_EQ(payload_get_byte(r.payload, i), exp[i], lbl);
+    }
+}
+
+// Recall a message via the context menu, draining the UPDATE_STATUS render
+// and FRAME_RECALL tx. Assumes the message is exposed as hist owner.
+static void recall_exposed_owner() {
+    send_mouse_right_click(/*x=*/95 * 8 + 1, /*y=*/30 * 16 + 8);
+    tick();
+    send_mouse_click(dut->ui_popup_x + 10, dut->ui_popup_y + 2 + 24 + 8);
+    RenderEvent r; wait_render(r, 20);   // UPDATE_STATUS -> RECALLED
+    TxEvent tx;    wait_tx(tx, 20);       // FRAME_RECALL
+}
+
+// #6/#7 (already-recalled case): quoting a message whose source was
+// recalled shows ">[recalled]" instead of the stale original body.
+static void test_local_quote_recalled_source_shows_recalled() {
+    printf("== test_local_quote_recalled_source_shows_recalled\n");
+    reset();
+    commit_hi_and_expose_hist_owner();   // store[0]="hi", msg_id 0, LOCAL
+    recall_exposed_owner();
+    CHECK_EQ(read_store(0).status, MSG_RECALLED, "source marked recalled");
+
+    // Owner exposure persists; arm a quote on the now-recalled message.
+    arm_quote_on_owner();
+    CHECK_EQ(dut->be_has_quote, 1, "quote armed on recalled msg");
+
+    send_key(KEY_CHAR, 'o'); drain_render();
+    send_key(KEY_CHAR, 'k'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "recalled-source quote render fires");
+    check_disp(r, ">[recalled]\nok", 14, "quote of recalled -> >[recalled]");
+}
+
+// Multi-line variant of #7: the recalled placeholder is single-line even
+// when the original quoted message spanned multiple lines.
+static void test_local_quote_recalled_multiline_source() {
+    printf("== test_local_quote_recalled_multiline_source\n");
+    reset();
+    // Commit "a\nb" then expose + recall it.
+    send_key(KEY_CHAR, 'a'); drain_render();
+    send_key(KEY_CHAR, 0x0A); drain_render();
+    send_key(KEY_CHAR, 'b'); drain_render();
+    send_key(KEY_ENTER, 0);
+    drain_commit_pipeline();
+    dut->fe_hist_wr_row = 1; dut->fe_hist_scroll_offset = 0;
+    set_hist_owner(0, true, 0, MSG_LOCAL, 2);
+    recall_exposed_owner();
+    CHECK_EQ(read_store(0).status, MSG_RECALLED, "multiline source recalled");
+
+    arm_quote_on_owner();
+    send_key(KEY_CHAR, 'x'); drain_render();
+    send_key(KEY_ENTER, 0);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
+             "recalled multiline quote render fires");
+    // Single-line "[recalled]" preview regardless of original line count.
+    check_disp(r, ">[recalled]\nx", 13, "recalled multiline -> >[recalled]");
+}
+
+// #3 backend half: a big-emoji message can be recalled like any local
+// message (status -> RECALLED, FRAME_RECALL on the wire). The frontend is
+// what collapses the emoji bubble to "[recalled]" (see fe_top).
+static void test_context_menu_recall_big_emoji() {
+    printf("== test_context_menu_recall_big_emoji\n");
+    reset();
+    commit_text_and_expose("\\Hissing", 0);   // store[0] = anchor, len 1
+    CHECK_EQ(read_store(0).len, 1, "big-emoji stored as single anchor");
+
+    send_mouse_right_click(/*x=*/95 * 8 + 1, /*y=*/30 * 16 + 8);
+    tick();
+    send_mouse_click(dut->ui_popup_x + 10, dut->ui_popup_y + 2 + 24 + 8);
+
+    RenderEvent r;
+    CHECK_EQ(wait_render(r, 20), true, "big-emoji recall render fires");
+    CHECK_EQ(r.cmd, RENDER_UPDATE_STATUS, "recall uses status update");
+    CHECK_EQ(r.msg_id, 0, "recall msg id");
+    CHECK_EQ(r.status, MSG_RECALLED, "recall status");
+    CHECK_EQ(read_store(0).status, MSG_RECALLED, "big-emoji store recalled");
+
+    TxEvent tx;
+    CHECK_EQ(wait_tx(tx, 20), true, "big-emoji recall tx fires");
+    CHECK_EQ(tx.frame_type, FRAME_RECALL, "recall frame type");
+    CHECK_EQ(tx.len, 0, "recall tx len = 0");
+}
+
 // =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
@@ -2584,6 +2790,12 @@ int main(int argc, char** argv) {
     test_local_quote_nested_preview();
     test_quote_mode_keeps_typed_token_literal();
     test_sticker_picker_inserts_token_in_quote_mode();
+    test_local_quote_remote_message();
+    test_rx_quote_display_full_preview();
+    test_local_quote_small_emoji_preview();
+    test_local_quote_recalled_source_shows_recalled();
+    test_local_quote_recalled_multiline_source();
+    test_context_menu_recall_big_emoji();
     test_context_menu_recall_marks_local_message();
     test_big_emoji_tokens_mixed_text_passthrough();
     test_big_emoji_unknown_token_passthrough();

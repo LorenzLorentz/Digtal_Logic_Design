@@ -386,8 +386,10 @@ module be_top
     msg_len_t                           qb_out_max_q;   // max preview out bytes
     msg_len_t                           qb_user_len_q;  // user text length
     byte_t                              qb_anchor_q;    // big-emoji anchor
+    logic                               qb_recalled_q;  // quoted src recalled
 
     localparam int QB_NESTED_PH_LEN = 12;  // " > [quoted]\n"
+    localparam int QB_RECALLED_LEN  = 10;  // "[recalled]"
 
     // Big-emoji anchor -> "\Name" token length (incl. a leading space and
     // the backslash). Returns 0 for non-anchor bytes.
@@ -498,6 +500,26 @@ module be_top
             4'd10:   qb_nested_byte = "]";
             4'd11:   qb_nested_byte = 8'h0A;
             default: qb_nested_byte = " ";
+        endcase
+    endfunction
+
+    // "[recalled]" preview substring for a quoted message whose source
+    // has been recalled. The quoted bytes in BRAM still hold the original
+    // text (recall only flips status), so the builder substitutes this
+    // placeholder instead of copying the stale body.
+    function automatic byte_t qb_recalled_byte(input logic [3:0] idx);
+        unique case (idx)
+            4'd0:    qb_recalled_byte = "[";
+            4'd1:    qb_recalled_byte = "r";
+            4'd2:    qb_recalled_byte = "e";
+            4'd3:    qb_recalled_byte = "c";
+            4'd4:    qb_recalled_byte = "a";
+            4'd5:    qb_recalled_byte = "l";
+            4'd6:    qb_recalled_byte = "l";
+            4'd7:    qb_recalled_byte = "e";
+            4'd8:    qb_recalled_byte = "d";
+            4'd9:    qb_recalled_byte = "]";
+            default: qb_recalled_byte = " ";
         endcase
     endfunction
 
@@ -635,11 +657,23 @@ module be_top
         && (click_popup_dy >= 10'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX))
         && (click_popup_dy < 10'(POPUP_BORDER_PX + POPUP_MSG_ITEM_H_PX * 2));
     // Dynamic Y matches the frontend's bottom-up alignment so click
-    // hit-testing stays in sync when the overlay shifts down.
+    // hit-testing stays in sync when the overlay shifts down. The list is
+    // capped at EMOJI_SUGGEST_VISIBLE_MAX rows (plus a non-clickable
+    // "......" row); only the visible candidates are hit-testable.
+    logic [3:0] emoji_suggest_disp_count;
+    logic       emoji_suggest_overflow;
+    logic [3:0] emoji_suggest_rows;
+    assign emoji_suggest_overflow =
+        (emoji_suggest_count_q > 4'(EMOJI_SUGGEST_VISIBLE_MAX));
+    assign emoji_suggest_disp_count =
+        emoji_suggest_overflow
+        ? 4'(EMOJI_SUGGEST_VISIBLE_MAX) : 4'(emoji_suggest_count_q);
+    assign emoji_suggest_rows =
+        emoji_suggest_disp_count + (emoji_suggest_overflow ? 4'd1 : 4'd0);
     logic [9:0] emoji_suggest_y;
     assign emoji_suggest_y =
         10'(EMOJI_SUGGEST_Y_PX)
-        + (10'(EMOJI_SUGGEST_MAX) - 10'(emoji_suggest_count_q))
+        + (10'(EMOJI_SUGGEST_MAX) - 10'(emoji_suggest_rows))
         * 10'(EMOJI_SUGGEST_ITEM_H_PX);
     assign click_emoji_dx  = click_x_q - 10'(EMOJI_SUGGEST_X_PX);
     assign click_emoji_dy  = click_y_q - emoji_suggest_y;
@@ -650,9 +684,9 @@ module be_top
         && (click_emoji_dx < 10'(EMOJI_SUGGEST_W_PX))
         && (click_emoji_dy >= 10'(EMOJI_SUGGEST_BORDER_PX))
         && (click_emoji_dy < 10'(EMOJI_SUGGEST_BORDER_PX)
-                           + 10'(emoji_suggest_count_q)
+                           + 10'(emoji_suggest_disp_count)
                            * 10'(EMOJI_SUGGEST_ITEM_H_PX))
-        && (click_emoji_row < 4'(emoji_suggest_count_q));
+        && (click_emoji_row < 4'(emoji_suggest_disp_count));
     always_comb begin
         click_emoji_token_id = '0;
         if (click_emoji_row < 4'(EMOJI_SUGGEST_MAX)) begin
@@ -1626,6 +1660,7 @@ module be_top
             qb_out_max_q      <= '0;
             qb_user_len_q     <= '0;
             qb_anchor_q       <= '0;
+            qb_recalled_q     <= 1'b0;
             sticker_ins_anchor_q <= '0;
             recall_msg_id_q    <= '0;
             recall_store_idx_q <= '0;
@@ -2121,6 +2156,7 @@ module be_top
                             om = LEN_WIDTH'(QUOTE_DISP_MAX);
                         qb_out_max_q <= om;
                         qb_rd_q      <= '0;   // prefetch quoted byte 0
+                        qb_recalled_q <= 1'b0;
                         qb_phase_q   <= QB_DECIDE;
                     end
                     QB_DECIDE: begin
@@ -2131,6 +2167,18 @@ module be_top
                             qb_rd_end_q <= '0;
                             qb_rd_q     <= '0;
                             qb_phase_q  <= QB_SEP;
+                        end else if (store_ui_rd_status
+                                     == 2'(MSG_RECALLED)) begin
+                            // Quoted source was recalled: show "[recalled]"
+                            // instead of the (stale) original body. Takes
+                            // priority over big-emoji / nested / plain.
+                            qb_recalled_q <= 1'b1;
+                            qb_anchor_q   <= '0;
+                            qb_sub_len_q  <= 4'(QB_RECALLED_LEN);
+                            qb_sub_q      <= '0;
+                            qb_rd_end_q   <= '0;          // no body copy
+                            qb_rd_q       <= '0;
+                            qb_phase_q    <= QB_SUBSTR;
                         end else if ((quoted_store_len == msg_len_t'(1))
                             && (qb_token_len(store_ui_rd_byte) != 4'd0)) begin
                             // Big-emoji message: render its "\Name" token.
@@ -2162,9 +2210,11 @@ module be_top
                     end
                     QB_SUBSTR: begin
                         automatic byte_t b;
-                        b = (qb_anchor_q != 8'd0)
-                            ? qb_token_byte(qb_anchor_q, qb_sub_q)
-                            : qb_nested_byte(qb_sub_q);
+                        b = qb_recalled_q
+                            ? qb_recalled_byte(qb_sub_q)
+                            : (qb_anchor_q != 8'd0)
+                              ? qb_token_byte(qb_anchor_q, qb_sub_q)
+                              : qb_nested_byte(qb_sub_q);
                         disp_payload_q[disp_build_idx_q*8 +: 8] <= b;
                         disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
                         disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);

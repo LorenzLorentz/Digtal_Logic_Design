@@ -286,6 +286,12 @@ module fe_scan
     logic [HWIDTH-1:0] emoji_suggest_mouse_dy;
     logic [3:0]        emoji_suggest_row_s0;
     logic [3:0]        emoji_suggest_mouse_row;
+    // Visible-row bookkeeping: cap the drawn list at EMOJI_SUGGEST_VISIBLE_MAX
+    // candidates, append one "......" row when more match.
+    logic [3:0]        emoji_suggest_disp_count;
+    logic              emoji_suggest_overflow;
+    logic [3:0]        emoji_suggest_rows;
+    logic              emoji_suggest_ellipsis_row_s0;
     logic              emoji_suggest_in_region_s0;
     logic              emoji_suggest_border_s0;
     logic              emoji_suggest_item_s0;
@@ -431,13 +437,25 @@ module fe_scan
                                     + POPUP_MSG_TEXT_Y_PX))
         : 4'(popup_dy_s0 - HWIDTH'(POPUP_BORDER_PX + POPUP_MSG_TEXT_Y_PX));
 
+    // Cap the candidate list and decide whether the "......" row appears.
+    assign emoji_suggest_overflow =
+        (emoji_suggest_count > 4'(EMOJI_SUGGEST_VISIBLE_MAX));
+    assign emoji_suggest_disp_count =
+        emoji_suggest_overflow
+        ? 4'(EMOJI_SUGGEST_VISIBLE_MAX) : 4'(emoji_suggest_count);
+    assign emoji_suggest_rows =
+        emoji_suggest_disp_count + (emoji_suggest_overflow ? 4'd1 : 4'd0);
+
+    // Bottom-up: the overlay's bottom edge is pinned just above the input
+    // bar; the top slides up as more rows show. Anchored at the same
+    // bottom (EMOJI_SUGGEST_Y_PX + EMOJI_SUGGEST_MAX rows) as before.
     assign emoji_suggest_y =
         HWIDTH'(EMOJI_SUGGEST_Y_PX)
-        + (HWIDTH'(EMOJI_SUGGEST_MAX) - HWIDTH'(emoji_suggest_count))
+        + (HWIDTH'(EMOJI_SUGGEST_MAX) - HWIDTH'(emoji_suggest_rows))
         * HWIDTH'(EMOJI_SUGGEST_ITEM_H_PX);
     assign emoji_suggest_h_s0 =
         HWIDTH'(EMOJI_SUGGEST_BORDER_PX * 2)
-        + (HWIDTH'(emoji_suggest_count) << 4);
+        + (HWIDTH'(emoji_suggest_rows) << 4);
     assign emoji_suggest_dx_s0 =
         hdata - HWIDTH'(EMOJI_SUGGEST_X_PX);
     assign emoji_suggest_dy_s0 =
@@ -464,18 +482,27 @@ module fe_scan
                                             - EMOJI_SUGGEST_BORDER_PX))
          || (emoji_suggest_dy_s0 >= emoji_suggest_h_s0
                                       - HWIDTH'(EMOJI_SUGGEST_BORDER_PX)));
+    // A candidate row (drives icon + token text); excludes the
+    // "......" overflow row.
     assign emoji_suggest_item_s0 =
         emoji_suggest_in_region_s0
         && !emoji_suggest_border_s0
         && (emoji_suggest_dy_s0 >= HWIDTH'(EMOJI_SUGGEST_BORDER_PX))
-        && (emoji_suggest_row_s0 < 4'(emoji_suggest_count));
+        && (emoji_suggest_row_s0 < emoji_suggest_disp_count);
+    // The bottom "......" row, present only when the list overflowed.
+    assign emoji_suggest_ellipsis_row_s0 =
+        emoji_suggest_in_region_s0
+        && !emoji_suggest_border_s0
+        && emoji_suggest_overflow
+        && (emoji_suggest_dy_s0 >= HWIDTH'(EMOJI_SUGGEST_BORDER_PX))
+        && (emoji_suggest_row_s0 == emoji_suggest_disp_count);
     assign emoji_suggest_mouse_in_item =
         emoji_suggest_active
         && (emoji_suggest_mouse_dx < HWIDTH'(EMOJI_SUGGEST_W_PX))
         && (emoji_suggest_mouse_dy >= HWIDTH'(EMOJI_SUGGEST_BORDER_PX))
         && (emoji_suggest_mouse_dy < HWIDTH'(EMOJI_SUGGEST_BORDER_PX)
-                                  + (HWIDTH'(emoji_suggest_count) << 4))
-        && (emoji_suggest_mouse_row < 4'(emoji_suggest_count));
+                                  + (HWIDTH'(emoji_suggest_disp_count) << 4))
+        && (emoji_suggest_mouse_row < emoji_suggest_disp_count);
     assign emoji_suggest_item_hover_s0 =
         emoji_suggest_item_s0
         && emoji_suggest_mouse_in_item
@@ -489,25 +516,31 @@ module fe_scan
             ];
         end
     end
+    // The text region holds the token glyphs ("\happy") on candidate rows
+    // and the dots on the "......" overflow row.
     assign emoji_suggest_label_len_s0 =
-        4'(emoji_token_len(emoji_suggest_label_token_s0));
+        emoji_suggest_ellipsis_row_s0
+        ? 4'(EMOJI_SUGGEST_ELLIPSIS_N)
+        : 4'(emoji_token_len(emoji_suggest_label_token_s0));
     assign emoji_suggest_label_dx_s0 =
         emoji_suggest_dx_s0 - HWIDTH'(EMOJI_SUGGEST_TEXT_X_PX);
     assign emoji_suggest_label_col_s0 = 4'(emoji_suggest_label_dx_s0 >> 3);
     assign emoji_suggest_label_active_s0 =
-        emoji_suggest_item_s0
+        (emoji_suggest_item_s0 || emoji_suggest_ellipsis_row_s0)
         && (emoji_suggest_dx_s0 >= HWIDTH'(EMOJI_SUGGEST_TEXT_X_PX))
         && (emoji_suggest_dx_s0 < HWIDTH'(EMOJI_SUGGEST_TEXT_X_PX
                                           + EMOJI_TOKEN_MAX_LEN * 8))
         && (emoji_suggest_label_col_s0 < emoji_suggest_label_len_s0);
     assign emoji_suggest_label_char_s0 =
-        emoji_token_char(emoji_suggest_label_token_s0,
-                         emoji_suggest_label_col_s0);
+        emoji_suggest_ellipsis_row_s0
+        ? 8'h2E   // '.'
+        : emoji_token_char(emoji_suggest_label_token_s0,
+                           emoji_suggest_label_col_s0);
     assign emoji_suggest_label_gx_s0 = emoji_suggest_label_dx_s0[2:0];
     assign emoji_suggest_label_gy_s0 =
         4'(emoji_suggest_dy_s0 - HWIDTH'(EMOJI_SUGGEST_BORDER_PX));
 
-    // Emoji glyph icon: 8 px wide, sits left of the text label.
+    // Emoji glyph icon: 8 px wide, column-aligned to the right of the text.
     assign emoji_suggest_icon_active_s0 =
         emoji_suggest_item_s0
         && (emoji_suggest_dx_s0 >= HWIDTH'(EMOJI_SUGGEST_ICON_X_PX))

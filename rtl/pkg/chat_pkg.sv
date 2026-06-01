@@ -181,13 +181,23 @@ package chat_pkg;
     localparam int EMOJI_SUGGEST_MAX     = EMOJI_TOKEN_COUNT;
     localparam int EMOJI_SUGGEST_COUNT_W = $clog2(EMOJI_SUGGEST_MAX + 1);
 
+    // At most this many candidate rows are drawn. When more tokens match
+    // an extra "......" row is appended below them, so the overlay never
+    // grows past EMOJI_SUGGEST_VISIBLE_MAX + 1 rows (no scrolling).
+    localparam int EMOJI_SUGGEST_VISIBLE_MAX = 10;
+    localparam int EMOJI_SUGGEST_ROWS_MAX    = EMOJI_SUGGEST_VISIBLE_MAX + 1;
+
     localparam int EMOJI_SUGGEST_X_PX      = 16;
     localparam int EMOJI_SUGGEST_Y_PX      = 260;
     localparam int EMOJI_SUGGEST_W_PX      = 112;
     localparam int EMOJI_SUGGEST_BORDER_PX = 2;
     localparam int EMOJI_SUGGEST_ITEM_H_PX = 16;
-    localparam int EMOJI_SUGGEST_ICON_X_PX = EMOJI_SUGGEST_BORDER_PX;
-    localparam int EMOJI_SUGGEST_TEXT_X_PX = EMOJI_SUGGEST_BORDER_PX + 8;
+    // Layout inside a row: the token text "\happy" sits on the left and
+    // the monochrome emoji glyph is column-aligned on the right.
+    localparam int EMOJI_SUGGEST_TEXT_X_PX = EMOJI_SUGGEST_BORDER_PX;
+    localparam int EMOJI_SUGGEST_ICON_X_PX = EMOJI_SUGGEST_BORDER_PX + 8 * 8;
+    // Number of dots drawn on the overflow "......" row.
+    localparam int EMOJI_SUGGEST_ELLIPSIS_N = 6;
 
     // Small-emoji glyph codes occupy 0xE0..0xEE, one per token.
     localparam byte_t EMOJI_GLYPH_BASE = 8'hE0;
