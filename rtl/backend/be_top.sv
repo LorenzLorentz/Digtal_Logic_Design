@@ -366,13 +366,15 @@ module be_top
     //   * big-emoji quoted message (1 byte, anchor)  -> emit "\Name"
     //   * nested quote (starts with QUOTE_MARKER)     -> emit a
     //       "> [quoted]" placeholder + the body, WITHOUT recursing
-    //   * plain message                               -> verbatim copy
-    //       (newlines preserved; only the first line carries the ">")
+    //   * plain message                               -> copy with
+    //       quote-block formatting: "> " on the first line, "  " after
+    //       quoted newlines
     typedef enum logic [2:0] {
-        QB_MARK,    // write outer ">", measure user text, prefetch byte0
+        QB_MARK,    // write outer "> ", measure user text, prefetch byte0
         QB_DECIDE,  // quoted byte0 ready: pick transform + bounds
         QB_SUBSTR,  // emit a fixed substring (token name / placeholder)
         QB_COPY,    // copy quoted source bytes (BRAM, 1-cycle prefetch)
+        QB_INDENT,  // write "  " after a newline inside the quoted preview
         QB_SEP,     // write "\n" separator between preview and user text
         QB_USER,    // copy user text from pending_payload_q
         QB_FIN      // done; disp_len_q is latched, leave the state
@@ -382,13 +384,14 @@ module be_top
     logic [MSG_BYTE_W-1:0]              qb_rd_q;        // quoted source idx
     logic [3:0]                         qb_sub_q;       // substring emit idx
     logic [3:0]                         qb_sub_len_q;   // substring length
+    logic [1:0]                         qb_indent_q;    // continuation spaces
     msg_len_t                           qb_rd_end_q;    // copy until this idx
-    msg_len_t                           qb_out_max_q;   // max preview out bytes
+    msg_len_t                           qb_out_max_q;   // last preview byte idx
     msg_len_t                           qb_user_len_q;  // user text length
     byte_t                              qb_anchor_q;    // big-emoji anchor
     logic                               qb_recalled_q;  // quoted src recalled
 
-    localparam int QB_NESTED_PH_LEN = 12;  // " > [quoted]\n"
+    localparam int QB_NESTED_PH_LEN = 11;  // "> [quoted]\n"
     localparam int QB_RECALLED_LEN  = 10;  // "[recalled]"
 
     // Big-emoji anchor -> "\Name" token length (incl. a leading space and
@@ -484,21 +487,20 @@ module be_top
         end
     endfunction
 
-    // " > [quoted]\n" placeholder for a nested quote (not recursed).
+    // "> [quoted]\n" placeholder for a nested quote (not recursed).
     function automatic byte_t qb_nested_byte(input logic [3:0] idx);
         unique case (idx)
-            4'd0:    qb_nested_byte = " ";
-            4'd1:    qb_nested_byte = ">";
-            4'd2:    qb_nested_byte = " ";
-            4'd3:    qb_nested_byte = "[";
-            4'd4:    qb_nested_byte = "q";
-            4'd5:    qb_nested_byte = "u";
-            4'd6:    qb_nested_byte = "o";
-            4'd7:    qb_nested_byte = "t";
-            4'd8:    qb_nested_byte = "e";
-            4'd9:    qb_nested_byte = "d";
-            4'd10:   qb_nested_byte = "]";
-            4'd11:   qb_nested_byte = 8'h0A;
+            4'd0:    qb_nested_byte = ">";
+            4'd1:    qb_nested_byte = " ";
+            4'd2:    qb_nested_byte = "[";
+            4'd3:    qb_nested_byte = "q";
+            4'd4:    qb_nested_byte = "u";
+            4'd5:    qb_nested_byte = "o";
+            4'd6:    qb_nested_byte = "t";
+            4'd7:    qb_nested_byte = "e";
+            4'd8:    qb_nested_byte = "d";
+            4'd9:    qb_nested_byte = "]";
+            4'd10:   qb_nested_byte = 8'h0A;
             default: qb_nested_byte = " ";
         endcase
     endfunction
@@ -774,10 +776,10 @@ module be_top
     // BRAM byte pre-fetch index for the quote display builder.
     // The payload BRAM has 1-cycle read latency, so we pre-fetch the
     // source byte one cycle before it is consumed:
-    //   QB_MARK / QB_DECIDE / QB_SUBSTR : hold qb_rd_q (the first body
-    //       byte) so it is ready when QB_COPY begins.
-    //   QB_COPY                         : pre-fetch qb_rd_q + 1 (the
-    //       byte after the one being written this cycle).
+    //   QB_MARK / QB_DECIDE / QB_SUBSTR / QB_INDENT : hold qb_rd_q so the
+    //       first/current body byte is ready when QB_COPY begins/resumes.
+    //   QB_COPY                                     : pre-fetch qb_rd_q + 1
+    //       (the byte after the one being written this cycle).
     always_comb begin
         if (state_q == S_BUILD_QUOTE_DISP) begin
             if (qb_phase_q == QB_COPY)
@@ -1656,6 +1658,7 @@ module be_top
             qb_rd_q           <= '0;
             qb_sub_q          <= '0;
             qb_sub_len_q      <= '0;
+            qb_indent_q       <= '0;
             qb_rd_end_q       <= '0;
             qb_out_max_q      <= '0;
             qb_user_len_q     <= '0;
@@ -2116,10 +2119,10 @@ module be_top
             end
 
             // S_BUILD_QUOTE_DISP: variable-length display-payload builder.
-            // Lays out: ">" + quoted preview + "\n" + user text. The
+            // Lays out: "> " + quoted preview + "\n" + user text. The
             // quoted preview is transformed (big-emoji -> "\Name",
             // nested quote -> "> [quoted]" placeholder + body, plain ->
-            // verbatim with newlines kept). See the qb_phase_e comments.
+            // copied with continuation indentation). See qb_phase_e comments.
             //
             // Entry init: pending_len_q is being assigned the wire length
             // THIS cycle (enc_dst_q local / rx_len_clamped remote), so we
@@ -2132,28 +2135,35 @@ module be_top
                 disp_len_q       <= '0;
                 qb_rd_q          <= '0;
                 qb_sub_q         <= '0;
+                qb_indent_q      <= '0;
                 qb_anchor_q      <= '0;
             end
             if (state_q == S_BUILD_QUOTE_DISP) begin
                 unique case (qb_phase_q)
                     QB_MARK: begin
                         automatic msg_len_t ul, om;
-                        // Outer ">" (only the first preview line gets it).
+                        // Outer quote marker. Continuation lines get spaces
+                        // from QB_INDENT after quoted-preview newlines.
                         disp_payload_q[disp_build_idx_q*8 +: 8] <= ">";
-                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
-                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
+                        disp_payload_q[(disp_build_idx_q + LEN_WIDTH'(1))*8 +: 8]
+                            <= " ";
+                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(2);
+                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(2);
                         // User text length (pending_len_q settled now).
                         ul = (pending_len_q > LEN_WIDTH'(QUOTE_MARKER_LEN))
                              ? (pending_len_q - LEN_WIDTH'(QUOTE_MARKER_LEN))
                              : '0;
                         qb_user_len_q <= ul;
-                        // Preview budget: fit ">" + out + "\n" + user in
-                        // MAX_MSG_LEN, and never exceed QUOTE_DISP_MAX.
-                        om = (LEN_WIDTH'(MAX_MSG_LEN) > (msg_len_t'(2) + ul))
+                        // Last byte index that preview output may occupy:
+                        // fit "> " + preview + "\n" + user in MAX_MSG_LEN,
+                        // and never exceed QUOTE_DISP_MAX preview bytes.
+                        om = (LEN_WIDTH'(MAX_MSG_LEN) > (msg_len_t'(3) + ul))
                              ? (LEN_WIDTH'(MAX_MSG_LEN) - msg_len_t'(2) - ul)
                              : '0;
-                        if (om > LEN_WIDTH'(QUOTE_DISP_MAX))
-                            om = LEN_WIDTH'(QUOTE_DISP_MAX);
+                        if (om > (msg_len_t'(2) + LEN_WIDTH'(QUOTE_DISP_MAX)
+                                  - LEN_WIDTH'(1)))
+                            om = msg_len_t'(2) + LEN_WIDTH'(QUOTE_DISP_MAX)
+                                 - LEN_WIDTH'(1);
                         qb_out_max_q <= om;
                         qb_rd_q      <= '0;   // prefetch quoted byte 0
                         qb_recalled_q <= 1'b0;
@@ -2184,7 +2194,7 @@ module be_top
                             // Big-emoji message: render its "\Name" token.
                             qb_anchor_q  <= store_ui_rd_byte;
                             qb_sub_len_q <= qb_token_len(store_ui_rd_byte);
-                            qb_sub_q     <= '0;
+                            qb_sub_q     <= 4'd1;        // skip token's space
                             qb_rd_end_q  <= '0;          // no body copy
                             qb_rd_q      <= '0;
                             qb_phase_q   <= QB_SUBSTR;
@@ -2210,33 +2220,72 @@ module be_top
                     end
                     QB_SUBSTR: begin
                         automatic byte_t b;
+                        automatic logic body_remains;
+                        automatic logic indent_fits;
                         b = qb_recalled_q
                             ? qb_recalled_byte(qb_sub_q)
                             : (qb_anchor_q != 8'd0)
                               ? qb_token_byte(qb_anchor_q, qb_sub_q)
                               : qb_nested_byte(qb_sub_q);
+                        body_remains = (LEN_WIDTH'(qb_rd_q) < qb_rd_end_q);
+                        indent_fits = (disp_build_idx_q + LEN_WIDTH'(3)
+                                       <= qb_out_max_q);
                         disp_payload_q[disp_build_idx_q*8 +: 8] <= b;
                         disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
                         disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
                         qb_sub_q         <= qb_sub_q + 4'd1;
                         if (disp_build_idx_q >= qb_out_max_q)
                             qb_phase_q <= QB_SEP;          // preview budget hit
-                        else if (qb_sub_q + 4'd1 >= qb_sub_len_q)
-                            qb_phase_q <= (LEN_WIDTH'(qb_rd_q) < qb_rd_end_q)
-                                          ? QB_COPY : QB_SEP;
+                        else if (qb_sub_q + 4'd1 >= qb_sub_len_q) begin
+                            if (body_remains && (b == 8'h0A)) begin
+                                if (indent_fits) begin
+                                    qb_indent_q <= '0;
+                                    qb_phase_q  <= QB_INDENT;
+                                end else begin
+                                    qb_phase_q <= QB_SEP;
+                                end
+                            end else begin
+                                qb_phase_q <= body_remains ? QB_COPY : QB_SEP;
+                            end
+                        end
                     end
                     QB_COPY: begin
+                        automatic logic more_src;
+                        automatic logic indent_fits;
                         // store_ui_rd_byte holds quoted source[qb_rd_q]
-                        // (pre-fetched last cycle). Newlines preserved.
+                        // (pre-fetched last cycle). Newlines inside the
+                        // quoted preview are preserved, then followed by
+                        // QB_INDENT's two continuation spaces.
+                        more_src = (LEN_WIDTH'(qb_rd_q) + LEN_WIDTH'(1)
+                                    < qb_rd_end_q);
+                        indent_fits = (disp_build_idx_q + LEN_WIDTH'(3)
+                                       <= qb_out_max_q);
                         disp_payload_q[disp_build_idx_q*8 +: 8]
                             <= store_ui_rd_byte;
                         disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
                         disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
                         qb_rd_q          <= qb_rd_q + 1'b1;
                         if ((disp_build_idx_q >= qb_out_max_q)
-                            || (LEN_WIDTH'(qb_rd_q) + LEN_WIDTH'(1)
-                                >= qb_rd_end_q))
+                            || !more_src) begin
                             qb_phase_q <= QB_SEP;
+                        end else if (store_ui_rd_byte == 8'h0A) begin
+                            if (indent_fits) begin
+                                qb_indent_q <= '0;
+                                qb_phase_q  <= QB_INDENT;
+                            end else begin
+                                qb_phase_q <= QB_SEP;
+                            end
+                        end
+                    end
+                    QB_INDENT: begin
+                        disp_payload_q[disp_build_idx_q*8 +: 8] <= " ";
+                        disp_build_idx_q <= disp_build_idx_q + LEN_WIDTH'(1);
+                        disp_len_q       <= disp_build_idx_q + LEN_WIDTH'(1);
+                        qb_indent_q      <= qb_indent_q + 2'd1;
+                        if (disp_build_idx_q >= qb_out_max_q)
+                            qb_phase_q <= QB_SEP;
+                        else if (qb_indent_q == 2'd1)
+                            qb_phase_q <= QB_COPY;
                     end
                     QB_SEP: begin
                         disp_payload_q[disp_build_idx_q*8 +: 8] <= 8'h0A;

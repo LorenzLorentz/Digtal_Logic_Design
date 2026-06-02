@@ -1384,32 +1384,34 @@ static void test_recall_collapses_multiline_to_single_line() {
 }
 
 // A quote message arrives as a multi-line display payload the backend
-// already assembled: ">" + quoted preview + "\n" + user text. The
+// already assembled: "> " + quoted preview + "\n" + user text. The
 // frontend just renders that as a normal multi-line bubble. This checks
-// the LOCAL (右对齐, 自己这端) rendering of ">hi\nok": row0 = ">hi",
-// row1 = "ok", sharing the max-sub-line width (3).
+// the LOCAL (右对齐, 自己这端) rendering of "> hi\nok": row0 = "> hi",
+// row1 = "ok", sharing the max-sub-line width (4).
 static void test_quote_bubble_render_local() {
     printf("== test_quote_bubble_render_local\n");
     reset();
     bring_up();
-    uint8_t msg[] = {'>','h','i', 0x0A, 'o','k'};   // ">hi\nok"
+    uint8_t msg[] = {'>',' ','h','i', 0x0A, 'o','k'};   // "> hi\nok"
     RenderCmd c;
     c.cmd = RENDER_APPEND_LOCAL_PENDING; c.msg_id = 30;
     c.side = MSG_LOCAL; c.status = MSG_PENDING;
     c.payload = msg; c.payload_n = sizeof(msg); c.len = (uint16_t)sizeof(msg);
     send_cmd(c);
 
-    // max sub-len = 3 ("0x3e h i"). Local right-aligned: left = 97-3-1 = 93.
+    // max sub-len = 4 ("> hi"). Local right-aligned: left = 97-4-1 = 92.
     int row0 = HIST_ROW_START, row1 = HIST_ROW_START + 1;
-    CHECK_EQ(read_cell(row0, 93), (uint8_t)SPRITE_BL_TOP, "q-local row0 BL_TOP");
-    CHECK_EQ(read_cell(row0, 94), (uint8_t)'>',           "q-local row0 '>'");
+    CHECK_EQ(read_cell(row0, 92), (uint8_t)SPRITE_BL_TOP, "q-local row0 BL_TOP");
+    CHECK_EQ(read_cell(row0, 93), (uint8_t)'>',           "q-local row0 '>'");
+    CHECK_EQ(read_cell(row0, 94), (uint8_t)' ',           "q-local row0 space");
     CHECK_EQ(read_cell(row0, 95), (uint8_t)'h',           "q-local row0 'h'");
     CHECK_EQ(read_cell(row0, 96), (uint8_t)'i',           "q-local row0 'i'");
     CHECK_EQ(read_cell(row0, 97), (uint8_t)SPRITE_BR_TOP, "q-local row0 BR_TOP");
 
-    CHECK_EQ(read_cell(row1, 93), (uint8_t)SPRITE_BL_BOT, "q-local row1 BL_BOT");
-    CHECK_EQ(read_cell(row1, 94), (uint8_t)'o',           "q-local row1 'o'");
-    CHECK_EQ(read_cell(row1, 95), (uint8_t)'k',           "q-local row1 'k'");
+    CHECK_EQ(read_cell(row1, 92), (uint8_t)SPRITE_BL_BOT, "q-local row1 BL_BOT");
+    CHECK_EQ(read_cell(row1, 93), (uint8_t)'o',           "q-local row1 'o'");
+    CHECK_EQ(read_cell(row1, 94), (uint8_t)'k',           "q-local row1 'k'");
+    CHECK_EQ(read_cell(row1, 95), ' ',                    "q-local row1 pad");
     CHECK_EQ(read_cell(row1, 96), ' ',                    "q-local row1 pad");
     CHECK_EQ(read_cell(row1, 97), (uint8_t)SPRITE_BR_BOT, "q-local row1 BR_BOT");
 }
@@ -1420,51 +1422,54 @@ static void test_quote_bubble_render_remote() {
     printf("== test_quote_bubble_render_remote\n");
     reset();
     bring_up();
-    uint8_t msg[] = {'>','h','i', 0x0A, 'o','k'};   // ">hi\nok"
+    uint8_t msg[] = {'>',' ','h','i', 0x0A, 'o','k'};   // "> hi\nok"
     RenderCmd c;
     c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 31;
     c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
     c.payload = msg; c.payload_n = sizeof(msg); c.len = (uint16_t)sizeof(msg);
     send_cmd(c);
 
-    // max sub-len = 3. Remote left-aligned: left = 2, right = 2+1+3 = 6.
+    // max sub-len = 4. Remote left-aligned: left = 2, right = 2+1+4 = 7.
     int row0 = HIST_ROW_START, row1 = HIST_ROW_START + 1;
     CHECK_EQ(read_cell(row0, 2), (uint8_t)SPRITE_BL_TOP, "q-remote row0 BL_TOP");
     CHECK_EQ(read_cell(row0, 3), (uint8_t)'>',           "q-remote row0 '>'");
-    CHECK_EQ(read_cell(row0, 4), (uint8_t)'h',           "q-remote row0 'h'");
-    CHECK_EQ(read_cell(row0, 5), (uint8_t)'i',           "q-remote row0 'i'");
-    CHECK_EQ(read_cell(row0, 6), (uint8_t)SPRITE_BR_TOP, "q-remote row0 BR_TOP");
+    CHECK_EQ(read_cell(row0, 4), (uint8_t)' ',           "q-remote row0 space");
+    CHECK_EQ(read_cell(row0, 5), (uint8_t)'h',           "q-remote row0 'h'");
+    CHECK_EQ(read_cell(row0, 6), (uint8_t)'i',           "q-remote row0 'i'");
+    CHECK_EQ(read_cell(row0, 7), (uint8_t)SPRITE_BR_TOP, "q-remote row0 BR_TOP");
 
     CHECK_EQ(read_cell(row1, 2), (uint8_t)SPRITE_BL_BOT, "q-remote row1 BL_BOT");
     CHECK_EQ(read_cell(row1, 3), (uint8_t)'o',           "q-remote row1 'o'");
     CHECK_EQ(read_cell(row1, 4), (uint8_t)'k',           "q-remote row1 'k'");
     CHECK_EQ(read_cell(row1, 5), ' ',                    "q-remote row1 pad");
-    CHECK_EQ(read_cell(row1, 6), (uint8_t)SPRITE_BR_BOT, "q-remote row1 BR_BOT");
+    CHECK_EQ(read_cell(row1, 6), ' ',                    "q-remote row1 pad");
+    CHECK_EQ(read_cell(row1, 7), (uint8_t)SPRITE_BR_BOT, "q-remote row1 BR_BOT");
 }
 
 // #2: a small-emoji glyph embedded in the quoted preview renders as its
 // glyph code (0xE0 for \happy), drawn normally like any character. Payload
-// ">hi<glyph>\nok" -- the backend copies small emojis verbatim.
+// "> hi<glyph>\nok" -- the backend copies small emojis verbatim.
 static void test_quote_bubble_small_emoji_render() {
     printf("== test_quote_bubble_small_emoji_render\n");
     reset();
     bring_up();
     const uint8_t HAPPY = 0xE0;
-    uint8_t msg[] = {'>','h','i', HAPPY, 0x0A, 'o','k'};   // ">hi<glyph>\nok"
+    uint8_t msg[] = {'>',' ','h','i', HAPPY, 0x0A, 'o','k'};   // "> hi<glyph>\nok"
     RenderCmd c;
     c.cmd = RENDER_APPEND_REMOTE; c.msg_id = 32;
     c.side = MSG_REMOTE; c.status = MSG_SUCCESS;
     c.payload = msg; c.payload_n = sizeof(msg); c.len = (uint16_t)sizeof(msg);
     send_cmd(c);
 
-    // max sub-len = 4 (">hi<glyph>"). Remote: left = 2, right = 2+1+4 = 7.
+    // max sub-len = 5 ("> hi<glyph>"). Remote: left = 2, right = 2+1+5 = 8.
     int row0 = HIST_ROW_START, row1 = HIST_ROW_START + 1;
     CHECK_EQ(read_cell(row0, 2), (uint8_t)SPRITE_BL_TOP, "q-emoji row0 BL_TOP");
     CHECK_EQ(read_cell(row0, 3), (uint8_t)'>',           "q-emoji row0 '>'");
-    CHECK_EQ(read_cell(row0, 4), (uint8_t)'h',           "q-emoji row0 'h'");
-    CHECK_EQ(read_cell(row0, 5), (uint8_t)'i',           "q-emoji row0 'i'");
-    CHECK_EQ(read_cell(row0, 6), HAPPY,                  "q-emoji row0 small-emoji glyph");
-    CHECK_EQ(read_cell(row0, 7), (uint8_t)SPRITE_BR_TOP, "q-emoji row0 BR_TOP");
+    CHECK_EQ(read_cell(row0, 4), (uint8_t)' ',           "q-emoji row0 space");
+    CHECK_EQ(read_cell(row0, 5), (uint8_t)'h',           "q-emoji row0 'h'");
+    CHECK_EQ(read_cell(row0, 6), (uint8_t)'i',           "q-emoji row0 'i'");
+    CHECK_EQ(read_cell(row0, 7), HAPPY,                  "q-emoji row0 small-emoji glyph");
+    CHECK_EQ(read_cell(row0, 8), (uint8_t)SPRITE_BR_TOP, "q-emoji row0 BR_TOP");
 
     CHECK_EQ(read_cell(row1, 3), (uint8_t)'o',           "q-emoji row1 'o'");
     CHECK_EQ(read_cell(row1, 4), (uint8_t)'k',           "q-emoji row1 'k'");

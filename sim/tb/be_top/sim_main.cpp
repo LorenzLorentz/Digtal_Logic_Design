@@ -2278,22 +2278,22 @@ static void test_local_send_after_remote_quote_uses_local_payload() {
     inject_rx(/*seq=*/0, (uint16_t)quote_bytes.size(), quote_bytes);
 
     // Step 3: drain the remote-quote render.
-    // S_BUILD_QUOTE_DISP assembles ">hello\nhey" (10 bytes), then
+    // S_BUILD_QUOTE_DISP assembles "> hello\nhey" (11 bytes), then
     // S_RX_RENDER fires with RENDER_APPEND_REMOTE.
     RenderEvent r_remote;
     CHECK_EQ(wait_render(r_remote, MAX_LINE_LEN + 30), true,
              "remote quote render fires");
     CHECK_EQ(r_remote.cmd, RENDER_APPEND_REMOTE, "remote quote cmd");
-    CHECK_EQ(r_remote.len, 10, "quote display len = 10");
+    CHECK_EQ(r_remote.len, 11, "quote display len = 11");
     CHECK_EQ(payload_get_byte(r_remote.payload, 0), (uint8_t)'>',
              "quote display[0] = '>'");
-    CHECK_EQ(payload_get_byte(r_remote.payload, 6), (uint8_t)'\n',
-             "quote display[6] = newline sep");
+    CHECK_EQ(payload_get_byte(r_remote.payload, 7), (uint8_t)'\n',
+             "quote display[7] = newline sep");
 
     // Step 4: send a plain local message "ok".
     // Before the disp_len_q fix, S_ENTER_RENDER_LOCAL would see the
-    // stale disp_len_q (10) left over from the remote quote and reuse
-    // the old display payload ">hello\nhey" instead of "ok".
+    // stale disp_len_q (11) left over from the remote quote and reuse
+    // the old display payload "> hello\nhey" instead of "ok".
     // After the fix, disp_len_q is cleared on exit from S_RX_RENDER.
     send_key(KEY_CHAR, 'o'); drain_render();
     send_key(KEY_CHAR, 'k'); drain_render();
@@ -2383,7 +2383,7 @@ static void check_disp(const RenderEvent& r, const char* exp, int n,
         CHECK_EQ(payload_get_byte(r.payload, i), (uint8_t)exp[i], tag);
 }
 
-// Plain quote: ">" + quoted + "\n" + user. Also verifies the wire side
+// Plain quote: "> " + quoted + "\n" + user. Also verifies the wire side
 // byte is inverted (the quoted msg is LOCAL on us -> REMOTE for the peer).
 static void test_local_quote_plain_preview() {
     printf("== test_local_quote_plain_preview\n");
@@ -2399,7 +2399,7 @@ static void test_local_quote_plain_preview() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "local quote render fires");
-    check_disp(r, ">hi\nok", 6, "plain quote disp = >hi\\nok");
+    check_disp(r, "> hi\nok", 7, "plain quote disp = > hi\\nok");
 
     TxEvent tx;
     CHECK_EQ(wait_tx(tx, 20), true, "quote tx fires");
@@ -2410,8 +2410,8 @@ static void test_local_quote_plain_preview() {
     CHECK_EQ(payload_get_byte(tx.payload, 3), (uint8_t)'o', "wire[3] = user 'o'");
 }
 
-// #5: a multi-line quoted message keeps its newlines; only the first
-// preview line carries the ">".
+// #5: a multi-line quoted message keeps its newlines; continuation
+// preview lines are indented under the quote marker.
 static void test_local_quote_multiline_preview() {
     printf("== test_local_quote_multiline_preview\n");
     reset();
@@ -2431,8 +2431,8 @@ static void test_local_quote_multiline_preview() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "multiline quote render fires");
-    // ">" + "a\nb" + "\n" + "x"
-    check_disp(r, ">a\nb\nx", 6, "multiline quote keeps newlines");
+    // "> " + "a\n  b" + "\n" + "x"
+    check_disp(r, "> a\n  b\nx", 9, "multiline quote indents continuation");
 }
 
 // #2(1): quoting a big-emoji message renders its "\Name" token, not the
@@ -2453,7 +2453,7 @@ static void test_local_quote_big_emoji_preview() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "big-emoji quote render fires");
-    // ">" + " \Hissing" + "\n" + "lol"
+    // "> " + "\Hissing" + "\n" + "lol"
     check_disp(r, "> \\Hissing\nlol", 14, "big-emoji quote -> token text");
 }
 
@@ -2482,8 +2482,9 @@ static void test_local_quote_nested_preview() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "nested quote render fires");
-    // ">" + " > [quoted]\n" + "a" + "\n" + "b"
-    check_disp(r, "> > [quoted]\na\nb", 16, "nested quote placeholder + body");
+    // "> " + "> [quoted]\n" + "  a" + "\n" + "b"
+    check_disp(r, "> > [quoted]\n  a\nb", 18,
+               "nested quote placeholder + indented body");
 }
 
 // #2(2.2): with a quote active, a typed "\Hissing" stays LITERAL text
@@ -2576,7 +2577,7 @@ static void test_local_quote_remote_message() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "remote-quote render fires");
-    check_disp(r, ">hey\nok", 7, "quote remote -> >hey\\nok");
+    check_disp(r, "> hey\nok", 8, "quote remote -> > hey\\nok");
 
     TxEvent tx;
     CHECK_EQ(wait_tx(tx, 20), true, "remote-quote tx fires");
@@ -2589,7 +2590,7 @@ static void test_local_quote_remote_message() {
 
 // 对方那边: the peer quoted OUR message and sent the quote frame. We
 // resolve the quoted msg_id against our LOCAL store and assemble the full
-// ">hello\nhey" preview as a remote bubble. Checks every preview byte.
+// "> hello\nhey" preview as a remote bubble. Checks every preview byte.
 static void test_rx_quote_display_full_preview() {
     printf("== test_rx_quote_display_full_preview\n");
     reset();
@@ -2607,9 +2608,9 @@ static void test_rx_quote_display_full_preview() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + 30), true, "rx-quote render fires");
     CHECK_EQ(r.cmd, RENDER_APPEND_REMOTE, "rx-quote cmd = APPEND_REMOTE");
-    const char* exp = ">hello\nhey";
-    CHECK_EQ(r.len, 10, "rx-quote disp len = 10");
-    for (int i = 0; i < 10; i++) {
+    const char* exp = "> hello\nhey";
+    CHECK_EQ(r.len, 11, "rx-quote disp len = 11");
+    for (int i = 0; i < 11; i++) {
         char lbl[40]; snprintf(lbl, sizeof(lbl), "rx-quote disp[%d]", i);
         CHECK_EQ(payload_get_byte(r.payload, i), (uint8_t)exp[i], lbl);
     }
@@ -2639,11 +2640,11 @@ static void test_local_quote_small_emoji_preview() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "small-emoji quote render fires");
-    // ">" + "hi" + glyph + "\n" + "ok"
-    const uint8_t exp[] = {'>', 'h', 'i', SMALL_EMOJI_HAPPY, '\n', 'o', 'k'};
+    // "> " + "hi" + glyph + "\n" + "ok"
+    const uint8_t exp[] = {'>', ' ', 'h', 'i', SMALL_EMOJI_HAPPY, '\n', 'o', 'k'};
     CHECK_EQ(r.cmd, RENDER_APPEND_LOCAL_PENDING, "small-emoji quote cmd");
-    CHECK_EQ(r.len, 7, "small-emoji quote disp len = 7");
-    for (int i = 0; i < 7; i++) {
+    CHECK_EQ(r.len, 8, "small-emoji quote disp len = 8");
+    for (int i = 0; i < 8; i++) {
         char lbl[40]; snprintf(lbl, sizeof(lbl), "small-emoji quote disp[%d]", i);
         CHECK_EQ(payload_get_byte(r.payload, i), exp[i], lbl);
     }
@@ -2660,7 +2661,7 @@ static void recall_exposed_owner() {
 }
 
 // #6/#7 (already-recalled case): quoting a message whose source was
-// recalled shows ">[recalled]" instead of the stale original body.
+// recalled shows "> [recalled]" instead of the stale original body.
 static void test_local_quote_recalled_source_shows_recalled() {
     printf("== test_local_quote_recalled_source_shows_recalled\n");
     reset();
@@ -2679,7 +2680,7 @@ static void test_local_quote_recalled_source_shows_recalled() {
     RenderEvent r;
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "recalled-source quote render fires");
-    check_disp(r, ">[recalled]\nok", 14, "quote of recalled -> >[recalled]");
+    check_disp(r, "> [recalled]\nok", 15, "quote of recalled -> > [recalled]");
 }
 
 // Multi-line variant of #7: the recalled placeholder is single-line even
@@ -2706,7 +2707,7 @@ static void test_local_quote_recalled_multiline_source() {
     CHECK_EQ(wait_render(r, MAX_LINE_LEN + MAX_MSG_LEN + 40), true,
              "recalled multiline quote render fires");
     // Single-line "[recalled]" preview regardless of original line count.
-    check_disp(r, ">[recalled]\nx", 13, "recalled multiline -> >[recalled]");
+    check_disp(r, "> [recalled]\nx", 14, "recalled multiline -> > [recalled]");
 }
 
 // #3 backend half: a big-emoji message can be recalled like any local

@@ -2,7 +2,7 @@
 
 **方案**：保持 BE 负责 quote 组装；新增「引用关系发现 + 重组装 + FE 就地重写」三段流程，
 使得 quote 一条消息后、若源消息被 recall，该 quote 气泡的 preview 自动从
-`>原文…` 变为 `>[recalled]`（单行）。
+`> 原文…` 变为 `> [recalled]`（单行）。
 
 对应需求：之前讨论的 **Q1**（quote 一条消息，源消息「后来」被 recall）。
 
@@ -12,7 +12,7 @@
 
 **目标**
 - 源消息被 recall（本地 recall 或收到对端 `FRAME_RECALL`）后，所有引用它的 quote 气泡
-  的 preview 行自动变为 `>[recalled]`。
+  的 preview 行自动变为 `> [recalled]`。
 - 复用现有 BE 组装逻辑（`S_BUILD_QUOTE_DISP`）与已落地的 Q2 fix
   （`QB_DECIDE` 在源 `MSG_RECALLED` 时输出 `[recalled]`，见 `be_top.sv` 的
   `qb_recalled_byte` / `qb_recalled_q`）。
@@ -130,7 +130,7 @@ wire payload `[1]` 存的是**接收方视角**的 side（发送前已 invert，
 - [ ] 以引用者的 wire payload 作为组装输入（载入 `pending_payload_q` 等价物），
       设置 `quoted_side_q/quoted_msg_id_q` = 引用者的 ref。
 - [ ] 跑 QB：源此时已 `MSG_RECALLED`，`QB_DECIDE` 自然走 `qb_recalled_byte` →
-      产出 `disp_payload_q = ">[recalled]\n" + user`。
+      产出 `disp_payload_q = "> [recalled]\n" + user`。
 - [ ] 注意 `disp_len_q` 在复用后清理（参考已有
       `test_local_send_after_remote_quote_uses_local_payload` 暴露过的 stale 问题）。
 
@@ -154,7 +154,7 @@ wire payload `[1]` 存的是**接收方视角**的 side（发送前已 invert，
 ### 阶段 5 — 测试
 **be_top（`sim/tb/be_top/sim_main.cpp`）**
 - [ ] 本地 recall 源 → 引用它的本地 quote 收到 `RENDER_UPDATE_PAYLOAD`，
-      payload == `>[recalled]\nuser`。
+      payload == `> [recalled]\nuser`。
 - [ ] 多个引用者：两条 quote 引用同一源，recall 后都被刷新。
 - [ ] 非引用者不受影响（不应收到 `UPDATE_PAYLOAD`）。
 - [ ] RX recall（收到 `FRAME_RECALL`）→ 引用该远端消息的 quote 被刷新。
@@ -162,8 +162,8 @@ wire payload `[1]` 存的是**接收方视角**的 side（发送前已 invert，
 - [ ] 引用者本身已 recalled → 跳过（不重复刷新 / 不崩 FSM）。
 
 **fe_top（`sim/tb/fe_top/sim_main.cpp`）**
-- [ ] `RENDER_UPDATE_PAYLOAD` 就地把某气泡从多行 `>原文\nuser` 重写为
-      `>[recalled]\nuser`，并验证原多余行被清空（行高保守策略）。
+- [ ] `RENDER_UPDATE_PAYLOAD` 就地把某气泡从多行 `> 原文\nuser` 重写为
+      `> [recalled]\nuser`，并验证原多余行被清空（行高保守策略）。
 - [ ] LOCAL（右对齐）与 REMOTE（左对齐）各一条。
 
 **chat_top_pair（可选，端到端）**
